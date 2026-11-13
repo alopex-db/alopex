@@ -17,9 +17,11 @@ import time
 if __package__:
     from .diagnostic_commit_observer import observe as diagnostic_observe
     from .schedstat_observer import observe as scheduler_observe
+    from . import sync_capture
 else:
     from diagnostic_commit_observer import observe as diagnostic_observe
     from schedstat_observer import observe as scheduler_observe
+    import sync_capture
 
 FROZEN = "490f002dfb2c7f509a2444891808d9704fe6b001"
 
@@ -73,6 +75,12 @@ def main():
     for name, expected in config["sources"].items():
         require(sha(root / name) == expected, f"frozen source differs: {name}")
     require(config["phase"] in ("write", "verify"), "phase differs")
+    mode = config.get("diagnostic_mode", "baseline")
+    require(mode in ("baseline", "sync") and
+            (mode != "sync" or (config["surface"], config["value_bytes"]) == ("sql", 2048)),
+            "diagnostic mode differs")
+    if mode == "baseline":
+        require("LD_PRELOAD" not in os.environ, "baseline preload differs")
     sys.path[:0] = [str(root / "scripts/ops"), str(root / "scripts/compatibility"),
                     str(root / "scripts/ops/dataframe_harness")]
     import public_api_cost as workload
@@ -92,6 +100,11 @@ def main():
     require(output.is_dir() and not output.is_symlink() and
             output.stat().st_mode & 0o077 == 0, "private output differs")
     (output / "identity.json").write_text(json.dumps(identity, allow_nan=False) + "\n")
+    shim = None
+    if mode == "sync" and config["phase"] == "write":
+        shim = sync_capture.open_shim(Path(config["sync_interposer"]),
+                                      config["sync_interposer_sha256"], sha)
+        sync_capture.controlled_check(shim, output)
     native_digest = sha(Path(_alopex.__file__))
     (output / "memory-before-workload.json").write_text(json.dumps(dict(
         before_identity=boundary_before_identity,
@@ -100,12 +113,34 @@ def main():
         scope="after import and product identity; before diagnostic workload")) + "\n")
 
     original_measure = workload.measure
+    if mode == "baseline" and config["phase"] == "write":
+        # A no-op original timer measures only observer reads and serialization.
+        # This calibration is outside the real commit and never an acceptance sample.
+        started = time.monotonic_ns()
+        _, calibration = diagnostic_observe(lambda: None,
+            lambda action: (action(), 0), baseline_observe=baseline_observe,
+            scheduler_observe=scheduler_observe)
+        observation_ns = time.monotonic_ns() - started
+        started = time.monotonic_ns()
+        payload = json.dumps(calibration, allow_nan=False) + "\n"
+        serialization_ns = time.monotonic_ns() - started
+        require(len(payload) <= 65_536 and observation_ns <= 250_000_000 and
+                serialization_ns <= 250_000_000,
+                "outside-timer calibration exceeded bound")
+        (output / "calibration.private.json").write_text(json.dumps(dict(
+            schema="alopex.682-outside-timer-calibration/v1",
+            observer_noop_ns=observation_ns, serialization_ns=serialization_ns,
+            observer=calibration, acceptance_sample=False), allow_nan=False) + "\n")
     def measure(action):
         if getattr(action, "__name__", None) != "commit":
             return original_measure(action)
+        sync_before = sync_capture.snapshot(shim) if shim else None
         result, observation = diagnostic_observe(
             action, original_measure, baseline_observe=baseline_observe,
             scheduler_observe=scheduler_observe)
+        if shim:
+            observation["intercepted_sync"] = sync_capture.commit_calls(
+                sync_before, sync_capture.snapshot(shim), config["subject"])
         observation["acceptance_sample"] = False
         (output / "commit-observation.json").write_text(
             json.dumps(observation, allow_nan=False) + "\n")

@@ -17,6 +17,15 @@ def digest(path):
 
 
 class DiagnosticRunnerTests(unittest.TestCase):
+    def test_inherited_preload_is_removed_before_compiler_and_baseline(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.dict(runner.os.environ, {'LD_PRELOAD': '/untrusted/shim.so',
+                                                 'GITHUB_TOKEN': 'secret'}):
+            env = runner.diagnostic_environment(Path(directory))
+        self.assertNotIn('LD_PRELOAD', env)
+        self.assertNotIn('GITHUB_TOKEN', env)
+        self.assertEqual(env['TMPDIR'], str(Path(directory) / 'tmp'))
+
     def test_diagnostic_budget_retains_qualified_sudo_measurement(self):
         storage = dict(roots=['/qualified/work', '/qualified/docker'],
                        readonly_sudo_du_root='/qualified/docker',
@@ -92,7 +101,7 @@ class DiagnosticRunnerTests(unittest.TestCase):
         return types.SimpleNamespace(frozen_checkout=frozen, exact_config=exact,
                                      diagnostic_sources=sources,
                                      diagnostic_sources_sha256=digest(sources),
-                                     surface='kv', value_bytes=16, private_root=work,
+                                     surface='sql', value_bytes=2048, private_root=work,
                                      export_root=export, qualification_private=private,
                                      qualification_public=public,
                                      qualification_checkout=Path(runner.__file__).resolve().parents[3])
@@ -113,6 +122,13 @@ class DiagnosticRunnerTests(unittest.TestCase):
             config, storage = self.verify(args)
             self.assertEqual(config['cell_seconds'], 30)
             self.assertEqual(storage['roots'], [directory])
+
+    def test_only_sql2048_diagnostic_shape_is_admitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.fixture(Path(directory))
+            args.value_bytes = 16
+            with self.assertRaisesRegex(RuntimeError, 'shape differs'):
+                self.verify(args)
 
     def test_changed_frozen_source_fails(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -221,7 +237,10 @@ class DiagnosticRunnerTests(unittest.TestCase):
                                schedstat=dict(schema='alopex.682-schedstat-diagnostic/v1',
                                               acceptance_sample=False, original_timer_ns=17))
             (output / 'commit-observation.json').write_text(json.dumps(observation))
-            cell = {'subject_manifest_sha256': 'fixed'}
+            (output / 'calibration.private.json').write_text(json.dumps(dict(
+                schema='alopex.682-outside-timer-calibration/v1', acceptance_sample=False,
+                observer_noop_ns=100, serialization_ns=20)))
+            cell = {'subject_manifest_sha256': 'fixed', 'subject': 'before'}
             helper = types.SimpleNamespace(verify_record=lambda *args: None)
             runner.validate_cell({'commit_ns': 17}, cell, 'write', {'native_sha256': 'fixed'},
                                  helper, output)
@@ -230,6 +249,30 @@ class DiagnosticRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'diagnostic observation differs'):
                 runner.validate_cell({'commit_ns': 17}, cell, 'write',
                                      {'native_sha256': 'fixed'}, helper, output)
+
+    def test_sync_observation_requires_partial_coverage_label(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / 'worker.log').write_text('{}')
+            (output / 'identity.json').write_text('{"manifest_sha256":"fixed"}')
+            observation = dict(acceptance_sample=False, timer_nanoseconds=17,
+                               schedstat=dict(schema='alopex.682-schedstat-diagnostic/v1',
+                                              acceptance_sample=False, original_timer_ns=17),
+                               intercepted_sync=dict(schema='alopex.682-intercepted-sync/v1',
+                                                     coverage='unproven', acceptance_sample=False,
+                                                     calls=[dict(operation=operation, result=0,
+                                                                 duration_ns=10)
+                                                            for operation in (1, 1, 2)]))
+            (output / 'commit-observation.json').write_text(json.dumps(observation))
+            cell = {'subject_manifest_sha256': 'fixed', 'subject': 'candidate'}
+            helper = types.SimpleNamespace(verify_record=lambda *args: None)
+            runner.validate_cell({'commit_ns': 17}, cell, 'write',
+                                 {'native_sha256': 'fixed'}, helper, output, 'sync')
+            observation['intercepted_sync']['coverage'] = 'complete'
+            (output / 'commit-observation.json').write_text(json.dumps(observation))
+            with self.assertRaisesRegex(RuntimeError, 'intercepted sync observation differs'):
+                runner.validate_cell({'commit_ns': 17}, cell, 'write',
+                                     {'native_sha256': 'fixed'}, helper, output, 'sync')
 
     def test_evidence_bound_prevents_encryption(self):
         with tempfile.TemporaryDirectory() as directory:

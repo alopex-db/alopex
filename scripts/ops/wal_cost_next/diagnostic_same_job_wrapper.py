@@ -19,7 +19,7 @@ else:
     import same_job_wrapper as shared
 
 EXACT_CONFIG_SHA256 = '24c31ed86f5643edfef6789b345e12d610e71d05c1c3a905d84e17c3771c055b'
-DIAGNOSTIC_LOCK_SHA256 = '888baf90c3785173d849d879d3aaf107e3e5273d878ffea9a1819e92d8c5a8c0'
+DIAGNOSTIC_LOCK_SHA256 = '962785a72e6aba89fd2b261d46123d805f6dae1288393a2accf5c4ef8a134616'
 DIAGNOSTIC_PEAK = 1_000_000_000
 COLLECT_RESERVE = 1_000_000_000
 DIAGNOSTIC_DEADLINE_SECONDS = 1_800
@@ -142,6 +142,8 @@ def diagnostic_command(args, private, qualification_public, diagnostic_private, 
 
 
 def run(args):
+    shared.require((args.surface, args.value_bytes) == ('sql', 2048),
+                   'diagnostic shape differs')
     shared.require(os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and
                    os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted' and
                    os.environ.get('RUNNER_KIND') == 'github-hosted',

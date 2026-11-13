@@ -18,8 +18,10 @@ import zipfile
 
 if __package__:
     from . import same_job_wrapper
+    from . import sync_capture
 else:
     import same_job_wrapper
+    import sync_capture
 
 FROZEN = '490f002dfb2c7f509a2444891808d9704fe6b001'
 EXACT_CONFIG_SHA256 = '24c31ed86f5643edfef6789b345e12d610e71d05c1c3a905d84e17c3771c055b'
@@ -28,7 +30,8 @@ MAX_BYTES = 50_000_000_000
 PEAK_ADDITIONAL_BYTES = 1_000_000_000
 EVIDENCE_LIMIT = 16_000_000
 DIAGNOSTIC_FILES = ('diagnostic_runner.py', 'diagnostic_worker.py',
-                    'diagnostic_commit_observer.py', 'schedstat_observer.py')
+                    'diagnostic_commit_observer.py', 'schedstat_observer.py',
+                    'sync_capture.py', 'sync_interposer.c')
 FAILURE_RECEIPT = 'diagnostic-failure.private.json'
 
 
@@ -137,8 +140,7 @@ def verify_inputs(args):
         source = Path(__file__).parent / name
         require(source.is_file() and not source.is_symlink() and sha(source) == digest,
                 'diagnostic source differs')
-    require((args.surface, args.value_bytes) in (('kv', 16), ('kv', 2048),
-            ('sql', 16), ('sql', 2048)), 'shape differs')
+    require((args.surface, args.value_bytes) == ('sql', 2048), 'shape differs')
     require(args.private_root.is_dir() and not args.private_root.is_symlink() and
             args.private_root.stat().st_mode & 0o077 == 0, 'private root differs')
     require(args.export_root.is_dir() and not args.export_root.is_symlink() and
@@ -223,7 +225,7 @@ def verify_product(product, producer, helper):
             'product asset changed')
 
 
-def validate_cell(record, cell, phase, producer, helper, output):
+def validate_cell(record, cell, phase, producer, helper, output, mode='baseline'):
     require(output.joinpath('worker.log').stat().st_size <= 1_000_000, 'worker log exceeded')
     identity = json.loads((output / 'identity.json').read_bytes())
     require(identity['manifest_sha256'] == cell['subject_manifest_sha256'],
@@ -237,6 +239,39 @@ def validate_cell(record, cell, phase, producer, helper, output):
                 observation['timer_nanoseconds'] == record['commit_ns'] ==
                 observation['schedstat']['original_timer_ns'],
                 'diagnostic observation differs')
+        if mode == 'baseline':
+            calibration = json.loads((output / 'calibration.private.json').read_bytes())
+            require(calibration['schema'] == 'alopex.682-outside-timer-calibration/v1' and
+                    calibration['acceptance_sample'] is False and
+                    calibration['observer_noop_ns'] <= 250_000_000 and
+                    calibration['serialization_ns'] <= 250_000_000 and
+                    'intercepted_sync' not in observation,
+                    'outside-timer calibration differs')
+        else:
+            sync = observation['intercepted_sync']
+            require(sync['schema'] == 'alopex.682-intercepted-sync/v1' and
+                    sync['coverage'] == 'unproven' and sync['acceptance_sample'] is False and
+                    len(sync['calls']) == (4 if cell['subject'] == 'before' else 3),
+                    'intercepted sync observation differs')
+            sync_capture.commit_calls([], sync['calls'], cell['subject'])
+
+
+def build_interposer(work, env):
+    source = Path(__file__).parent / 'sync_interposer.c'
+    output = work / 'tmp' / 'sync_interposer.so'
+    compiler = Path('/usr/bin/cc')
+    resolved = compiler.resolve(strict=True)
+    require(resolved.is_relative_to(Path('/usr/bin')) and
+            compiler.lstat().st_uid == 0 and resolved.stat().st_uid == 0 and
+            not (resolved.stat().st_mode & 0o022),
+            'trusted sync interposer compiler unavailable')
+    command = [str(compiler), '-std=c11', '-O2', '-fPIC', '-shared', '-Wall', '-Wextra',
+               '-Werror', '-pthread', str(source), '-ldl', '-o', str(output)]
+    subprocess.run(command, env=dict(env, PATH='/usr/bin:/bin'), capture_output=True,
+                   check=True, timeout=30)
+    require(output.is_file() and not output.is_symlink() and
+            0 < output.stat().st_size < 1_000_000, 'sync interposer build differs')
+    return output, sha(output)
 
 
 def seal_evidence(work, export, certificate, helper):
@@ -268,6 +303,19 @@ def diagnostic_budget_config(storage):
                                    measure=128_000_000, collect=32_000_000))
 
 
+def diagnostic_environment(work):
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PIP_NO_CACHE_DIR='1',
+               TMPDIR=str(work / 'tmp'))
+    for name in ('GH_TOKEN', 'GITHUB_TOKEN', 'WAL_COST_CONFIG', 'PYTHONPATH',
+                 'PYTHONHOME', 'LD_LIBRARY_PATH', 'LD_PRELOAD',
+                 'ALOPEX_PERF_SUBJECT_MANIFEST', 'ALOPEX_PERF_SUBJECT_SHA256'):
+        env.pop(name, None)
+    for name in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+                 'POLARS_MAX_THREADS', 'RAYON_NUM_THREADS', 'TOKIO_WORKER_THREADS'):
+        env[name] = '1'
+    return env
+
+
 def run(args, state=None):
     if state is None:
         state = dict(phase='preflight', failure_phase=None,
@@ -293,15 +341,7 @@ def run(args, state=None):
     work.mkdir(mode=0o700)
     for name in ('imports', 'venvs', 'identities', 'cells', 'fixtures', 'tmp'):
         (work / name).mkdir(mode=0o700)
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PIP_NO_CACHE_DIR='1',
-               TMPDIR=str(work / 'tmp'))
-    for name in ('GH_TOKEN', 'GITHUB_TOKEN', 'WAL_COST_CONFIG', 'PYTHONPATH',
-                 'PYTHONHOME', 'LD_LIBRARY_PATH', 'ALOPEX_PERF_SUBJECT_MANIFEST',
-                 'ALOPEX_PERF_SUBJECT_SHA256'):
-        env.pop(name, None)
-    for name in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
-                 'POLARS_MAX_THREADS', 'RAYON_NUM_THREADS', 'TOKIO_WORKER_THREADS'):
-        env[name] = '1'
+    env = diagnostic_environment(work)
     complete = 0
     status = 'inconclusive'
     error_code = None
@@ -330,18 +370,23 @@ def run(args, state=None):
             product['subject'] = path
         state['phase'] = 'measurement'
         budget.before('measure')
-        for name in ('before', 'candidate'):
+        interposer, interposer_sha = build_interposer(work, env)
+        for mode, name in ((mode, name) for mode in ('baseline', 'sync')
+                           for name in ('before', 'candidate')):
             product = products[name]
             manifest = product['subject']
             cell = dict(id=f'{name}-{args.surface}-{args.value_bytes}', round=0,
                         subject=name, surface=args.surface, value_bytes=args.value_bytes)
-            directory = work / 'cells' / name
-            fixture = work / 'fixtures' / name
+            directory = work / 'cells' / mode / name
+            fixture = work / 'fixtures' / mode / name
+            directory.parent.mkdir(exist_ok=True)
+            fixture.parent.mkdir(exist_ok=True)
             directory.mkdir(); fixture.mkdir()
             child_env = dict(env, PYTHONPATH=str(args.frozen_checkout / 'scripts/performance'),
                              ALOPEX_PERF_SUBJECT_MANIFEST=str(manifest),
                              ALOPEX_PERF_SUBJECT_SHA256=helper.sha(manifest),
                              LD_LIBRARY_PATH=str(product['files']['library'].parent))
+            child_env.pop('LD_PRELOAD', None)
             try:
                 for index, phase in enumerate(('write', 'verify', 'verify')):
                     output = directory / str(index)
@@ -349,7 +394,11 @@ def run(args, state=None):
                     parameters = dict(cell, phase=phase, fixture=str(fixture), output=str(output),
                                       affinity=allocation['client'], options=config['options'],
                                       sources=config['sources'],
-                                      subject_manifest_sha256=helper.sha(manifest))
+                                      subject_manifest_sha256=helper.sha(manifest),
+                                      diagnostic_mode=mode)
+                    if mode == 'sync':
+                        parameters.update(sync_interposer=str(interposer),
+                                          sync_interposer_sha256=interposer_sha)
                     path = output / 'configuration.json'
                     helper.atomic_json(path, parameters)
                     command = ['taskset', '--cpu-list', ','.join(map(str, allocation['client'])),
@@ -357,12 +406,16 @@ def run(args, state=None):
                                str(Path(__file__).parent / 'diagnostic_worker.py'),
                                '--configuration', str(path), '--config-sha256', helper.sha(path),
                                '--frozen-checkout', str(args.frozen_checkout)]
-                    helper.run_cell(command, child_env, output, budget, 30, 1_073_741_824)
+                    phase_env = dict(child_env)
+                    if mode == 'sync' and phase == 'write':
+                        phase_env['LD_PRELOAD'] = str(interposer)
+                    helper.run_cell(command, phase_env, output, budget, 30, 1_073_741_824)
                     record = json.loads((output / 'worker.log').read_bytes())
                     validate_cell(record, dict(cell, subject_manifest_sha256=helper.sha(manifest)),
-                                  phase, config['products'][name], helper, output)
+                                  phase, config['products'][name], helper, output, mode)
                     budget.check()
-                complete += 1
+                if mode == 'sync':
+                    complete += 1
             finally:
                 shutil.rmtree(fixture)
                 budget.check()
@@ -389,7 +442,8 @@ def run(args, state=None):
                 dict(schema='alopex.wal-diagnostic/v1', case='WAL_COST_682',
                      outcome=status, error_code=error_code, shape=f'{args.surface}-{args.value_bytes}',
                      complete_subjects=complete, evidence_sha256=evidence_sha,
-                     encrypted_sha256=encrypted_sha, performance_acceptance=False))
+                     encrypted_sha256=encrypted_sha, coverage='unproven',
+                     performance_acceptance=False))
         except BaseException as error:
             if state['failure_phase'] is None:
                 state['failure_phase'] = state['phase']

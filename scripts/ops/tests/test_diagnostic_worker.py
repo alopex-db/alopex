@@ -124,7 +124,7 @@ class DiagnosticWorkerTests(unittest.TestCase):
                 events.append("sched-before")
                 result = timer(action)
                 events.append("sched-after")
-                return result, {"original_timer_ns": 17, "acceptance_sample": False}
+                return result, {"original_timer_ns": result[1], "acceptance_sample": False}
             with mock.patch.object(sys, "argv", argv), mock.patch.object(sys, "platform", "linux"), \
                  mock.patch.object(sys, "path", sys.path.copy()), \
                  mock.patch.object(os, "getuid", return_value=1000), \
@@ -142,12 +142,15 @@ class DiagnosticWorkerTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as caught:
                     diagnostic_worker.main()
             self.assertEqual(caught.exception.code, 0)
-            self.assertEqual(events, ["sched-before", "timer", "commit", "sched-after",
+            self.assertEqual(events, ["sched-before", "sched-after",
+                                      "sched-before", "timer", "commit", "sched-after",
                                       ("hold", 10), ("exit", 0)])
             observation = json.loads((output / "commit-observation.json").read_text())
             self.assertEqual(observation["timer_nanoseconds"], 17)
             self.assertEqual(observation["schedstat"]["original_timer_ns"], 17)
             self.assertFalse(observation["acceptance_sample"])
+            calibration = json.loads((output / "calibration.private.json").read_text())
+            self.assertFalse(calibration["acceptance_sample"])
 
 
 if __name__ == "__main__":

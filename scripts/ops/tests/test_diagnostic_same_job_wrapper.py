@@ -148,7 +148,7 @@ class DiagnosticSameJobWrapperTests(unittest.TestCase):
             lock = root / 'lock.json'; lock.write_text('{}')
             args = types.SimpleNamespace(qualification_checkout=qualification,
                                          frozen_checkout=frozen, config=config,
-                                         diagnostic_sources=lock, surface='kv', value_bytes=16)
+                                         diagnostic_sources=lock, surface='sql', value_bytes=2048)
             with mock.patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'workflow_dispatch',
                                               'RUNNER_ENVIRONMENT': 'github-hosted',
                                               'RUNNER_KIND': 'github-hosted'}), \
