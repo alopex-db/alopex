@@ -14,6 +14,21 @@ from scripts.ops.wal_cost_next import diagnostic_worker
 
 
 class DiagnosticWorkerTests(unittest.TestCase):
+    def test_verify_hold_follows_success_and_skips_failure(self):
+        events = []
+        def failed_child():
+            events.append("failed")
+            raise RuntimeError("verification failed")
+        with mock.patch.object(diagnostic_worker.time, "sleep",
+                               side_effect=lambda seconds: events.append(("hold", seconds))):
+            diagnostic_worker.run_with_verify_hold(
+                "verify", lambda: events.append("verified"))
+            diagnostic_worker.run_with_verify_hold(
+                "write", lambda: events.append("written"))
+            with self.assertRaisesRegex(RuntimeError, "verification failed"):
+                diagnostic_worker.run_with_verify_hold("verify", failed_child)
+        self.assertEqual(events, ["verified", ("hold", 10), "written", "failed"])
+
     def test_writer_exit_hold_requires_successful_observation(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

@@ -44,6 +44,14 @@ def hold_writer_exit(original_exit, output):
     return delayed_exit
 
 
+def run_with_verify_hold(phase, child):
+    child()
+    # The frozen verifier returns after printing its result. Keep that same
+    # process alive for the supervisor's first live RSS sample.
+    if phase == "verify":
+        time.sleep(10)
+
+
 def main():
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--configuration", required=True, type=Path)
@@ -108,8 +116,10 @@ def main():
     if config["phase"] == "write":
         os._exit = hold_writer_exit(original_exit, output)
     try:
-        workload.child(config["phase"], Path(config["fixture"]), config["surface"],
-                       config["value_bytes"], native_digest)
+        run_with_verify_hold(
+            config["phase"],
+            lambda: workload.child(config["phase"], Path(config["fixture"]),
+                                   config["surface"], config["value_bytes"], native_digest))
     finally:
         os._exit = original_exit
 
