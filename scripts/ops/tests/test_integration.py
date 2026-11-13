@@ -118,6 +118,14 @@ class IntegratedMeasureTests(unittest.TestCase):
             from diagnostic import pair_order
             self.assertEqual(measured_order[-42:],
                              [mode for sample in range(21) for mode in pair_order(0, sample)])
+            for sample in range(21):
+                for position, mode in enumerate(pair_order(0, sample)):
+                    ordinal = 2 * sample + position
+                    self.assertEqual(raw[mode][sample]["pair_ordinal"], ordinal)
+                    measured = [row for row in clients[mode] if row["phase"] == "measured"]
+                    self.assertEqual(measured[sample]["pair_ordinal"], ordinal)
+                    self.assertEqual(measured[sample]["outer_ns"],
+                                     round(raw[mode][sample]["seconds"] * 1_000_000_000))
 
     def test_on_and_off_preserve_raw_boundary(self):
         for mode in ("on", "off"):

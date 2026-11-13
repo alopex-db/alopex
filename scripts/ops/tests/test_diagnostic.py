@@ -25,6 +25,8 @@ def fixture():
                 cells.append({"case": case, "trial": trial, "mode": mode,
                               "result_sha256": ORACLE[case], "raw_seconds": [.001 + trial * .00001] * 21,
                               "raw_sha256": "a" * 64,
+                              "raw_ordinals": [2 * i + pair_order(trial, i).index(mode)
+                                               for i in range(21)],
                               "pair_server": {"pid": trial + 100, "start_ticks": trial + 1000},
                               "fixture_sha256": ORACLE[case],
                               "pair_order": [list(pair_order(trial, i)) for i in range(21)]})
@@ -32,13 +34,16 @@ def fixture():
                     for sample in range(count):
                         base = {"cell_id": f"{case}-{trial}-{mode}", "case": case,
                                 "trial": trial, "mode": mode, "phase": phase,
-                                "sample": sample, "result_sha256": ORACLE[case], "outer_ns": 200}
+                                "sample": sample, "result_sha256": ORACLE[case],
+                                "outer_ns": round((.001 + trial * .00001) * 1_000_000_000)}
+                        if phase == "measured":
+                            base["pair_ordinal"] = 2 * sample + pair_order(trial, sample).index(mode)
                         if mode == "on":
                             trace_id = str(uuid.uuid4())
                             base.update(trace_id=trace_id, bind_ns=10, transport_ns=100,
                                         parse_ns=10, rows_ns=10, residual_ns=10, total_ns=140,
                                         response_chars=20, result_rows=1 if case == "aggregate" else 16,
-                                        wrapper_ns=60)
+                                        wrapper_ns=base["outer_ns"] - 140)
                             for stage in STAGES:
                                 servers.append({"trace_id": trace_id, "stage": stage,
                                                 "duration_ns": 60 if stage == "execute_and_map" else 10})
@@ -71,6 +76,11 @@ class DiagnosticTests(unittest.TestCase):
         cells, clients, servers = fixture()
         for cell in cells:
             cell["raw_seconds"] = [0.0011 if cell["mode"] == "on" else 0.001] * 21
+        for row in clients:
+            if row["phase"] == "measured":
+                row["outer_ns"] = 1_100_000 if row["mode"] == "on" else 1_000_000
+                if row["mode"] == "on":
+                    row["wrapper_ns"] = row["outer_ns"] - row["total_ns"]
         report = audit(cells, clients, servers, expected_oracle=ORACLE)
         for case in ORACLE:
             self.assertAlmostEqual(report["paired"][case]["bound_ms"], 0.05)
@@ -99,6 +109,20 @@ class DiagnosticTests(unittest.TestCase):
         cells, clients, servers = fixture()
         cells[0]["result_sha256"] = "b" * 64
         with self.assertRaisesRegex(ValueError, "oracle_identity"):
+            audit(cells, clients, servers, expected_oracle=ORACLE)
+
+    def test_rejects_raw_timer_and_adjacent_order_mismatch(self):
+        cells, clients, servers = fixture()
+        cells[0]["raw_seconds"][0] += 0.000001
+        with self.assertRaisesRegex(ValueError, "raw_client_timer_join"):
+            audit(cells, clients, servers, expected_oracle=ORACLE)
+        cells, clients, servers = fixture()
+        cells[0]["raw_ordinals"][0] = 41
+        for row in clients:
+            if (row["case"], row["trial"], row["mode"], row["phase"], row["sample"]) == \
+                    (cells[0]["case"], cells[0]["trial"], cells[0]["mode"], "measured", 0):
+                row["pair_ordinal"] = 41
+        with self.assertRaisesRegex(ValueError, "pair_order"):
             audit(cells, clients, servers, expected_oracle=ORACLE)
 
     def test_adapter_joins_after_timer_and_rejects_raw_fields(self):

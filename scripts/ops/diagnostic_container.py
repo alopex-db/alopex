@@ -87,10 +87,20 @@ def verify_collected(run, config, assets_digest):
                     {(result["pair_server"]["pid"], result["pair_server"]["start_ticks"])}, "IDENTITY")
         cell_clients = [json.loads(line) for line in (cell / "client.ndjson").read_text().splitlines()]
         require(len(cell_clients) == expected_client_records(mode), "EVIDENCE_BOUND")
+        measured_timers = {row.get("sample"): (row.get("outer_ns"), row.get("pair_ordinal"))
+                           for row in cell_clients
+                           if type(row) is dict and row.get("phase") == "measured"}
+        require(len(measured_timers) == 21 and
+                all(type(measured_timers.get(sample, (None, None))[0]) is int and
+                    measured_timers[sample] == (round(row["seconds"] * 1_000_000_000),
+                                                row.get("pair_ordinal")) and
+                    type(row.get("pair_ordinal")) is int
+                    for sample, row in enumerate(raw)), "IDENTITY")
         clients.extend(cell_clients)
         summaries.append({"case": config["case"], "trial": config["trial"], "mode": mode,
                           "result_sha256": result["result_sha256"],
                           "raw_seconds": [row["seconds"] for row in raw],
+                          "raw_ordinals": [row["pair_ordinal"] for row in raw],
                           "raw_sha256": result["raw_sha256"],
                           "pair_server": result["pair_server"],
                           "fixture_sha256": result["fixture_sha256"],

@@ -27,7 +27,7 @@ def audit(cells, clients, servers, *, expected_oracle, tolerance_ns=0):
     by_cell = {}
     for cell in cells:
         require(type(cell) is dict and set(cell) == {"case", "trial", "mode", "result_sha256",
-                                                    "raw_seconds", "raw_sha256", "pair_server",
+                                                    "raw_seconds", "raw_ordinals", "raw_sha256", "pair_server",
                                                     "fixture_sha256", "pair_order"}, "cell_fields")
         key = (cell["case"], cell["trial"], cell["mode"])
         require(key in expected and key not in by_cell, "cell_inventory")
@@ -43,6 +43,8 @@ def audit(cells, clients, servers, *, expected_oracle, tolerance_ns=0):
         raw = cell["raw_seconds"]
         require(type(raw) is list and len(raw) == 21 and
                 all(type(x) in (int, float) and x > 0 and x < float("inf") for x in raw), "raw_samples")
+        require(type(cell["raw_ordinals"]) is list and len(cell["raw_ordinals"]) == 21 and
+                all(type(x) is int and 0 <= x < 42 for x in cell["raw_ordinals"]), "pair_order")
         by_cell[key] = cell
     require(set(by_cell) == expected, "cell_inventory")
     for case in CASES:
@@ -54,6 +56,7 @@ def audit(cells, clients, servers, *, expected_oracle, tolerance_ns=0):
 
     by_id = {}
     counts = {key: {phase: set() for phase in PHASES} for key in expected}
+    measured_timers = {}
     for row in clients:
         require(type(row) is dict, "client_fields")
         key = (row.get("case"), row.get("trial"), row.get("mode"))
@@ -65,14 +68,23 @@ def audit(cells, clients, servers, *, expected_oracle, tolerance_ns=0):
         require(row.get("result_sha256") == expected_oracle[key[0]] if phase != "setup" else True,
                 "oracle_identity")
         require(nonnegative_int(row.get("outer_ns")) if phase != "setup" else True, "outer_timer")
+        if phase == "measured":
+            require(type(row.get("pair_ordinal")) is int and
+                    0 <= row["pair_ordinal"] < 42, "pair_order")
+            measured_timers[(key, sample)] = (row["outer_ns"], row["pair_ordinal"])
         if key[2] == "off":
-            require(set(row) == {"cell_id", "case", "trial", "mode", "phase", "sample",
-                                 "outer_ns", "result_sha256"} if phase != "setup" else
-                    {"cell_id", "case", "trial", "mode", "phase", "sample"}, "off_trace")
+            expected_off = {"cell_id", "case", "trial", "mode", "phase", "sample"}
+            if phase != "setup":
+                expected_off |= {"outer_ns", "result_sha256"}
+            if phase == "measured":
+                expected_off.add("pair_ordinal")
+            require(set(row) == expected_off, "off_trace")
             continue
         base = {"cell_id", "case", "trial", "mode", "phase", "sample", "trace_id", *CLIENT_FIELDS}
         if phase != "setup":
             base |= {"outer_ns", "wrapper_ns", "result_sha256"}
+        if phase == "measured":
+            base.add("pair_ordinal")
         require(set(row) == base, "client_fields")
         trace_id = canonical_uuid(row["trace_id"])
         require(trace_id not in by_id, "duplicate_uuid")
@@ -93,6 +105,18 @@ def audit(cells, clients, servers, *, expected_oracle, tolerance_ns=0):
         if key[2] == "on":
             measured += len(phases["measured"])
     require(measured == 126, "measured_inventory")
+    for key, cell in by_cell.items():
+        for sample, seconds in enumerate(cell["raw_seconds"]):
+            require(measured_timers[(key, sample)] ==
+                    (round(seconds * 1_000_000_000), cell["raw_ordinals"][sample]),
+                    "raw_client_timer_join")
+    for case in CASES:
+        for trial in range(3):
+            for sample in range(21):
+                for position, mode in enumerate(pair_order(trial, sample)):
+                    key = (case, trial, mode)
+                    require(by_cell[key]["raw_ordinals"][sample] == 2 * sample + position,
+                            "pair_order")
 
     stages = {trace_id: {} for trace_id in by_id}
     for event in servers:

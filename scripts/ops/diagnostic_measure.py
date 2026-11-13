@@ -263,13 +263,17 @@ def measure_pair(module, case, trial, raw_paths):
         with ExitStack() as opened:
             streams = {mode: opened.enter_context(Path(raw_paths[mode]).open("x"))
                        for mode in clients}
+            pair_ordinal = 0
             for index in range(21):
                 for mode in pair_order(trial, index):
                     before = observer.begin() if observer else None
                     value, elapsed = adapters[mode].call("measured", operations[mode],
                                                          sample=index, measure=True,
                                                          defer_oracle=True)
-                    row = {"sample": index, "seconds": elapsed}
+                    adapters[mode].calls[-1]["pair_ordinal"] = pair_ordinal
+                    row = {"sample": index, "seconds": elapsed,
+                           "pair_ordinal": pair_ordinal}
+                    pair_ordinal += 1
                     try:
                         if observer:
                             row["resources"] = observer.end(before)

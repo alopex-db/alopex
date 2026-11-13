@@ -19,7 +19,7 @@ sys.path.insert(0, str(REPO / "scripts/test-env"))
 import diagnostic_container as lane
 from common import digest
 from orchestrate import ORACLE
-from diagnostic import CLIENT_RECORDS_OFF_CELL
+from diagnostic import CLIENT_RECORDS_OFF_CELL, pair_order
 
 SOURCE = lane.SOURCE
 
@@ -122,8 +122,6 @@ class ContainerTests(unittest.TestCase):
             pair = run.root / "collected/pair"
             pair.mkdir(parents=True)
             server = {"pid": 10, "start_ticks": 20}
-            raw = [{"sample": i, "seconds": .1,
-                    "resources": {"server_processes": [server]}} for i in range(21)]
             def write(name, value, ndjson=False):
                 path = pair / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -134,8 +132,14 @@ class ContainerTests(unittest.TestCase):
             write("resources.json", {})
             cells = {}
             for mode in ("on", "off"):
+                raw = [{"sample": i, "seconds": .1,
+                        "pair_ordinal": 2 * i + pair_order(0, i).index(mode),
+                        "resources": {"server_processes": [server]}} for i in range(21)]
                 raw_hash = write(f"{mode}/raw.ndjson", raw, True)
-                client_rows = [{} for _ in range(370 if mode == "on" else CLIENT_RECORDS_OFF_CELL)]
+                client_rows = ([{} for _ in range((370 if mode == "on" else CLIENT_RECORDS_OFF_CELL) - 21)] +
+                               [{"phase": "measured", "sample": i, "outer_ns": 100_000_000,
+                                 "pair_ordinal": 2 * i + pair_order(0, i).index(mode)}
+                                for i in range(21)])
                 client_hash = write(f"{mode}/client.ndjson", client_rows, True)
                 result = {"case": "aggregate", "trial": 0, "mode": mode,
                           "subject_identity": {"source": SOURCE},
@@ -160,6 +164,24 @@ class ContainerTests(unittest.TestCase):
                                                                     report["assets_digest"])
                 self.assertEqual([len(summary["raw_seconds"]) for summary in summaries], [21, 21])
                 self.assertEqual((len(clients), servers), (395, []))
+                off_client = pair / "off/client.ndjson"
+                original_client = off_client.read_bytes()
+                changed = [json.loads(line) for line in original_client.splitlines()]
+                changed[-1]["outer_ns"] += 1
+                off_client.write_text("".join(json.dumps(row) + "\n" for row in changed))
+                status_path = pair / "status.json"
+                status = json.loads(status_path.read_text())
+                status["measurement"]["cells"]["off"]["client_sha256"] = digest(off_client)
+                status_path.write_text(json.dumps(status))
+                report["cell_status_sha256"] = digest(status_path)
+                (run.root / "collected/result.json").write_text(json.dumps(report))
+                with self.assertRaisesRegex(Exception, "IDENTITY"):
+                    lane.verify_collected(run, config(), report["assets_digest"])
+                off_client.write_bytes(original_client)
+                status["measurement"]["cells"]["off"]["client_sha256"] = digest(off_client)
+                status_path.write_text(json.dumps(status))
+                report["cell_status_sha256"] = digest(status_path)
+                (run.root / "collected/result.json").write_text(json.dumps(report))
                 report["server_timing_sha256"] = "0" * 64
                 (run.root / "collected/result.json").write_text(json.dumps(report))
                 with self.assertRaises(Exception):
