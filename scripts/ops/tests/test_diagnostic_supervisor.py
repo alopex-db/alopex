@@ -29,13 +29,16 @@ class DiagnosticSupervisorTests(unittest.TestCase):
                     require_client_inventory(rows[:-1], mode)
 
     def test_on_off_server_environment_isolated(self):
-        base = {"ALOPEX_SQL_TIMING": "1", "RUST_LOG": "debug", "OTHER": "kept"}
+        base = {"ALOPEX_SQL_TIMING": "1", "RUST_LOG": "debug", "NO_COLOR": "", "OTHER": "kept"}
         on = server_environment(base, "on")
         off = server_environment(base, "off")
         self.assertEqual(on["ALOPEX_SQL_TIMING"], "1")
         self.assertEqual(on["RUST_LOG"], "warn,alopex_sql_private_timing=info")
+        self.assertEqual(on["NO_COLOR"], "1")
         self.assertNotIn("ALOPEX_SQL_TIMING", off)
         self.assertEqual(off["RUST_LOG"], "warn")
+        self.assertEqual(off["NO_COLOR"], "1")
+        self.assertEqual(base["NO_COLOR"], "")
         self.assertEqual(base["RUST_LOG"], "debug")
 
     def test_worker_schema_and_source_pin(self):

@@ -24,6 +24,7 @@ def server_environment(base, mode):
         raise ValueError("INPUT")
     value = dict(base)
     value.pop("ALOPEX_SQL_TIMING", None)
+    value["NO_COLOR"] = "1"
     value["RUST_LOG"] = "warn"
     if mode == "on":
         value["ALOPEX_SQL_TIMING"] = "1"

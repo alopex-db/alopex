@@ -15,7 +15,7 @@
       "diagnostic_container.py": "18195650d7afbf67c2effd5343ed83ff5e4395420af4e86b846b38998a950284",
       "diagnostic_entrypoint.py": "638d418ee0e7b8b0e430ec51982f7f44195db8826362a0a773e786e6c1feb8b2",
       "diagnostic_measure.py": "7308b839d9e4c0f3391557f1438cacc7910567b193c7771ead962fc4f1d153d8",
-      "diagnostic_supervisor.py": "ca538ab9770122bd2bf7995638a5838564fd111b5069a30534d863e3060da634",
+      "diagnostic_supervisor.py": "5bc1990f8ed7652fccce6335de2d00379a04af8d08a9dda33cdec856fd5c099e",
       "diagnostic_worker.py": "b7f1006c5cccd0df9e7a250ba2d7b95a71e688511593679f59760d10f0748f08",
       "evidence.py": "86d5e1bc4679a38313ee3b79de5a9a57d8ab6d7f524168ecd91e04734b006938",
       "hosted_test_env_qualification_1951.py": "18c7cfa37b1c16707bedacca6934fd144a5251b496ca5275172489eade2105fa",
