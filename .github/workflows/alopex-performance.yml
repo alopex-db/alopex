@@ -308,6 +308,77 @@ jobs:
                 '{"case":"S04_INSPECT_SHA","outcome":"failed"}')
           sys.exit(0 if passed else 1)
           PY
+      - name: Measure selected-host storage before checkout
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, sys
+          code = 'MEASUREMENT'
+          try:
+              workspace_input = pathlib.Path(os.environ['GITHUB_WORKSPACE']).parent
+              home_input = pathlib.Path.home()
+              temporary_input = pathlib.Path(os.environ['RUNNER_TEMP'])
+              assert all(path.is_absolute() and not path.is_symlink() for path in
+                         (workspace_input, home_input, temporary_input))
+              workspace = workspace_input.resolve(strict=True)
+              home = home_input.resolve(strict=True)
+              temporary = temporary_input.resolve(strict=True)
+              assert workspace.is_dir() and home.is_dir() and temporary.is_dir()
+
+              def command(argv, timeout=10):
+                  result = subprocess.run(argv, stdin=subprocess.DEVNULL,
+                                          capture_output=True, timeout=timeout, check=False)
+                  assert result.returncode == 0 and not result.stderr
+                  return result.stdout.decode('utf-8').strip()
+
+              context = command(['/usr/bin/docker', 'context', 'show'])
+              selected = json.loads(command(['/usr/bin/docker', 'context', 'inspect', context]))[0]
+              assert selected['Endpoints']['docker']['Host'].startswith('unix://')
+              docker = pathlib.Path(json.loads(command(['/usr/bin/docker', 'info', '--format',
+                                                        '{{json .}}']))['DockerRootDir'])
+              assert docker.is_absolute() and docker.resolve(strict=True) == docker
+              roots = [workspace, home, temporary, docker]
+              for area in (pathlib.Path('/tmp'), pathlib.Path('/var/tmp')):
+                  if not area.exists():
+                      continue
+                  assert area.is_dir()
+                  with os.scandir(area) as entries:
+                      seen = 0
+                      for entry in entries:
+                          seen += 1
+                          assert seen <= 1024
+                          info = entry.stat(follow_symlinks=False)
+                          if info.st_uid == os.getuid() or 'alopex' in entry.name.lower():
+                              roots.append(pathlib.Path(entry.path).resolve(strict=True))
+              roots = list(set(roots))
+              assert len(roots) <= 64
+              assert all(docker == root or
+                         (not docker.is_relative_to(root) and not root.is_relative_to(docker))
+                         for root in roots)
+              roots = [root for root in roots if not any(root != other and
+                       root.is_relative_to(other) for other in roots)]
+
+              def allocation(root):
+                  argv = (['/usr/bin/sudo', '-n'] if root == docker else []) + [
+                      '/usr/bin/du', '-sk' if root == docker else '-skL', '--', str(root)]
+                  value = command(argv, timeout=60 if root == docker else 10).split('\t')
+                  assert len(value) == 2 and value[0].isascii() and value[0].isdecimal()
+                  assert value[1] == str(root)
+                  return int(value[0]) * 1024
+
+              aggregate = sum(allocation(root) for root in roots)
+              code = 'CAPACITY'
+              # One GiB covers checkout, the <=1 MiB receipt, and <=2 MiB CMS export.
+              assert aggregate + 1_000_000_000 < 40_000_000_000
+              assert aggregate + 1_000_000_000 < 50_000_000_000
+              for root in (workspace, temporary, docker):
+                  vfs = os.statvfs(root)
+                  assert vfs.f_bavail * vfs.f_frsize > 1_000_000_000
+              print('{"case":"S04_INSPECT_STORAGE","outcome":"passed"}')
+          except BaseException:
+              print(json.dumps({'case': 'S04_INSPECT_STORAGE', 'outcome': 'failed',
+                                'error_code': code}, sort_keys=True))
+              sys.exit(1)
+          PY
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.expected_controller_sha }}

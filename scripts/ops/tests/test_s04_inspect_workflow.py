@@ -26,6 +26,8 @@ class Workflow(unittest.TestCase):
         mode = source.split("  s04_inspect:\n", 1)[1]
         self.assertLess(mode.index("Gate exact source before checkout"),
                         mode.index("uses: actions/checkout@v4"))
+        self.assertLess(mode.index("Measure selected-host storage before checkout"),
+                        mode.index("uses: actions/checkout@v4"))
         self.assertIn("expected == os.environ.get('GITHUB_SHA')", mode)
         self.assertIn("ref: ${{ inputs.expected_controller_sha }}", mode)
         self.assertIn("context=$(/usr/bin/docker context show)", mode)
@@ -62,6 +64,25 @@ class Workflow(unittest.TestCase):
                                         env=dict(base, **overrides), capture_output=True, text=True)
                 self.assertEqual(result.returncode, expected)
                 self.assertNotIn(sha, result.stdout + result.stderr)
+
+    def test_storage_gate_fails_with_fixed_code_when_roots_are_unavailable(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML unavailable")
+        job = yaml.safe_load(WORKFLOW.read_text())["jobs"]["s04_inspect"]
+        gate = job["steps"][1]["run"]
+        self.assertIn("aggregate + 1_000_000_000 < 40_000_000_000", gate)
+        self.assertIn("/usr/bin/du", gate)
+        env = dict(os.environ)
+        env.pop("RUNNER_TEMP", None)
+        result = subprocess.run(["bash", "-e", "-c", gate], env=env,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout),
+                         {"case": "S04_INSPECT_STORAGE", "outcome": "failed",
+                          "error_code": "MEASUREMENT"})
+        self.assertEqual(result.stderr, "")
 
 
 class Sealer(unittest.TestCase):

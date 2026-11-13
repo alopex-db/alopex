@@ -329,22 +329,10 @@ def inspect(args: argparse.Namespace) -> dict:
             acl[str(item)] = {"exit_code": result.returncode,
                               "stdout": result.stdout[:8192].decode("utf-8", "replace"),
                               "truncated": len(result.stdout) > 8192}
-    daemon_processes = []
-    for proc in Path("/proc").iterdir():
-        if not proc.name.isdecimal():
-            continue
-        try:
-            executable = (proc / "exe").resolve(strict=True)
-            if executable.name != "dockerd":
-                continue
-            daemon_processes.append({"pid": int(proc.name), "exe": str(executable),
-                                     "exe_sha256": sha256(executable.read_bytes())})
-        except (OSError, PermissionError):
-            continue
     return {"cli_path": str(cli), "cli_sha256": sha256(cli.read_bytes()),
             "context": args.context, "endpoint": endpoint, "lineage": lineage,
             "acl": acl, "mountinfo": Path("/proc/self/mountinfo").read_text()[:131072],
-            "version": json.loads(version.stdout), "daemon_processes": daemon_processes,
+            "version": json.loads(version.stdout),
             "daemon_peer": peer,
             "uid": os.getuid(), "groups": os.getgroups(), "read_only": True}
 
