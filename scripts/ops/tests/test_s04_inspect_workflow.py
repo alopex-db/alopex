@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[3]
 WORKFLOW = REPO / ".github/workflows/alopex-performance.yml"
+CI_WORKFLOW = REPO / ".github/workflows/ci.yml"
 SEALER = REPO / "scripts/ops/s04_inspect_seal.py"
 SPEC = importlib.util.spec_from_file_location("s04_inspect_seal", SEALER)
 sealer = importlib.util.module_from_spec(SPEC)
@@ -19,6 +20,23 @@ SPEC.loader.exec_module(sealer)
 
 
 class Workflow(unittest.TestCase):
+    def test_ci_smoke_checks_real_linux_peer_pidfd_without_docker(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML unavailable")
+        scope = yaml.safe_load(CI_WORKFLOW.read_text())["jobs"]["scope"]
+        self.assertEqual(scope["runs-on"], "ubuntu-latest")
+        steps = [step for step in scope["steps"] if
+                 step.get("name") == "Verify read-only S04 peer pidfd lifecycle on Linux"]
+        self.assertEqual(len(steps), 1)
+        command = steps[0]["run"]
+        self.assertIn("test_s04_wire_preflight.py", command)
+        self.assertIn("-k test_real_unix_peer_pidfd_tracks_exit_without_docker", command)
+        self.assertNotIn("docker", command.lower().replace("without_docker", ""))
+        source = (REPO / "scripts/ops/tests/test_s04_wire_preflight.py").read_text()
+        self.assertIn("SO_PEERPIDFD unavailable:", source)
+
     def test_inspect_only_mode_has_precheckout_gate_and_no_asset_or_capture(self):
         source = WORKFLOW.read_text()
         self.assertIn("inputs.issue_number == '684'", source)

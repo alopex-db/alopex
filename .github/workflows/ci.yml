@@ -45,6 +45,11 @@ jobs:
           python3 -m unittest scripts.ci.test_check_parser_wire_contract scripts.ci.test_pinned_tool_download
       - name: Verify parser source contract guard
         run: python3 scripts/ci/test_parser_source_contract.py
+      - name: Verify read-only S04 peer pidfd lifecycle on Linux
+        run: |
+          python3 -B -m unittest discover -s scripts/ops/tests \
+            -p test_s04_wire_preflight.py \
+            -k test_real_unix_peer_pidfd_tracks_exit_without_docker -v
       - name: Classify production and release-process changes
         id: classify
         shell: bash

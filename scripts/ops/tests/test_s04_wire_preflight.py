@@ -8,6 +8,7 @@ from pathlib import Path
 import socket
 import stat
 import struct
+import sys
 import tempfile
 import threading
 import unittest
@@ -110,16 +111,29 @@ class DaemonPeer(unittest.TestCase):
     def write_stat(proc, pid=12345, starttime=42):
         (proc / "stat").write_text(f"{pid} (daemon) S " + "0 " * 18 + f"{starttime}\n")
 
-    def probe(self, pid, proc_root):
+    def probe(self, pid, proc_root, alive=(True, True), pidfd_available=True):
         with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
             path = Path(directory) / "daemon.sock"
             path.touch()
+            pidfd = os.open(os.devnull, os.O_RDONLY)
+
+            def socket_option(_level, option, _size):
+                if option == preflight.socket.SO_PEERCRED:
+                    return struct.pack("3i", pid, 1, 1)
+                if option == preflight.SO_PEERPIDFD and pidfd_available:
+                    return struct.pack("i", pidfd)
+                raise OSError(errno.ENOPROTOOPT, "unsupported")
+
             with mock.patch.object(preflight.socket, "SO_PEERCRED", 17, create=True), \
                  mock.patch.object(preflight.stat, "S_ISSOCK", return_value=True), \
+                 mock.patch.object(preflight, "pidfd_alive", side_effect=alive), \
                  mock.patch.object(preflight.socket, "socket") as factory:
-                client = factory.return_value.__enter__.return_value
-                client.getsockopt.return_value = struct.pack("3i", pid, 1, 1)
-                return preflight.inspect_daemon_peer(path, proc_root)
+                factory.return_value.getsockopt.side_effect = socket_option
+                try:
+                    return preflight.inspect_daemon_peer(path, proc_root)
+                finally:
+                    if not pidfd_available:
+                        os.close(pidfd)
 
     def test_connected_peer_with_inaccessible_proc_is_unobservable(self):
         with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
@@ -248,16 +262,123 @@ class DaemonPeer(unittest.TestCase):
                 self.assertEqual(peer["status"], "peer_executable_unobservable")
                 self.assertNotIn("executable_sha256", peer)
 
+    def test_peer_exit_before_first_stat_cannot_attribute_reused_pid(self):
+        with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
+            root = Path(directory)
+            executable = root / "replacement-binary"
+            executable.write_bytes(b"replacement")
+            proc = root / "proc" / "12345"
+            proc.mkdir(parents=True)
+            self.write_stat(proc, starttime=99)
+            (proc / "exe").symlink_to(executable)
+            with mock.patch.object(preflight.shutil, "which", return_value=None):
+                peer = self.probe(12345, root / "proc", alive=(False, False))
+            self.assertEqual(peer["pid_before"]["starttime"], 99)
+            self.assertEqual(peer["pid_after"]["starttime"], 99)
+            self.assertEqual(peer["pid_lifecycle"], "exited")
+            self.assertNotIn("executable_sha256", peer)
+
+    def test_missing_kernel_peer_binding_fails_closed(self):
+        with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
+            root = Path(directory)
+            executable = root / "daemon-binary"
+            executable.write_bytes(b"review-me")
+            proc = root / "proc" / "12345"
+            proc.mkdir(parents=True)
+            self.write_stat(proc)
+            (proc / "exe").symlink_to(executable)
+            peer = self.probe(12345, root / "proc", pidfd_available=False)
+            self.assertEqual(peer["peer_pidfd"], "unavailable")
+            self.assertEqual(peer["pid_lifecycle"], "unbound")
+            self.assertNotIn("executable_sha256", peer)
+
+    def test_exec_swap_after_readlink_does_not_attribute_old_fd(self):
+        with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
+            root = Path(directory)
+            old = root / "old-binary"
+            new = root / "new-binary"
+            old.write_bytes(b"old")
+            new.write_bytes(b"new")
+            proc = root / "proc" / "12345"
+            proc.mkdir(parents=True)
+            self.write_stat(proc)
+            exe = proc / "exe"
+            exe.symlink_to(old)
+            real_readlink = preflight.os.readlink
+
+            def swap_executable(path, *args, **kwargs):
+                if str(path) == str(exe):
+                    exe.unlink()
+                    exe.symlink_to(new)
+                    return str(new)
+                return real_readlink(path, *args, **kwargs)
+
+            with mock.patch.object(preflight.os, "readlink", side_effect=swap_executable):
+                peer = self.probe(12345, root / "proc")
+            self.assertEqual(peer["status"], "peer_executable_changed")
+            self.assertEqual(peer["pid_lifecycle"], "stable")
+            self.assertNotIn("executable_sha256", peer)
+
     def test_connection_failure_records_no_provenance(self):
         with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
             path = Path(directory) / "daemon.sock"
             path.touch()
             with mock.patch.object(preflight.stat, "S_ISSOCK", return_value=True), \
                  mock.patch.object(preflight.socket, "socket") as factory:
-                factory.return_value.__enter__.return_value.connect.side_effect = OSError("denied")
+                factory.return_value.connect.side_effect = OSError("denied")
                 peer = preflight.inspect_daemon_peer(path)
             self.assertEqual(peer, {"status": "connection_unavailable",
                                     "parser_provenance": "unverified"})
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux SO_PEERPIDFD only")
+    def test_real_unix_peer_pidfd_tracks_exit_without_docker(self):
+        with tempfile.TemporaryDirectory(prefix="s04-peer-") as directory:
+            path = str(Path(directory) / "peer.sock")
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.settimeout(2)
+            listener.bind(path)
+            listener.listen(1)
+            read_end, write_end = os.pipe()
+            child = os.fork()
+            if child == 0:
+                try:
+                    os.close(write_end)
+                    listener.close()
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                        client.connect(path)
+                        os.read(read_end, 1)
+                finally:
+                    os._exit(0)
+            os.close(read_end)
+            peer_fd = None
+            accepted = None
+            try:
+                accepted, _ = listener.accept()
+                raw = accepted.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+                self.assertEqual(struct.unpack("3i", raw)[0], child)
+                try:
+                    raw_fd = accepted.getsockopt(socket.SOL_SOCKET, preflight.SO_PEERPIDFD, 4)
+                except OSError as error:
+                    self.skipTest("SO_PEERPIDFD unavailable: " + preflight.errno_class(error))
+                peer_fd = struct.unpack("i", raw_fd)[0]
+                self.assertTrue(preflight.pidfd_alive(peer_fd))
+                os.write(write_end, b"x")
+                os.waitpid(child, 0)
+                child = None
+                self.assertFalse(preflight.pidfd_alive(peer_fd))
+            finally:
+                if child is not None:
+                    try:
+                        os.write(write_end, b"x")
+                    except BrokenPipeError:
+                        pass
+                    os.waitpid(child, 0)
+                if peer_fd is not None:
+                    os.close(peer_fd)
+                if accepted is not None:
+                    accepted.close()
+                os.close(write_end)
+                listener.close()
 
 
 if __name__ == "__main__":

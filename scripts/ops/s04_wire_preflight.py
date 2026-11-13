@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import shutil
 import socket
 import stat
@@ -29,6 +30,7 @@ MAX_SECONDS = 45
 MAX_OUTPUT = 1_048_576
 MAX_PEER_EXECUTABLE = 268_435_456
 MAX_PROC_STAT = 4096
+SO_PEERPIDFD = getattr(socket, "SO_PEERPIDFD", 77)  # Linux UAPI asm-generic/socket.h
 SOURCE_HEAD = "69c31a7950743d130ac3f96fb1ffb795a2818528"
 SOURCE_HASHES = {
     "scripts/test-env/common.py": "a84a6951f6b1303869cc74f12a92053e691b854c2ac9b8835811bfdcf135c47f",
@@ -266,20 +268,46 @@ def pid_starttime(pid: int, proc_root: Path) -> dict:
     return {"state": "present", "starttime": int(fields[19])}
 
 
+def pidfd_alive(pidfd: int) -> bool:
+    watch = select.poll()
+    watch.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+    return not watch.poll(0)
+
+
 def inspect_daemon_peer(path: Path, proc_root: Path = Path("/proc")) -> dict:
     """Connect without sending HTTP bytes; keep unobservable provenance explicit."""
     before = path.lstat()
     if not stat.S_ISSOCK(before.st_mode):
         raise PreflightError("ENDPOINT_TYPE")
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    pidfd = None
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        try:
             client.settimeout(2)
             client.connect(str(path))
             raw = client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
                                     struct.calcsize("3i"))
             pid, uid, gid = struct.unpack("3i", raw)
-    except OSError:
-        return {"status": "connection_unavailable", "parser_provenance": "unverified"}
+        except OSError:
+            return {"status": "connection_unavailable", "parser_provenance": "unverified"}
+        try:
+            raw_pidfd = client.getsockopt(socket.SOL_SOCKET, SO_PEERPIDFD, struct.calcsize("i"))
+            pidfd = struct.unpack("i", raw_pidfd)[0]
+            if pidfd < 0:
+                pidfd = None
+        except OSError:
+            pass
+        return _inspect_connected_peer(path, before, proc_root, pid, uid, gid, pidfd)
+    finally:
+        try:
+            if pidfd is not None:
+                os.close(pidfd)
+        finally:
+            client.close()
+
+
+def _inspect_connected_peer(path: Path, before: os.stat_result, proc_root: Path,
+                            pid: int, uid: int, gid: int, pidfd: int | None) -> dict:
     after = path.lstat()
     if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
         raise PreflightError("ENDPOINT_REPLACED")
@@ -289,6 +317,11 @@ def inspect_daemon_peer(path: Path, proc_root: Path = Path("/proc")) -> dict:
     if pid <= 0:
         peer["status"] = "pid_unmapped"
         return peer
+    peer["peer_pidfd"] = "bound" if pidfd is not None else "unavailable"
+    try:
+        peer["pidfd_alive_before"] = pidfd_alive(pidfd) if pidfd is not None else False
+    except OSError:
+        peer["pidfd_alive_before"] = False
     peer["pid_before"] = pid_starttime(pid, proc_root)
     proc_exe = proc_root / str(pid) / "exe"
     executable = None
@@ -320,14 +353,27 @@ def inspect_daemon_peer(path: Path, proc_root: Path = Path("/proc")) -> dict:
                     else:
                         stage = "readlink"
                         executable = os.readlink(proc_exe)
+                        stage = "stat_after_readlink"
+                        latest = proc_exe.stat()
+                        if (info.st_dev, info.st_ino) != (latest.st_dev, latest.st_ino):
+                            peer["status"] = "peer_executable_changed"
+                            executable = None
         finally:
             os.close(fd)
     except OSError as error:
         peer["executable_error_stage"] = stage
         peer["executable_errno_class"] = errno_class(error)
     peer["pid_after"] = pid_starttime(pid, proc_root)
+    try:
+        peer["pidfd_alive_after"] = pidfd_alive(pidfd) if pidfd is not None else False
+    except OSError:
+        peer["pidfd_alive_after"] = False
     before_state, after_state = peer["pid_before"], peer["pid_after"]
-    if before_state["state"] == after_state["state"] == "present":
+    if pidfd is None:
+        peer["pid_lifecycle"] = "unbound"
+    elif not peer["pidfd_alive_before"] or not peer["pidfd_alive_after"]:
+        peer["pid_lifecycle"] = "exited"
+    elif before_state["state"] == after_state["state"] == "present":
         peer["pid_lifecycle"] = ("stable" if before_state["starttime"] == after_state["starttime"]
                                  else "reused")
     elif after_state["state"] == "not_found":
