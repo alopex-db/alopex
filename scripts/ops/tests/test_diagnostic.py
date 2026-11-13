@@ -11,7 +11,7 @@ import unittest
 import uuid
 
 from audit import audit
-from diagnostic import CellAdapter, STAGES, cell_order
+from diagnostic import CellAdapter, STAGES, cell_order, pair_order
 
 
 ORACLE = {case: hashlib.sha256(case.encode()).hexdigest() for case in ("aggregate", "ordered")}
@@ -24,7 +24,10 @@ def fixture():
             for mode in cell_order(trial):
                 cells.append({"case": case, "trial": trial, "mode": mode,
                               "result_sha256": ORACLE[case], "raw_seconds": [.001 + trial * .00001] * 21,
-                              "raw_sha256": "a" * 64})
+                              "raw_sha256": "a" * 64,
+                              "pair_server": {"pid": trial + 100, "start_ticks": trial + 1000},
+                              "fixture_sha256": ORACLE[case],
+                              "pair_order": [list(pair_order(trial, i)) for i in range(21)]})
                 for phase, count in (("precheck", 1), ("warmup", 3), ("measured", 21)):
                     for sample in range(count):
                         base = {"cell_id": f"{case}-{trial}-{mode}", "case": case,
@@ -50,6 +53,29 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual((report["all_uuids"], report["all_server_events"]), (150, 1050))
         self.assertEqual([cell_order(i) for i in range(3)],
                          [("off", "on"), ("on", "off"), ("off", "on")])
+        self.assertEqual([pair_order(i, 0) for i in range(3)],
+                         [("off", "on"), ("on", "off"), ("off", "on")])
+
+    def test_pair_identity_and_order_fail_closed(self):
+        for mutation in (
+            lambda cells: cells[0]["pair_server"].update(pid=999),
+            lambda cells: cells[0].update(fixture_sha256="0" * 64),
+            lambda cells: cells[0]["pair_order"][0].reverse(),
+        ):
+            cells, clients, servers = fixture()
+            mutation(cells)
+            with self.assertRaisesRegex(ValueError, "pair_identity"):
+                audit(cells, clients, servers, expected_oracle=ORACLE)
+
+    def test_adjacent_overhead_gate_keeps_original_case_bound(self):
+        cells, clients, servers = fixture()
+        for cell in cells:
+            cell["raw_seconds"] = [0.0011 if cell["mode"] == "on" else 0.001] * 21
+        report = audit(cells, clients, servers, expected_oracle=ORACLE)
+        for case in ORACLE:
+            self.assertAlmostEqual(report["paired"][case]["bound_ms"], 0.05)
+            self.assertFalse(report["paired"][case]["small_overhead"])
+            self.assertGreater(report["paired"][case]["U_ms"], 0.05)
 
     def test_rejects_join_and_timer_failures(self):
         for target, edit in (

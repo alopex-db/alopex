@@ -1,7 +1,7 @@
-"""Task-private #712 12-cell orchestrator; no dispatch or security configuration.
+"""Task-private #712 six-pair orchestrator; no dispatch or security configuration.
 
 Production hooks must adapt the frozen same-job #804 qualifier, image/profile,
-cell supervisor and Budget. Missing pins or qualification prevent execution.
+pair supervisor and Budget. Missing pins or qualification prevent execution.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import time
 
 from audit import audit
 from common import ERRORS, Failure
-from diagnostic import CASES, CLIENT_RECORDS_PER_CELL, cell_order
+from diagnostic import CASES, CLIENT_RECORDS_PER_CELL
 
 SOURCE_COMMIT = "894843360824e324c80b7a078bb3a1e63240e9bc"
 SOURCE_TREE = "c3e79b91f584d6549f84eb99aefb89ddf4b6b5ab"
@@ -51,9 +51,10 @@ def commit(value):
 
 
 def plan():
-    return [{"cell_id": f"{case}-{trial}-{mode}", "case": case, "trial": trial,
-             "mode": mode, "case_seconds": CASE_SECONDS, "run_seconds": CELL_SECONDS}
-            for case in CASES for trial in range(3) for mode in cell_order(trial)]
+    return [{"pair_id": f"{case}-{trial}", "case": case, "trial": trial,
+             "modes": ["on", "off"], "case_seconds": CASE_SECONDS,
+             "run_seconds": CELL_SECONDS}
+            for case in CASES for trial in range(3)]
 
 
 def validate_dispatch(pin, receipt, *, job_id, operator_dir):
@@ -177,11 +178,11 @@ def _preserve_failure(root, phase, primary, cleanup):
 
 def orchestrate(pin, *, job_id, operator_dir, evidence_dir, hooks,
                 job_limit_seconds, clock=time.monotonic):
-    """Hooks: qualify, used_bytes, run_cell, cleanup, seal. All are required.
+    """Hooks: qualify, used_bytes, run_pair, cleanup, seal. All are required.
 
-    `run_cell` must use the frozen #804 profile/supervisor and return one
-    independently verified cell summary, its client rows and filtered server
-    rows. The hook owns per-cell process stop/wait and raw resource capture.
+    `run_pair` must use the frozen #804 profile/supervisor and return two
+    independently verified mode-cell summaries, their client rows and filtered
+    server rows. The hook owns per-pair process stop/wait and resource capture.
     """
     cells, clients, servers = [], [], []
     phase = "qualification"
@@ -189,7 +190,7 @@ def orchestrate(pin, *, job_id, operator_dir, evidence_dir, hooks,
     binding = report = None
     initial = None
     try:
-        require(set(hooks) == {"qualify", "used_bytes", "run_cell", "cleanup", "seal"}, "HOOKS")
+        require(set(hooks) == {"qualify", "used_bytes", "run_pair", "cleanup", "seal"}, "HOOKS")
         require(type(job_limit_seconds) in (int, float) and math.isfinite(job_limit_seconds) and
                 0 < job_limit_seconds <= 86_400, "JOB_SAFETY_LIMIT")
         started = clock()
@@ -200,7 +201,7 @@ def orchestrate(pin, *, job_id, operator_dir, evidence_dir, hooks,
         require(type(initial) is int and initial >= 0 and
                 initial + ADDITIONAL_BYTES + RESERVE_BYTES < STOP_BYTES, "CAPACITY")
         phase = "cells"
-        for cell in plan():
+        for pair in plan():
             # Independent job safety limit. No admission/acceptance semantics
             # are inferred while the #712 deadline contract is unsettled.
             require(clock() - started < job_limit_seconds, "JOB_SAFETY_LIMIT")
@@ -208,15 +209,15 @@ def orchestrate(pin, *, job_id, operator_dir, evidence_dir, hooks,
             require(type(used) is int and used < STOP_BYTES and
                     used - initial <= ADDITIONAL_BYTES, "CAPACITY")
             cell_started = clock()
-            returned = hooks["run_cell"](cell, binding)
+            returned = hooks["run_pair"](pair, binding)
             require(clock() - cell_started <= CELL_SECONDS and
                     clock() - started <= job_limit_seconds, "JOB_SAFETY_LIMIT")
             require(type(returned) is tuple and len(returned) == 3, "CELL")
-            result, client_rows, server_rows = returned
-            require(type(result) is dict and
-                    (result.get("case"), result.get("trial"), result.get("mode")) ==
-                    (cell["case"], cell["trial"], cell["mode"]), "CELL")
-            cells.append(result)
+            results, client_rows, server_rows = returned
+            require(type(results) is list and len(results) == 2 and
+                    {(row.get("case"), row.get("trial"), row.get("mode")) for row in results} ==
+                    {(pair["case"], pair["trial"], mode) for mode in pair["modes"]}, "CELL")
+            cells.extend(results)
             clients.extend(client_rows)
             servers.extend(server_rows)
             require(len(clients) <= MAX_CLIENT and len(servers) <= MAX_SERVER, "EVIDENCE_BOUND")

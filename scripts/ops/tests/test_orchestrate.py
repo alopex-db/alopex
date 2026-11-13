@@ -44,15 +44,17 @@ def inputs():
     cells, clients, servers = fixture()
     for row in cells:
         row["result_sha256"] = ORACLE[row["case"]]
+        row["fixture_sha256"] = ORACLE[row["case"]]
     for row in clients:
         row["result_sha256"] = ORACLE[row["case"]]
     grouped = {}
-    for cell in plan():
-        key = (cell["case"], cell["trial"], cell["mode"])
-        client = [row for row in clients if (row["case"], row["trial"], row["mode"]) == key]
+    for pair in plan():
+        key = (pair["case"], pair["trial"])
+        pair_cells = [row for row in cells if (row["case"], row["trial"]) == key]
+        client = [row for row in clients if (row["case"], row["trial"]) == key]
         ids = {row["trace_id"] for row in client if "trace_id" in row}
-        grouped[key] = (next(row for row in cells if (row["case"], row["trial"], row["mode"]) == key),
-                        client, [row for row in servers if row["trace_id"] in ids])
+        grouped[key] = (pair_cells, client,
+                        [row for row in servers if row["trace_id"] in ids])
     return grouped
 
 
@@ -96,11 +98,11 @@ class OrchestratorTests(unittest.TestCase):
             if not qualification:
                 raise ValueError("QUALIFICATION")
             return receipt
-        def run_cell(cell, binding):
-            observed.append(cell["cell_id"])
+        def run_pair(cell, binding):
+            observed.append(cell["pair_id"])
             if cell_failure:
                 raise ValueError("CELL")
-            return groups[(cell["case"], cell["trial"], cell["mode"])]
+            return groups[(cell["case"], cell["trial"])]
         def used_bytes():
             if capacity_failure:
                 raise ValueError("CAPACITY")
@@ -111,7 +113,7 @@ class OrchestratorTests(unittest.TestCase):
         hooks = {
             "qualify": qualify,
             "used_bytes": used_bytes,
-            "run_cell": run_cell,
+            "run_pair": run_pair,
             "cleanup": clean_owned,
             "seal": lambda root, hashes: ({"sha256": "3" * 64, "size": 100,
                                            "verified": sealed} if set(hashes) == set(FILES) and
@@ -132,7 +134,7 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_twelve_cells_and_encrypted_allowlist(self):
         result, observed = self.run_fake()
-        self.assertEqual(observed, [cell["cell_id"] for cell in plan()])
+        self.assertEqual(observed, [cell["pair_id"] for cell in plan()])
         self.assertEqual((result["measurement_cells"], result["measured_uuids"],
                           result["measured_server_events"]), (12, 126, 882))
         self.assertFalse(result["performance_qualification"])
@@ -149,8 +151,8 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_missing_trace_or_changed_oracle_stops(self):
         for mutate in (
-            lambda p, r, groups: groups[("aggregate", 0, "on")][2].pop(),
-            lambda p, r, groups: groups[("ordered", 2, "off")][0].update(result_sha256="0" * 64),
+            lambda p, r, groups: groups[("aggregate", 0)][2].pop(),
+            lambda p, r, groups: groups[("ordered", 2)][0][1].update(result_sha256="0" * 64),
         ):
             with self.subTest(mutate=mutate):
                 with self.assertRaises(ValueError):
@@ -186,7 +188,7 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_job_safety_limit_is_configurable_without_admission_rule(self):
         result, observed = self.run_fake(job_limit_seconds=5_000)
-        self.assertEqual(len(observed), 12)
+        self.assertEqual(len(observed), 6)
         times = iter((0, 2))
         error, proof, observed = self.run_fake(job_limit_seconds=1,
                                                 clock=lambda: next(times), capture_failure=True)

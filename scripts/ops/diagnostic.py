@@ -255,3 +255,10 @@ def cell_order(trial):
     if type(trial) is not int or trial not in range(3):
         raise ValueError("invalid trial")
     return ("on", "off") if trial == 1 else ("off", "on")
+
+
+def pair_order(trial, sample):
+    """Alternate adjacent requests, reversing the first order by trial."""
+    if type(trial) is not int or trial not in range(3) or type(sample) is not int or sample not in range(21):
+        raise ValueError("invalid diagnostic pair")
+    return ("off", "on") if (trial + sample) % 2 == 0 else ("on", "off")

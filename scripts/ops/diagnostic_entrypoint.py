@@ -21,7 +21,7 @@ from lifecycle import Run  # noqa: E402
 import envctl  # noqa: E402
 from native_sql_matrix import compose_harness  # noqa: E402
 from attestor_1951 import attest_current_job, frozen_operations  # noqa: E402
-from diagnostic_container import MeasurementDocker, execute_cell  # noqa: E402
+from diagnostic_container import MeasurementDocker, execute_pair  # noqa: E402
 from live_wrapper import run_prepared  # noqa: E402
 from orchestrate import DiagnosticFailure, SOURCE_COMMIT, SOURCE_TREE, plan, validate_dispatch  # noqa: E402
 from same_job_1951 import derive_receipt, prepare_diagnostic_cell, validate_pins, OPERATORS  # noqa: E402
@@ -145,10 +145,10 @@ def execute_diagnostic(*, repo=REPO, runner_temp=None, environment=None):
     results_root = private_dir(root / "runs")
     known = []
 
-    def run_cell(cell, binding):
+    def run_pair(cell, binding):
         require(binding["assets_digest"] == pin["assets_digest"], "IDENTITY")
-        inputs = cells_root / cell["cell_id"]
-        selected = dict(profile, run_id="diag-" + cell["cell_id"],
+        inputs = cells_root / cell["pair_id"]
+        selected = dict(profile, run_id="diag-" + cell["pair_id"],
                         assets=str(inputs / "assets.json"),
                         private_output=str(results_root),
                         limits=dict(profile["limits"], case_seconds=300, run_seconds=420))
@@ -158,12 +158,12 @@ def execute_diagnostic(*, repo=REPO, runner_temp=None, environment=None):
             verify_assets=verify_assets)
         require(str(path) == selected["assets"], "IDENTITY")
         try:
-            return execute_cell(selected, budget, worker)
+            return execute_pair(selected, budget, worker)
         except BaseException as error:
             if getattr(error, "code", None) == "CASE":
                 atomic_json(root / "failed-cell.private.json", {
                     "schema": "alopex.sql-diagnostic-failed-cell/v1",
-                    "cell_id": cell["cell_id"], "error_code": "CASE"})
+                    "cell_id": cell["pair_id"], "error_code": "CASE"})
             raise
 
     def cleanup():
@@ -174,7 +174,7 @@ def execute_diagnostic(*, repo=REPO, runner_temp=None, environment=None):
                         receipt_path=receipt_path, expected_receipt_sha256=digest(receipt_path),
                         assets_manifest=manifest_path, server=server, wheel=wheel,
                         certificate=repo / ".github/ops/native-evidence-cert.pem",
-                        used_bytes=budget.used, run_cell=run_cell, cleanup=cleanup,
+                        used_bytes=budget.used, run_pair=run_pair, cleanup=cleanup,
                         job_limit_seconds=JOB_LIMIT_SECONDS)
 
 
@@ -226,16 +226,16 @@ def seal_failure(root):
                 "alopex.sql-diagnostic-failed-cell/v1" and
                 set(selected_cell) == {"schema", "cell_id", "error_code"} and
                 selected_cell["error_code"] == "CASE" and
-                selected_cell["cell_id"] in {cell["cell_id"] for cell in plan()},
+                selected_cell["cell_id"] in {cell["pair_id"] for cell in plan()},
                 "EVIDENCE_ALLOWLIST")
     runs = root / "runs"
     require(selected_cell is None or (runs.is_dir() and not runs.is_symlink()),
             "EVIDENCE_STATE")
     if runs.is_dir() and not runs.is_symlink():
         for cell in plan():
-            if selected_cell is not None and cell["cell_id"] != selected_cell["cell_id"]:
+            if selected_cell is not None and cell["pair_id"] != selected_cell["cell_id"]:
                 continue
-            run_id = "diag-" + cell["cell_id"]
+            run_id = "diag-" + cell["pair_id"]
             run = Run(runs, run_id)
             if not run.path.exists():
                 require(selected_cell is None, "EVIDENCE_STATE")
@@ -254,10 +254,10 @@ def seal_failure(root):
             if selected_cell is None and json.loads(report.read_text()).get("status") != "failed":
                 continue
             require(not cell_evidence, "EVIDENCE_BOUND")
-            for name, limit in (("result.json", 4096), ("cell/status.json", 4096),
-                                ("cell/worker.log", 32768)):
+            for name, limit in (("result.json", 4096), ("pair/status.json", 4096),
+                                ("pair/worker.log", 32768)):
                 path = collected / name
-                if not path.exists() and name == "cell/worker.log":
+                if not path.exists() and name == "pair/worker.log":
                     continue
                 info = path.lstat()
                 require(stat.S_ISREG(info.st_mode) and info.st_mode & 0o077 == 0 and

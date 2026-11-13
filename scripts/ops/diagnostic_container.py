@@ -1,4 +1,4 @@
-"""Private #712 copy of frozen #831 cell collection; diagnostic schema only."""
+"""Private #712 copy of frozen #831 collection; paired diagnostic schema only."""
 import json
 from pathlib import Path
 
@@ -40,8 +40,8 @@ def failed_worker_was_recovered(run, config, assets_digest):
     if report.get("schema") != "alopex.sql-diagnostic-measurement/v1" or report.get("status") != "failed":
         return False
     require(report["assets_digest"] == assets_digest and report["source"] == config["source"] and
-            all(report[key] == config[key] for key in ("case", "engine", "trial", "mode")), "IDENTITY")
-    status_path = root / "cell/status.json"
+            all(report[key] == config[key] for key in ("case", "engine", "trial", "modes")), "IDENTITY")
+    status_path = root / "pair/status.json"
     require(digest(status_path) == report["cell_status_sha256"], "IDENTITY")
     status = read_json(status_path)
     return (status["status"] == "failed" and status["worker_error"] is not None and
@@ -55,39 +55,52 @@ def verify_collected(run, config, assets_digest):
     require(report["schema"] == "alopex.sql-diagnostic-measurement/v1" and
             report["status"] == "passed" and report["assets_digest"] == assets_digest and
             report["source"] == config["source"] and
-            all(report[key] == config[key] for key in ("case", "engine", "trial", "mode")), "CASE")
-    cell = root / "cell"
-    require(digest(cell / "status.json") == report["cell_status_sha256"], "IDENTITY")
-    status = read_json(cell / "status.json")
+            all(report[key] == config[key] for key in ("case", "engine", "trial", "modes")), "CASE")
+    pair = root / "pair"
+    require(digest(pair / "status.json") == report["cell_status_sha256"], "IDENTITY")
+    status = read_json(pair / "status.json")
     require(status["status"] == "passed" and status["worker_error"] is None and
             status["stop_error"] is None, "CASE")
-    result = read_json(cell / "measurement.json")
-    require(digest(cell / "measurement.json") == status["measurement"]["result_sha256"] and
-            digest(cell / "raw.ndjson") == result["raw_sha256"] == status["measurement"]["raw_sha256"] and
-            digest(cell / "client.ndjson") == status["measurement"]["client_sha256"] and
-            digest(cell / "server-timing.json") == report["server_timing_sha256"], "IDENTITY")
-    require(result["trial"] == config["trial"] and result["mode"] == config["mode"] and
-            result["subject_identity"]["source"] == config["source"], "IDENTITY")
-    raw = [json.loads(line) for line in (cell / "raw.ndjson").read_text().splitlines()]
-    verify_cell(result, raw, config, digest(cell / "resources.json"))
-    require(len(raw) == 21 and (cell / "client.ndjson").stat().st_size <= 2_000_000 and
-            (cell / "server-timing.json").stat().st_size <= 5_000_000, "EVIDENCE_BOUND")
-    clients = [json.loads(line) for line in (cell / "client.ndjson").read_text().splitlines()]
-    servers = read_json(cell / "server-timing.json")
-    require(type(servers) is list and len(clients) == expected_client_records(config["mode"]) and
-            len(servers) <= 4_000 and
+    require(digest(pair / "server-timing.json") == report["server_timing_sha256"], "IDENTITY")
+    servers = read_json(pair / "server-timing.json")
+    require(type(servers) is list and len(servers) <= 4_000 and
             all(type(row) is dict and set(row) == {"trace_id", "stage", "duration_ns"}
                 for row in servers), "EVIDENCE_BOUND")
-    summary = {"case": config["case"], "trial": config["trial"], "mode": config["mode"],
-               "result_sha256": result["result_sha256"],
-               "raw_seconds": [row["seconds"] for row in raw],
-               "raw_sha256": result["raw_sha256"]}
-    return summary, clients, servers
+    summaries, clients = [], []
+    for mode in config["modes"]:
+        cell = pair / mode
+        hashes = status["measurement"]["cells"][mode]
+        result = read_json(cell / "measurement.json")
+        require(digest(cell / "measurement.json") == hashes["result_sha256"] and
+                digest(cell / "raw.ndjson") == result["raw_sha256"] == hashes["raw_sha256"] and
+                digest(cell / "client.ndjson") == hashes["client_sha256"], "IDENTITY")
+        require(result["trial"] == config["trial"] and result["mode"] == mode and
+                result["subject_identity"]["source"] == config["source"] and
+                result["pair_server"] == status["measurement"]["server"] and
+                result["fixture_sha256"] == status["measurement"]["fixture_sha256"], "IDENTITY")
+        raw = [json.loads(line) for line in (cell / "raw.ndjson").read_text().splitlines()]
+        verify_cell(result, raw, config, digest(pair / "resources.json"))
+        require(len(raw) == 21 and (cell / "client.ndjson").stat().st_size <= 2_000_000 and
+                (pair / "server-timing.json").stat().st_size <= 5_000_000, "EVIDENCE_BOUND")
+        for row in raw:
+            require({(p["pid"], p["start_ticks"]) for p in row["resources"]["server_processes"]} ==
+                    {(result["pair_server"]["pid"], result["pair_server"]["start_ticks"])}, "IDENTITY")
+        cell_clients = [json.loads(line) for line in (cell / "client.ndjson").read_text().splitlines()]
+        require(len(cell_clients) == expected_client_records(mode), "EVIDENCE_BOUND")
+        clients.extend(cell_clients)
+        summaries.append({"case": config["case"], "trial": config["trial"], "mode": mode,
+                          "result_sha256": result["result_sha256"],
+                          "raw_seconds": [row["seconds"] for row in raw],
+                          "raw_sha256": result["raw_sha256"],
+                          "pair_server": result["pair_server"],
+                          "fixture_sha256": result["fixture_sha256"],
+                          "pair_order": result["pair_order"]})
+    return summaries, clients, servers
 
 
-def execute_cell(profile, budget, config, *, verify=None, recovered=None):
+def execute_pair(profile, budget, config, *, verify=None, recovered=None):
     require(config["source"] == SOURCE and config["engine"] == "alopex-server" and
-            config["case"] in ("aggregate", "ordered") and config["mode"] in ("on", "off") and
+            config["case"] in ("aggregate", "ordered") and config["modes"] == ["on", "off"] and
             type(config["trial"]) is int and config["trial"] in range(3) and
             profile["limits"]["case_seconds"] == 300 and
             profile["limits"]["run_seconds"] == 420 and

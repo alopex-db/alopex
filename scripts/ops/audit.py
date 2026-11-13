@@ -1,9 +1,10 @@
 """Independent, fail-closed join auditor for private #712 trace records."""
 from __future__ import annotations
 
+import math
 import statistics
 
-from diagnostic import CASES, CLIENT_FIELDS, PHASES, STAGES, canonical_uuid, cell_order
+from diagnostic import CASES, CLIENT_FIELDS, PHASES, STAGES, canonical_uuid, pair_order
 
 
 def require(condition, code):
@@ -18,18 +19,25 @@ def nonnegative_int(value):
 def audit(cells, clients, servers, *, expected_oracle, tolerance_ns=0):
     """Accept only allowlisted records; caller verifies sealed artifact/file hashes.
 
-    `cells` contains 12 independently verified frozen raw sample summaries:
-    case, trial, mode, result_sha256, raw_seconds (21 items), raw_sha256.
+    `cells` contains 12 verified mode summaries from six adjacent pairs:
+    case, trial, mode, oracle, 21 raw samples, pair identity and order.
     """
     require(nonnegative_int(tolerance_ns), "invalid_timer_tolerance")
     expected = {(case, trial, mode) for case in CASES for trial in range(3) for mode in ("on", "off")}
     by_cell = {}
     for cell in cells:
         require(type(cell) is dict and set(cell) == {"case", "trial", "mode", "result_sha256",
-                                                    "raw_seconds", "raw_sha256"}, "cell_fields")
+                                                    "raw_seconds", "raw_sha256", "pair_server",
+                                                    "fixture_sha256", "pair_order"}, "cell_fields")
         key = (cell["case"], cell["trial"], cell["mode"])
         require(key in expected and key not in by_cell, "cell_inventory")
         require(cell["result_sha256"] == expected_oracle[cell["case"]], "oracle_identity")
+        server = cell["pair_server"]
+        require(type(server) is dict and set(server) == {"pid", "start_ticks"} and
+                all(nonnegative_int(server[key]) and server[key] > 0 for key in server) and
+                cell["fixture_sha256"] == expected_oracle[cell["case"]] and
+                cell["pair_order"] == [list(pair_order(cell["trial"], i)) for i in range(21)],
+                "pair_identity")
         require(type(cell["raw_sha256"]) is str and len(cell["raw_sha256"]) == 64 and
                 all(c in "0123456789abcdef" for c in cell["raw_sha256"]), "raw_identity")
         raw = cell["raw_seconds"]
@@ -37,6 +45,12 @@ def audit(cells, clients, servers, *, expected_oracle, tolerance_ns=0):
                 all(type(x) in (int, float) and x > 0 and x < float("inf") for x in raw), "raw_samples")
         by_cell[key] = cell
     require(set(by_cell) == expected, "cell_inventory")
+    for case in CASES:
+        for trial in range(3):
+            on, off = (by_cell[(case, trial, mode)] for mode in ("on", "off"))
+            require(on["pair_server"] == off["pair_server"] and
+                    on["fixture_sha256"] == off["fixture_sha256"] and
+                    on["pair_order"] == off["pair_order"], "pair_identity")
 
     by_id = {}
     counts = {key: {phase: set() for phase in PHASES} for key in expected}
@@ -108,19 +122,28 @@ def audit(cells, clients, servers, *, expected_oracle, tolerance_ns=0):
     paired = {}
     for case in CASES:
         deltas = []
+        trial_u = []
         off = []
         for trial in range(3):
-            on_median = statistics.median(by_cell[(case, trial, "on")]["raw_seconds"]) * 1000
-            off_median = statistics.median(by_cell[(case, trial, "off")]["raw_seconds"]) * 1000
+            on_raw = by_cell[(case, trial, "on")]["raw_seconds"]
+            off_raw = by_cell[(case, trial, "off")]["raw_seconds"]
+            off_median = statistics.median(off_raw) * 1000
             off.append(off_median)
-            deltas.append(on_median - off_median)
+            adjacent = [(on_raw[i] - off_raw[i]) * 1000 for i in range(21)]
+            trial_d = statistics.median(adjacent)
+            trial_mad = statistics.median(abs(x - trial_d) for x in adjacent)
+            deltas.append(trial_d)
+            trial_u.append(trial_d + 2 * 1.4826 * trial_mad / math.sqrt(21))
         d = statistics.median(deltas)
         mad = statistics.median(abs(x - d) for x in deltas)
         gap = {"aggregate": 16.106 - 1.093, "ordered": 4.857 - .1938}[case]
         bound = min(.05 * statistics.median(off), .10 * gap)
-        u = d + 2 * 1.4826 * mad
-        paired[case] = {"order": [list(cell_order(i)) for i in range(3)],
-                        "delta_ms": deltas, "D_ms": d, "MAD_ms": mad, "U_ms": u,
+        # The upper bound must cover both within-trial adjacent-pair spread and
+        # between-trial drift. Neither can be averaged away by the other.
+        u = max(d + 2 * 1.4826 * mad, *trial_u)
+        paired[case] = {"order": [[list(pair_order(i, j)) for j in range(21)] for i in range(3)],
+                        "delta_ms": deltas, "trial_U_ms": trial_u,
+                        "D_ms": d, "MAD_ms": mad, "U_ms": u,
                         "bound_ms": bound, "small_overhead": max(0, u) <= bound}
     return {"status": "verified", "measured_uuids": measured,
             "measured_server_events": measured_events, "all_uuids": len(by_id),

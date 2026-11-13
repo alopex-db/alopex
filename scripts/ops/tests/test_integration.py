@@ -92,6 +92,33 @@ def fake_environment(*, drop_callback=False, wrong_result=False, leaked_field=Fa
 
 
 class IntegratedMeasureTests(unittest.TestCase):
+    def test_adjacent_pair_uses_one_fixture_and_no_off_callback(self):
+        with fake_environment() as (measure, parity, calls, observes):
+            remote = sys.modules["alopex"].RemoteDatabase
+            original = remote.execute_sql
+            measured_order = []
+            def observed_sql(connection, sql):
+                if sql == "AGGREGATE_SQL":
+                    measured_order.append("on" if connection.sink else "off")
+                return original(connection, sql)
+            remote.execute_sql = observed_sql
+            with tempfile.TemporaryDirectory() as directory:
+                paths = {mode: Path(directory) / f"{mode}.ndjson" for mode in ("on", "off")}
+                result, clients = measure.measure_pair(parity, "aggregate", 0, paths)
+                raw = {mode: [json.loads(line) for line in paths[mode].read_text().splitlines()]
+                       for mode in paths}
+            self.assertEqual([len(raw[mode]) for mode in paths], [21, 21])
+            self.assertEqual(calls.count("AGGREGATE_SQL"), 50)
+            self.assertEqual(calls.count("CREATE TABLE bench"), 1)
+            self.assertEqual(len(clients["on"]), 28)
+            self.assertEqual(len(clients["off"]), 25)
+            self.assertTrue(all("trace_id" not in row for row in clients["off"]))
+            self.assertEqual(result["on"]["result_sha256"], result["off"]["result_sha256"])
+            self.assertEqual(len(observes), 84)
+            from diagnostic import pair_order
+            self.assertEqual(measured_order[-42:],
+                             [mode for sample in range(21) for mode in pair_order(0, sample)])
+
     def test_on_and_off_preserve_raw_boundary(self):
         for mode in ("on", "off"):
             with self.subTest(mode=mode), fake_environment() as (measure, parity, calls, observes):
@@ -117,6 +144,24 @@ class IntegratedMeasureTests(unittest.TestCase):
                     with self.assertRaises((AssertionError, ValueError)):
                         measure.measure_diagnostic(parity, "aggregate", "on", 0,
                                                    Path(directory) / "raw.ndjson")
+
+    def test_pair_fails_closed_on_callback_or_oracle_change(self):
+        for options in ({"drop_callback": True}, {"wrong_result": True}, {"leaked_field": True}):
+            with self.subTest(options=options), fake_environment(**options) as (measure, parity, _, _):
+                with tempfile.TemporaryDirectory() as directory:
+                    paths = {mode: Path(directory) / f"{mode}.ndjson" for mode in ("on", "off")}
+                    with self.assertRaises((AssertionError, ValueError)):
+                        measure.measure_pair(parity, "aggregate", 0, paths)
+
+    def test_pair_rejects_existing_output_before_samples(self):
+        with fake_environment() as (measure, parity, _, observes):
+            with tempfile.TemporaryDirectory() as directory:
+                paths = {mode: Path(directory) / f"{mode}.ndjson" for mode in ("on", "off")}
+                paths["on"].write_text("existing")
+                with self.assertRaises(FileExistsError):
+                    measure.measure_pair(parity, "aggregate", 0, paths)
+                self.assertEqual(paths["on"].read_text(), "existing")
+                self.assertEqual(observes, [])
 
 
 if __name__ == "__main__":

@@ -58,11 +58,11 @@ def verify_inputs(pin, *, receipt_path, assets_manifest, server, wheel,
 
 def run_prepared(pin, *, job_id, operator_dir, work, export, receipt_path,
                  expected_receipt_sha256, assets_manifest, server, wheel,
-                 certificate, used_bytes, run_cell, cleanup,
+                 certificate, used_bytes, run_pair, cleanup,
                  job_limit_seconds):
     """Wire the existing orchestrator to explicit, independently verified hooks.
 
-    `run_cell` is the private adaptation of the frozen supervisor. Its source
+    `run_pair` is the private adaptation of the frozen supervisor. Its source
     identity and 300/420-second limits must be verified before a live call.
     """
     work, export = Path(work), Path(export)
@@ -89,7 +89,7 @@ def run_prepared(pin, *, job_id, operator_dir, work, export, receipt_path,
             return receipt
 
         hooks = {"qualify": qualify, "used_bytes": used_bytes,
-                 "run_cell": run_cell, "cleanup": cleanup,
+                 "run_pair": run_pair, "cleanup": cleanup,
                  "seal": lambda root, hashes: seal_cms(
                      root, hashes, ciphertext=sealed_dir / "evidence.cms",
                      certificate=certificate)}

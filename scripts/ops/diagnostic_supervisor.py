@@ -29,13 +29,13 @@ INNER_BRANCH = re.compile(INNER_PREFIX +
 
 
 def server_environment(base, mode):
-    if mode not in ("on", "off"):
+    if mode not in ("on", "off", "pair"):
         raise ValueError("INPUT")
     value = dict(base)
     value.pop("ALOPEX_SQL_TIMING", None)
     value["NO_COLOR"] = "1"
     value["RUST_LOG"] = "warn"
-    if mode == "on":
+    if mode in ("on", "pair"):
         value["ALOPEX_SQL_TIMING"] = "1"
         value["RUST_LOG"] = "warn,alopex_sql_private_timing=info"
     return value
@@ -43,12 +43,15 @@ def server_environment(base, mode):
 
 def worker_config(config, output, state, docs, product):
     if config.get("source") != SOURCE or config.get("case") not in ("aggregate", "ordered") or \
-            config.get("mode") not in ("on", "off") or type(config.get("trial")) is not int or \
+            config.get("modes") != ["on", "off"] or type(config.get("trial")) is not int or \
             config["trial"] not in range(3):
         raise ValueError("IDENTITY")
-    return dict(config, schema="alopex.sql-diagnostic-cell/v1",
-                raw=str(output / "raw.ndjson"), result=str(output / "measurement.json"),
-                client=str(output / "client.ndjson"), data=str(state),
+    return dict(config, schema="alopex.sql-diagnostic-pair/v1",
+                outputs={mode: {name: str(output / mode / filename)
+                                for name, filename in (("raw", "raw.ndjson"),
+                                                       ("result", "measurement.json"),
+                                                       ("client", "client.ndjson"))}
+                         for mode in ("on", "off")}, data=str(state),
                 docs_harness_root=str(docs), product_harness_root=str(product))
 
 
@@ -157,7 +160,7 @@ def main():
     require(config["schema"] == "alopex.sql-diagnostic-supervisor/v1" and
             config.get("source") == SOURCE and config.get("engine") == "alopex-server" and
             config.get("case") in ("aggregate", "ordered") and
-            config.get("mode") in ("on", "off") and
+            config.get("modes") == ["on", "off"] and
             type(config.get("trial")) is int and config["trial"] in range(3) and
             request["limits"]["case_seconds"] == 300 and
             request["limits"]["run_seconds"] == 420, "INPUT")
@@ -183,12 +186,14 @@ def main():
     python, env = prepare(assets, request)
     receipt = read_json(contained(INPUT, entries["receipt"]["path"]))
     require(receipt["source"] == config["source"] == SOURCE, "IDENTITY")
-    output = private_dir(WORK / "results/cell")
-    state = private_dir(WORK / "databases/cell")
+    output = private_dir(WORK / "results/pair")
+    for mode in config["modes"]:
+        private_dir(output / mode)
+    state = private_dir(WORK / "databases/pair")
 
     def start():
         return alopex(output, request, assets,
-                      server_environment(env, config["mode"]), state_directory=state)
+                      server_environment(env, "pair"), state_directory=state)
 
     def measure(server, ports):
         def artifact(role):
@@ -216,24 +221,31 @@ def main():
         atomic_json(worker_path, worker)
         command([str(python), "-B", str(INPUT / "worker.py"), str(worker_path)],
                 output / "worker.log", request["limits"]["case_seconds"], worker_env)
-        value = read_json(output / "measurement.json")
-        require(value["case"] == config["case"] and value["engine"] == config["engine"] and
-                value["trial"] == config["trial"] and value["mode"] == config["mode"] and
-                value["subject_identity"]["source"] == config["source"] and
-                value["raw_sha256"] == digest(output / "raw.ndjson"), "IDENTITY")
-        clients = require_client_inventory(
-            [json.loads(line) for line in (output / "client.ndjson").read_text().splitlines()],
-            config["mode"])
+        cell_hashes = {}
+        for mode in config["modes"]:
+            cell = output / mode
+            value = read_json(cell / "measurement.json")
+            require(value["case"] == config["case"] and value["engine"] == config["engine"] and
+                    value["trial"] == config["trial"] and value["mode"] == mode and
+                    value["subject_identity"]["source"] == config["source"] and
+                    value["pair_server"] == identity and
+                    value["raw_sha256"] == digest(cell / "raw.ndjson"), "IDENTITY")
+            require_client_inventory(
+                [json.loads(line) for line in (cell / "client.ndjson").read_text().splitlines()], mode)
+            cell_hashes[mode] = {"result_sha256": digest(cell / "measurement.json"),
+                                 "raw_sha256": value["raw_sha256"],
+                                 "client_sha256": digest(cell / "client.ndjson")}
+        require(read_json(output / "on/measurement.json")["fixture_sha256"] ==
+                read_json(output / "off/measurement.json")["fixture_sha256"], "IDENTITY")
         require(all(digest(contained(INPUT, item["path"])) == item["sha256"] for item in assets["files"]), "IDENTITY")
-        return {"result_sha256": digest(output / "measurement.json"),
-                "raw_sha256": value["raw_sha256"],
-                "client_sha256": digest(output / "client.ndjson")}
+        return {"cells": cell_hashes, "server": identity,
+                "fixture_sha256": value["fixture_sha256"]}
 
     passed = run_owned_server(start, measure, lambda report: atomic_json(output / "status.json", report))
     if passed:
         try:
             atomic_json(output / "server-timing.json",
-                        parse_server_timing(output / "server.log", config["mode"]))
+                        parse_server_timing(output / "server.log", "on"))
         except BaseException:
             passed = False
             status = read_json(output / "status.json")
@@ -245,7 +257,7 @@ def main():
     atomic_json(WORK / "results/result.json", {
         "schema": "alopex.sql-diagnostic-measurement/v1", "status": "passed" if passed else "failed",
         "case": config["case"], "engine": config["engine"], "trial": config["trial"],
-        "mode": config["mode"],
+        "modes": config["modes"],
         "source": config["source"], "assets_digest": digest(INPUT / "assets.json"),
         "cell_status_sha256": digest(output / "status.json"),
         "server_timing_sha256": digest(output / "server-timing.json") if passed else None,

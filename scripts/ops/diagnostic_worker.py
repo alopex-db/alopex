@@ -1,4 +1,4 @@
-"""One task-private #712 diagnostic cell, copied from the frozen SQL worker."""
+"""One task-private #712 diagnostic pair, copied from the frozen SQL worker."""
 from __future__ import annotations
 
 import hashlib
@@ -86,17 +86,16 @@ def enforce_complete_result_order(module):
 
 def main(config):
     require(sys.platform == "linux" and os.geteuid() != 0, "native unprivileged Linux worker required")
-    require(config["schema"] == "alopex.sql-diagnostic-cell/v1", "unknown cell schema")
+    require(config["schema"] == "alopex.sql-diagnostic-pair/v1", "unknown pair schema")
     require(config["case"] in ISOLATED, "case outside independent SQL lane")
     require(config["engine"] == "alopex-server", "unknown SQL engine")
-    require(config.get("mode") in ("on", "off"), "invalid diagnostic mode")
+    require(config.get("modes") == ["on", "off"], "invalid diagnostic modes")
     require(type(config["trial"]) is int and config["trial"] in range(3), "invalid trial")
     os.umask(0o077)
-    output = Path(config["result"])
-    raw_path = Path(config["raw"])
-    client_path = Path(config["client"])
-    require(not output.exists() and not raw_path.exists() and not client_path.exists(),
-            "immutable cell output already exists")
+    paths = {mode: {name: Path(config["outputs"][mode][name])
+                    for name in ("result", "raw", "client")} for mode in config["modes"]}
+    require(all(not path.exists() for cell in paths.values() for path in cell.values()),
+            "immutable pair output already exists")
     for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "RAYON_NUM_THREADS",
                 "TOKIO_WORKER_THREADS", "POLARS_MAX_THREADS"):
         require(os.environ.get(key) == "1", "thread policy mismatch")
@@ -128,20 +127,34 @@ def main(config):
             "856a5def988dfa60f0343c6686ebccbe260e67fde644b5451f6063a8faa1b093",
             "archived SQL harness mismatch")
     isolated = load_module("private_diagnostic_sql", Path(__file__).with_name("diagnostic_measure.py"))
-    result, client = isolated.measure_diagnostic(parity, config["case"], config["mode"],
-                                                 config["trial"], raw_path)
-    raw = [json.loads(line) for line in raw_path.read_text().splitlines()]
-    verify_cell(result, raw, config, resource_digest)
+    from diagnostic import pair_order
+    results, clients = isolated.measure_pair(parity, config["case"], config["trial"],
+                                             {mode: paths[mode]["raw"] for mode in config["modes"]})
+    expected_server = subject["server"]
+    server_identity = (expected_server["pid"], expected_server["start_ticks"])
+    for mode in config["modes"]:
+        raw = [json.loads(line) for line in paths[mode]["raw"].read_text().splitlines()]
+        verify_cell(results[mode], raw, config, resource_digest)
+        require(all({(server["pid"], server["start_ticks"])
+                     for server in row["resources"]["server_processes"]} == {server_identity}
+                    for row in raw), "pair server identity changed")
+        require(results[mode]["result_sha256"] == results["on"]["result_sha256"],
+                "pair fixture oracle changed")
     require(hashlib.sha256(Path(os.environ[ENV]).read_bytes()).hexdigest() == resource_digest,
             "resource manifest changed")
-    result.update(trial=config["trial"], subject_identity=subject,
-                  mode=config["mode"], raw_sha256=hashlib.sha256(raw_path.read_bytes()).hexdigest())
-    with client_path.open("x") as stream:
-        for row in client:
-            stream.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
-    with output.open("x") as stream:
-        json.dump(result, stream, indent=2, allow_nan=False)
-        stream.write("\n")
+    for mode in config["modes"]:
+        result = results[mode]
+        result.update(trial=config["trial"], subject_identity=subject,
+                      mode=mode, raw_sha256=hashlib.sha256(paths[mode]["raw"].read_bytes()).hexdigest(),
+                      pair_server={"pid": server_identity[0], "start_ticks": server_identity[1]},
+                      fixture_sha256=results["on"]["result_sha256"],
+                      pair_order=[list(pair_order(config["trial"], index)) for index in range(21)])
+        with paths[mode]["client"].open("x") as stream:
+            for row in clients[mode]:
+                stream.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
+        with paths[mode]["result"].open("x") as stream:
+            json.dump(result, stream, indent=2, allow_nan=False)
+            stream.write("\n")
 
 
 if __name__ == "__main__":

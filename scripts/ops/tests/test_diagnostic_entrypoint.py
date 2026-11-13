@@ -96,12 +96,12 @@ class EntrypointTests(unittest.TestCase):
             lane.atomic_json(root / "diagnostic-failure.private.json",
                              {"schema": "alopex.sql-diagnostic-failure/v1", "status": "failed",
                               "error_code": "CASE"})
-            run = lane.Run(root / "runs", "diag-aggregate-0-off")
+            run = lane.Run(root / "runs", "diag-aggregate-0")
             run.create({})
             run.record["phase"] = "deleted"
             run.save()
             collected = run.root / "collected"
-            cell = collected / "cell"
+            cell = collected / "pair"
             cell.mkdir(parents=True, mode=0o700)
             lane.atomic_json(collected / "result.json", {"status": "failed"})
             lane.atomic_json(cell / "status.json", {"status": "failed",
@@ -112,8 +112,8 @@ class EntrypointTests(unittest.TestCase):
             worker_log.chmod(0o600)
             lane.atomic_json(run.root / "collection.json", {
                 "result.json": lane.digest(collected / "result.json"),
-                "cell/status.json": lane.digest(cell / "status.json"),
-                "cell/worker.log": lane.digest(worker_log)})
+                "pair/status.json": lane.digest(cell / "status.json"),
+                "pair/worker.log": lane.digest(worker_log)})
             original_status = (cell / "status.json").read_bytes()
             (cell / "status.json").write_bytes(original_status.replace(b"TRACE_FORMAT", b"TRACE_CHANGED"))
             with self.assertRaises(lane.Failure):
@@ -131,9 +131,9 @@ class EntrypointTests(unittest.TestCase):
             self.assertEqual(set(captured), {
                 "diagnostic/diagnostic-failure.private.json",
                 "diagnostic/failed-cell/result.json",
-                "diagnostic/failed-cell/cell/status.json",
-                "diagnostic/failed-cell/cell/worker.log"})
-            self.assertEqual(json.loads(captured["diagnostic/failed-cell/cell/status.json"])
+                "diagnostic/failed-cell/pair/status.json",
+                "diagnostic/failed-cell/pair/worker.log"})
+            self.assertEqual(json.loads(captured["diagnostic/failed-cell/pair/status.json"])
                              ["worker_error"], "TRACE_FORMAT")
             self.assertEqual({path.name for path in (root / "export").iterdir()},
                              {"evidence.cms"})
@@ -148,13 +148,13 @@ class EntrypointTests(unittest.TestCase):
             marker = root / "failed-cell.private.json"
             lane.atomic_json(marker, {
                 "schema": "alopex.sql-diagnostic-failed-cell/v1",
-                "cell_id": "aggregate-0-off", "error_code": "CASE"})
-            run = lane.Run(root / "runs", "diag-aggregate-0-off")
+                "cell_id": "aggregate-0", "error_code": "CASE"})
+            run = lane.Run(root / "runs", "diag-aggregate-0")
             run.create({})
             run.record["phase"] = "deleted"
             run.save()
             collected = run.root / "collected"
-            cell = collected / "cell"
+            cell = collected / "pair"
             cell.mkdir(parents=True, mode=0o700)
             lane.atomic_json(collected / "result.json",
                              {"status": "passed", "source": {"commit": "mismatch"}})
@@ -162,16 +162,16 @@ class EntrypointTests(unittest.TestCase):
                              {"status": "passed", "worker_error": None, "stop_error": None})
             lane.atomic_json(run.root / "collection.json", {
                 "result.json": lane.digest(collected / "result.json"),
-                "cell/status.json": lane.digest(cell / "status.json")})
+                "pair/status.json": lane.digest(cell / "status.json")})
             lane.atomic_json(marker, {
                 "schema": "alopex.sql-diagnostic-failed-cell/v1",
-                "cell_id": "aggregate-0-on", "error_code": "CASE"})
+                "cell_id": "aggregate-9", "error_code": "CASE"})
             with self.assertRaises(lane.Failure):
                 lane.seal_failure(root)
             self.assertFalse((root / "export/evidence.cms").exists())
             lane.atomic_json(marker, {
                 "schema": "alopex.sql-diagnostic-failed-cell/v1",
-                "cell_id": "aggregate-0-off", "error_code": "CASE"})
+                "cell_id": "aggregate-0", "error_code": "CASE"})
             captured = {}
             def encrypt(command, **_):
                 with tarfile.open(root / "diagnostic-failure.tar.gz") as archive:

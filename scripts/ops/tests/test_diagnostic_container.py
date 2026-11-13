@@ -63,7 +63,7 @@ def profile(root):
 
 def config():
     return {"source": SOURCE, "engine": "alopex-server", "case": "aggregate",
-            "trial": 0, "mode": "off"}
+            "trial": 0, "modes": ["on", "off"]}
 
 
 class ContainerTests(unittest.TestCase):
@@ -75,19 +75,20 @@ class ContainerTests(unittest.TestCase):
             budget = Budget()
             def collect(*args):
                 run.record["phase"] = "collected"
-            value = ({"case": "aggregate", "trial": 0, "mode": "off"}, [], [])
+            value = ([{"case": "aggregate", "trial": 0, "mode": mode}
+                      for mode in ("on", "off")], [], [])
             with patch.object(lane, "Run", return_value=run), \
                  patch.object(lane, "MeasurementDocker", return_value=Mock()), \
                  patch.object(lane.envctl, "execute"), \
                  patch.object(lane.envctl, "collect", side_effect=collect):
-                self.assertEqual(lane.execute_cell(p, budget, config(),
+                self.assertEqual(lane.execute_pair(p, budget, config(),
                                                    verify=lambda *a: value), value)
             self.assertEqual(run.record["phase"], "deleted")
             self.assertEqual(run.verified, 1)
             p["limits"]["run_seconds"] = 421
             with patch.object(lane.envctl, "execute") as execute:
                 with self.assertRaises(Exception):
-                    lane.execute_cell(p, Budget(), config())
+                    lane.execute_pair(p, Budget(), config())
                 execute.assert_not_called()
 
     def test_collection_and_cleanup_errors_fail_closed(self):
@@ -100,7 +101,7 @@ class ContainerTests(unittest.TestCase):
                  patch.object(lane.envctl, "execute", side_effect=ValueError("CELL")), \
                  patch.object(lane.envctl, "collect", side_effect=ValueError("COLLECT")):
                 with self.assertRaisesRegex(ValueError, "CELL") as caught:
-                    lane.execute_cell(p, Budget(), config())
+                    lane.execute_pair(p, Budget(), config())
             self.assertTrue(getattr(caught.exception, "cleanup_errors", []))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -112,48 +113,69 @@ class ContainerTests(unittest.TestCase):
                  patch.object(lane.envctl, "execute"), \
                  patch.object(lane.envctl, "collect"):
                 with self.assertRaisesRegex(ValueError, "CLEANUP"):
-                    lane.execute_cell(p, Budget(), config(), verify=lambda *a: ({}, [], []))
+                    lane.execute_pair(p, Budget(), config(), verify=lambda *a: ([], [], []))
 
     def test_collected_client_server_hashes_and_raw_samples(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             run = FakeRun(root, "cell-1")
-            cell = run.root / "collected/cell"
-            cell.mkdir(parents=True)
-            raw = [{"sample": i, "seconds": .1} for i in range(21)]
+            pair = run.root / "collected/pair"
+            pair.mkdir(parents=True)
+            server = {"pid": 10, "start_ticks": 20}
+            raw = [{"sample": i, "seconds": .1,
+                    "resources": {"server_processes": [server]}} for i in range(21)]
             def write(name, value, ndjson=False):
-                path = cell / name
+                path = pair / name
+                path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("".join(json.dumps(x) + "\n" for x in value)
                                 if ndjson else json.dumps(value))
                 return digest(path)
-            raw_hash = write("raw.ndjson", raw, True)
-            client_rows = [{} for _ in range(CLIENT_RECORDS_OFF_CELL)]
-            client_hash = write("client.ndjson", client_rows, True)
             server_hash = write("server-timing.json", [])
             write("resources.json", {})
-            result = {"case": "aggregate", "trial": 0, "mode": "off",
-                      "subject_identity": {"source": SOURCE},
-                      "result_sha256": ORACLE["aggregate"], "raw_sha256": raw_hash}
-            result_hash = write("measurement.json", result)
+            cells = {}
+            for mode in ("on", "off"):
+                raw_hash = write(f"{mode}/raw.ndjson", raw, True)
+                client_rows = [{} for _ in range(370 if mode == "on" else CLIENT_RECORDS_OFF_CELL)]
+                client_hash = write(f"{mode}/client.ndjson", client_rows, True)
+                result = {"case": "aggregate", "trial": 0, "mode": mode,
+                          "subject_identity": {"source": SOURCE},
+                          "result_sha256": ORACLE["aggregate"], "raw_sha256": raw_hash,
+                          "pair_server": server, "fixture_sha256": ORACLE["aggregate"],
+                          "pair_order": [["off", "on"] for _ in range(21)]}
+                result_hash = write(f"{mode}/measurement.json", result)
+                cells[mode] = {"result_sha256": result_hash, "raw_sha256": raw_hash,
+                               "client_sha256": client_hash}
             status_hash = write("status.json", {"status": "passed", "worker_error": None,
                                                "stop_error": None,
-                                               "measurement": {"result_sha256": result_hash,
-                                                               "raw_sha256": raw_hash,
-                                                               "client_sha256": client_hash}})
+                                               "measurement": {"cells": cells, "server": server,
+                                                               "fixture_sha256": ORACLE["aggregate"]}})
             report = {"schema": "alopex.sql-diagnostic-measurement/v1", "status": "passed",
                       "assets_digest": digest(root / "assets.json") if (root / "assets.json").exists() else "a" * 64,
                       "source": SOURCE, "case": "aggregate", "engine": "alopex-server",
-                      "trial": 0, "mode": "off", "cell_status_sha256": status_hash,
+                      "trial": 0, "modes": ["on", "off"], "cell_status_sha256": status_hash,
                       "server_timing_sha256": server_hash}
             (run.root / "collected/result.json").write_text(json.dumps(report))
             with patch.object(lane, "verify_cell"):
-                summary, clients, servers = lane.verify_collected(run, config(),
+                summaries, clients, servers = lane.verify_collected(run, config(),
                                                                     report["assets_digest"])
-                self.assertEqual(len(summary["raw_seconds"]), 21)
-                self.assertEqual((len(clients), servers), (25, []))
+                self.assertEqual([len(summary["raw_seconds"]) for summary in summaries], [21, 21])
+                self.assertEqual((len(clients), servers), (395, []))
                 report["server_timing_sha256"] = "0" * 64
                 (run.root / "collected/result.json").write_text(json.dumps(report))
                 with self.assertRaises(Exception):
+                    lane.verify_collected(run, config(), report["assets_digest"])
+                report["server_timing_sha256"] = server_hash
+                off_path = pair / "off/measurement.json"
+                off = json.loads(off_path.read_text())
+                off["pair_server"] = {"pid": 11, "start_ticks": 20}
+                off_path.write_text(json.dumps(off))
+                status_path = pair / "status.json"
+                status = json.loads(status_path.read_text())
+                status["measurement"]["cells"]["off"]["result_sha256"] = digest(off_path)
+                status_path.write_text(json.dumps(status))
+                report["cell_status_sha256"] = digest(status_path)
+                (run.root / "collected/result.json").write_text(json.dumps(report))
+                with self.assertRaisesRegex(Exception, "IDENTITY"):
                     lane.verify_collected(run, config(), report["assets_digest"])
 
 

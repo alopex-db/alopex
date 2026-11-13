@@ -85,13 +85,13 @@ class DiagnosticSupervisorTests(unittest.TestCase):
     def test_worker_schema_and_source_pin(self):
         config = {"schema": "alopex.sql-diagnostic-supervisor/v1", "source": SOURCE,
                   "engine": "alopex-server", "case": "aggregate", "trial": 0,
-                  "mode": "on"}
+                  "modes": ["on", "off"]}
         result = worker_config(config, Path("/work/results"), Path("/work/data"),
                                Path("/work/docs"), Path("/work/product"))
-        self.assertEqual(result["schema"], "alopex.sql-diagnostic-cell/v1")
-        self.assertEqual(result["client"], "/work/results/client.ndjson")
+        self.assertEqual(result["schema"], "alopex.sql-diagnostic-pair/v1")
+        self.assertEqual(result["outputs"]["on"]["client"], "/work/results/on/client.ndjson")
         for bad in ({**config, "source": {**SOURCE, "commit": "a" * 40}},
-                    {**config, "mode": "unknown"}, {**config, "trial": 3}):
+                    {**config, "modes": ["unknown"]}, {**config, "trial": 3}):
             with self.assertRaisesRegex(ValueError, "IDENTITY"):
                 worker_config(bad, Path("/work"), Path("/data"), Path("/docs"), Path("/product"))
 

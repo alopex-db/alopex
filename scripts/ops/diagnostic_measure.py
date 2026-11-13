@@ -3,6 +3,7 @@ from subject_identity import verify_subject, worker_command
 from sql_resources import ENV as RESOURCE_ENV, OperationResources
 
 import argparse
+from contextlib import ExitStack
 import hashlib
 import importlib.metadata
 import json
@@ -222,6 +223,79 @@ def measure_diagnostic(module, case, mode, trial, raw_path):
         return result, adapter.calls
     finally:
         connection.close()
+
+
+def measure_pair(module, case, trial, raw_paths):
+    """Run both modes on one read-only fixture and one server connection target."""
+    from diagnostic import CellAdapter, pair_order
+    assert case in ("aggregate", "ordered") and trial in range(3)
+    assert set(raw_paths) == {"on", "off"}
+    import alopex
+    adapters = {mode: CellAdapter(case, trial, mode, validate) for mode in ("on", "off")}
+    clients = {}
+    try:
+        for mode in pair_order(trial, 0):
+            options = {"keep_alive": True}
+            if mode == "on":
+                options["sql_timing_sink"] = adapters["on"].sink
+            clients[mode] = alopex.connect(os.environ["ALOPEX_PERF_SERVER_URL"], **options)
+        assert all(isinstance(client, alopex.RemoteDatabase) for client in clients.values()), \
+            "Embedded fallback forbidden"
+        # Only the traced client populates the shared fixture. Both measured
+        # clients run the same read-only SQL against this one server/database.
+        class SetupConnection:
+            def execute_sql(self, sql):
+                return adapters["on"].setup(lambda: clients["on"].execute_sql(sql))
+
+        setup = SetupConnection()
+        setup.execute_sql("DROP TABLE IF EXISTS bench")
+        module._populate_sql(setup, "alopex", ROWS)
+        sql = (module.SQL_AGGREGATE_QUERY if case == "aggregate" else
+               "SELECT id, COALESCE(value, 0) AS value FROM bench WHERE id >= 0 ORDER BY id LIMIT 16")
+        operations = {mode: (lambda mode=mode: clients[mode].execute_sql(sql) or [])
+                      for mode in clients}
+        for mode in pair_order(trial, 0):
+            adapters[mode].call("precheck", operations[mode])
+            for index in range(3):
+                adapters[mode].call("warmup", operations[mode], sample=index)
+        observer = OperationResources.from_environment("alopex-server", None)
+        samples = {mode: [] for mode in clients}
+        with ExitStack() as opened:
+            streams = {mode: opened.enter_context(Path(raw_paths[mode]).open("x"))
+                       for mode in clients}
+            for index in range(21):
+                for mode in pair_order(trial, index):
+                    before = observer.begin() if observer else None
+                    value, elapsed = adapters[mode].call("measured", operations[mode],
+                                                         sample=index, measure=True,
+                                                         defer_oracle=True)
+                    row = {"sample": index, "seconds": elapsed}
+                    try:
+                        if observer:
+                            row["resources"] = observer.end(before)
+                    except Exception:
+                        row["resources"] = {"status": "failed", "error_code": "resource_capture_failed"}
+                        streams[mode].write(json.dumps(row) + "\n")
+                        streams[mode].flush()
+                        raise
+                    streams[mode].write(json.dumps(row) + "\n")
+                    streams[mode].flush()
+                    assert adapters[mode].finalize_result(value) == adapters[mode].expected_checksum
+                    samples[mode].append(elapsed)
+        for adapter in adapters.values():
+            adapter.finish()
+        result = {}
+        for mode in clients:
+            result[mode] = {"case": case, "engine": "alopex-server", "server_client": True,
+                            "fixture_rows": ROWS, "warmups": 3, "samples": 21,
+                            "result_sha256": adapters[mode].expected_checksum,
+                            "latency_p50_ms": statistics.median(samples[mode]) * 1000,
+                            "client_peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024}
+        assert result["on"]["result_sha256"] == result["off"]["result_sha256"]
+        return result, {mode: adapters[mode].calls for mode in clients}
+    finally:
+        for client in clients.values():
+            client.close()
 
 
 def main():

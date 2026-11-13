@@ -42,7 +42,7 @@ class LiveWrapperTests(unittest.TestCase):
                       export=root / "upload", receipt_path=receipt_path,
                       expected_receipt_sha256=sha256(receipt_path), certificate=cert,
                       used_bytes=lambda: 10_000_000_000,
-                      run_cell=lambda cell, binding: groups[(cell["case"], cell["trial"], cell["mode"])],
+                      run_pair=lambda cell, binding: groups[(cell["case"], cell["trial"])],
                       cleanup=lambda: cleanup.append(True) or True,
                       job_limit_seconds=6_000, **files)
         return pin, kwargs, cleanup
@@ -76,7 +76,7 @@ class LiveWrapperTests(unittest.TestCase):
             self.assertFalse(kwargs["export"].exists())
         with tempfile.TemporaryDirectory() as directory:
             pin, kwargs, cleanup = self.prepared(directory)
-            kwargs["run_cell"] = lambda cell, binding: (_ for _ in ()).throw(ValueError("TIMEOUT"))
+            kwargs["run_pair"] = lambda cell, binding: (_ for _ in ()).throw(ValueError("TIMEOUT"))
             kwargs["cleanup"] = lambda: cleanup.append(True) or False
             with self.assertRaises(DiagnosticFailure) as caught:
                 run_prepared(pin, **kwargs)
