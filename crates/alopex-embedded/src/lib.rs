@@ -859,6 +859,9 @@ impl Database {
         entries: &HashMap<String, alopex_sql::storage::HnswTxnEntry>,
         visit: impl FnOnce(&mut dyn FnMut(&[u8])) -> bool,
     ) -> Vec<(String, HnswIndex)> {
+        if entries.is_empty() {
+            return Vec::new();
+        }
         let mut has_writes = false;
         if !visit(&mut |_| has_writes = true) || has_writes {
             return Vec::new();
@@ -2711,6 +2714,15 @@ mod tests {
         .unwrap();
         index.upsert(b"row", &vec![1.0; dimension], b"").unwrap();
         index
+    }
+
+    #[test]
+    fn empty_hnsw_loads_skip_write_set_visit() {
+        let entries = HashMap::new();
+        let reusable = Database::reusable_hnsw_loads(&entries, |_| {
+            panic!("no HNSW loads require no write-set visit")
+        });
+        assert!(reusable.is_empty());
     }
 
     #[test]
