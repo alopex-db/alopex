@@ -63,6 +63,23 @@ class DiagnosticSupervisorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "TRACE_FORMAT"):
                 parse_server_timing(path, "off")
 
+    def test_http_request_span_before_target_is_reduced(self):
+        trace = "123e4567-e89b-42d3-a456-426614174000"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.log"
+            path.write_text(
+                "2026 INFO http_request{correlation_id=diag-" + trace +
+                " traceparent= method=POST path=/v1/sql}: "
+                "alopex_sql_private_timing: sql diagnostic stage "
+                f"trace_id={trace} stage=\"result_map\" duration_ns=42\n")
+            self.assertEqual(parse_server_timing(path, "on"),
+                             [{"trace_id": trace, "stage": "result_map", "duration_ns": 42}])
+            with self.assertRaisesRegex(ValueError, "TRACE_FORMAT"):
+                parse_server_timing(path, "off")
+            path.write_text(path.read_text().replace("http_request{", "other_request{"))
+            with self.assertRaisesRegex(ValueError, "TRACE_FORMAT"):
+                parse_server_timing(path, "on")
+
     def test_malformed_target_and_oversize_log_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "server.log"

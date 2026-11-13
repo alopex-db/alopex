@@ -15,7 +15,7 @@ TARGET = "alopex_sql_private_timing"
 STAGES = {"transaction_setup", "route_plan", "execute_multi",
           "completion_and_commit", "result_map", "execute_and_map", "response_build"}
 TIMING = re.compile(
-    r"\bINFO alopex_sql_private_timing: sql diagnostic stage "
+    r"\bINFO (?:http_request\{[^{}\r\n]*\}: )?alopex_sql_private_timing: sql diagnostic stage "
     r"trace_id=([0-9a-f-]{36}) stage=\"?([a-z_]+)\"? duration_ns=([0-9]+)\s*$")
 
 
