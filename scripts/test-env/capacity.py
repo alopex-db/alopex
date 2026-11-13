@@ -94,8 +94,23 @@ def readonly_sudo_du_bytes(root, *, timeout):
                                 timeout=timeout, check=False)
     except (OSError, UnicodeError, subprocess.TimeoutExpired) as error:
         raise Failure("MEASUREMENT", str(error)) from error
-    require(result.returncode == 0 and not result.stderr and
-            len(result.stdout.encode("utf-8")) <= 4096, "MEASUREMENT")
+    if result.returncode != 0 or result.stderr or len(result.stdout.encode("utf-8")) > 4096:
+        stderr = result.stderr.lower()
+        if "permission denied" in stderr or "password" in stderr or "not allowed" in stderr:
+            stderr_kind = "authorization"
+        elif "no such file or directory" in stderr:
+            stderr_kind = "missing_entry"
+        elif stderr:
+            stderr_kind = "other"
+        else:
+            stderr_kind = "none"
+        exit_kind = ("zero" if result.returncode == 0 else
+                     "one" if result.returncode == 1 else
+                     "signal" if result.returncode < 0 else "other_nonzero")
+        output_kind = "oversize" if len(result.stdout.encode("utf-8")) > 4096 else "bounded"
+        # Only fixed categories enter the private failure receipt. Never copy
+        # raw stderr, which may contain confidential machine paths.
+        raise Failure("MEASUREMENT", f"sudo_du:{exit_kind}:{stderr_kind}:{output_kind}")
     fields = result.stdout.splitlines()
     require(len(fields) == 1, "MEASUREMENT")
     parts = fields[0].split("\t")

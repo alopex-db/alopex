@@ -229,6 +229,24 @@ class ReadonlyDockerRoot(unittest.TestCase):
                 Budget(self.config).used()
             self.assertEqual(caught.exception.code, "MEASUREMENT")
 
+    def test_sudo_du_failure_receipt_has_fixed_categories_without_raw_stderr(self):
+        cases = (
+            (self.result("", returncode=1, stderr="du: cannot access /private/root: No such file or directory"),
+             "sudo_du:one:missing_entry:bounded"),
+            (self.result("", returncode=1, stderr="sudo: a password is required for /private/root"),
+             "sudo_du:one:authorization:bounded"),
+            (self.result("", stderr="unexpected /private/root"),
+             "sudo_du:zero:other:bounded"),
+            (self.result("x" * 4097), "sudo_du:zero:none:oversize"),
+        )
+        for result, expected in cases:
+            with self.subTest(expected=expected), patch("capacity.subprocess.run", return_value=result):
+                with self.assertRaises(Failure) as caught:
+                    readonly_sudo_du_bytes(self.docker, timeout=2)
+                self.assertEqual(caught.exception.code, "MEASUREMENT")
+                self.assertEqual(caught.exception.detail, expected)
+                self.assertNotIn("/private/root", caught.exception.detail)
+
     def test_zero_is_a_complete_observation_and_malformed_values_fail(self):
         with patch("capacity.subprocess.run", return_value=self.result(f"0\t{self.docker}\n")):
             self.assertEqual(readonly_sudo_du_bytes(self.docker, timeout=2), 0)

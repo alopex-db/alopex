@@ -22,6 +22,21 @@ on:
         required: false
         type: boolean
         default: false
+      wal_diagnostic_mode:
+        description: Observe one pinned #682 WAL shape after same-job #804 qualification
+        required: false
+        type: boolean
+        default: false
+      wal_diagnostic_shape:
+        description: One explanatory before/candidate shape; never performance acceptance
+        required: false
+        type: choice
+        default: kv-16
+        options:
+          - kv-16
+          - kv-2048
+          - sql-16
+          - sql-2048
       expected_controller_sha:
         description: Exact controller commit for qualification mode
         required: false
@@ -37,7 +52,7 @@ concurrency:
 
 jobs:
   inventory:
-    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode }}
+    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.wal_diagnostic_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -48,6 +63,11 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: python3 -B scripts/ops/hosted_test_env_inventory.py
+      - name: Probe schedstat capability for issue 682
+        if: inputs.issue_number == '682'
+        env:
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: python3 -B scripts/ops/schedstat_capability_probe.py
       - name: Preserve encrypted inventory
         if: always()
         uses: actions/upload-artifact@v4
@@ -58,7 +78,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   qualification:
-    if: inputs.qualification_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode) || (inputs.issue_number == '712' && inputs.sql_four_case_mode))
+    if: inputs.qualification_mode && !inputs.wal_diagnostic_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode) || (inputs.issue_number == '712' && inputs.sql_four_case_mode))
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -255,7 +275,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   wal_cost_682:
-    if: inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode
+    if: (inputs.wal_cost_mode || inputs.wal_diagnostic_mode) && !(inputs.wal_cost_mode && inputs.wal_diagnostic_mode) && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
@@ -415,6 +435,7 @@ jobs:
           fetch-depth: 1
           path: frozen-wal-controller
       - name: Qualify and measure on the same runner
+        if: inputs.wal_cost_mode
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -428,7 +449,7 @@ jobs:
             --config "$GITHUB_WORKSPACE/qualification-controller/scripts/ops/wal_cost_next/exact-a415-wal-cost-input.private.json" \
             --config-sha256 24c31ed86f5643edfef6789b345e12d610e71d05c1c3a905d84e17c3771c055b
       - name: Seal wrapper evidence
-        if: always()
+        if: always() && inputs.wal_cost_mode
         run: |
           python3 -B qualification-controller/scripts/ops/wal_cost_next/seal_wrapper.py \
             --qualification "$GITHUB_WORKSPACE/qualification-controller" \
@@ -436,7 +457,7 @@ jobs:
             --private "$RUNNER_TEMP/alopex-804-qualification" \
             --output "$GITHUB_WORKSPACE/wal-cost-wrapper-export"
       - name: Preserve encrypted and allowlisted evidence
-        if: always()
+        if: always() && inputs.wal_cost_mode
         uses: actions/upload-artifact@v4
         with:
           name: v0817-682-wal-cost-same-job
@@ -448,6 +469,54 @@ jobs:
             frozen-wal-controller/wal-cost-export/private-evidence.cms
             wal-cost-wrapper-export/public.json
             wal-cost-wrapper-export/private-evidence.cms
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Qualify and observe one diagnostic pair
+        if: inputs.wal_diagnostic_mode
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_KIND: github-hosted
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          GH_TOKEN: ${{ github.token }}
+          DIAGNOSTIC_SHAPE: ${{ inputs.wal_diagnostic_shape }}
+        run: |
+          case "$DIAGNOSTIC_SHAPE" in
+            kv-16) surface=kv; value_bytes=16 ;;
+            kv-2048) surface=kv; value_bytes=2048 ;;
+            sql-16) surface=sql; value_bytes=16 ;;
+            sql-2048) surface=sql; value_bytes=2048 ;;
+            *) exit 1 ;;
+          esac
+          python3 -B qualification-controller/scripts/ops/wal_cost_next/diagnostic_same_job_wrapper.py \
+            --qualification-checkout "$GITHUB_WORKSPACE/qualification-controller" \
+            --frozen-checkout "$GITHUB_WORKSPACE/frozen-wal-controller" \
+            --config "$GITHUB_WORKSPACE/qualification-controller/scripts/ops/wal_cost_next/exact-a415-wal-cost-input.private.json" \
+            --diagnostic-sources "$GITHUB_WORKSPACE/qualification-controller/scripts/ops/wal_cost_next/diagnostic_sources.lock.json" \
+            --surface "$surface" --value-bytes "$value_bytes"
+      - name: Seal diagnostic wrapper evidence
+        if: always() && inputs.wal_diagnostic_mode
+        run: |
+          python3 -B qualification-controller/scripts/ops/wal_cost_next/diagnostic_seal_wrapper.py \
+            --qualification "$GITHUB_WORKSPACE/qualification-controller" \
+            --private "$RUNNER_TEMP/alopex-804-qualification" \
+            --diagnostic-private "$RUNNER_TEMP/alopex-682-diagnostic-private" \
+            --diagnostic-export "$GITHUB_WORKSPACE/qualification-controller/wal-diagnostic-export" \
+            --output "$GITHUB_WORKSPACE/wal-diagnostic-wrapper-export"
+      - name: Preserve encrypted diagnostic evidence
+        if: always() && inputs.wal_diagnostic_mode
+        uses: actions/upload-artifact@v4
+        with:
+          name: v0817-682-wal-one-pair-diagnostic
+          path: |
+            native-qualification-export/public.json
+            qualification-controller/native-qualification-export/public.json
+            qualification-controller/native-qualification-export/private-evidence.cms
+            qualification-controller/wal-diagnostic-export/result.json
+            qualification-controller/wal-diagnostic-export/private-evidence.cms
+            wal-diagnostic-wrapper-export/public.json
+            wal-diagnostic-wrapper-export/private-evidence.cms
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
