@@ -165,7 +165,7 @@ def verify_same_job(args, early_storage):
         public, args.qualification_private, module, os.environ['GITHUB_RUN_ID'],
         module.admission_facts())
     require(prior['storage'] == early_storage, 'qualification storage scope changed')
-    return prior['storage']
+    return prior['storage'], module.Budget
 
 
 def load_frozen(frozen):
@@ -257,13 +257,24 @@ def seal_evidence(work, export, certificate, helper):
     return helper.sha(archive), helper.sha(encrypted)
 
 
+def diagnostic_budget_config(storage):
+    """Keep the qualified host's root ownership and measurement method."""
+    require(storage.get('stop_bytes') == STOP_BYTES and
+            storage.get('readonly_sudo_du_root') in storage.get('roots', ()) and
+            storage.get('readonly_sudo_du_timeout_seconds') == 60,
+            'qualified storage method differs')
+    return dict(storage, reserve_bytes=256_000_000, poll_seconds=2,
+                planned_bytes=dict(prepare=PEAK_ADDITIONAL_BYTES,
+                                   measure=128_000_000, collect=32_000_000))
+
+
 def run(args, state=None):
     if state is None:
         state = dict(phase='preflight', failure_phase=None,
                      original_error=None, cleanup_error=None)
     config, early_storage = verify_inputs(args)
     state['phase'] = 'same_job_qualification'
-    storage = verify_same_job(args, early_storage)
+    storage, qualified_budget = verify_same_job(args, early_storage)
     state['phase'] = 'runtime_preparation'
     helper = load_frozen(args.frozen_checkout)
     os.umask(0o077)
@@ -275,10 +286,7 @@ def run(args, state=None):
             any(args.private_root.resolve().is_relative_to(p.resolve()) for p in roots) and
             any(args.export_root.resolve().is_relative_to(p.resolve()) for p in roots),
             'host storage scope differs')
-    budget = helper.Budget(dict(roots=list(map(str, roots)), stop_bytes=STOP_BYTES,
-                                reserve_bytes=256_000_000, poll_seconds=2,
-                                planned_bytes=dict(prepare=PEAK_ADDITIONAL_BYTES,
-                                                   measure=128_000_000, collect=32_000_000)))
+    budget = qualified_budget(diagnostic_budget_config(storage))
     require(budget.used() + PEAK_ADDITIONAL_BYTES + 256_000_000 < STOP_BYTES,
             'host storage headroom insufficient')
     work = args.private_root / 'diagnostic'

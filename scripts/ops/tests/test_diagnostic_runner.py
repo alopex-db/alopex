@@ -17,6 +17,44 @@ def digest(path):
 
 
 class DiagnosticRunnerTests(unittest.TestCase):
+    def test_diagnostic_budget_retains_qualified_sudo_measurement(self):
+        storage = dict(roots=['/qualified/work', '/qualified/docker'],
+                       readonly_sudo_du_root='/qualified/docker',
+                       readonly_sudo_du_timeout_seconds=60,
+                       runtime_storage_roots=['/qualified/docker'],
+                       stop_bytes=runner.STOP_BYTES, reserve_bytes=1_000_000_000,
+                       poll_seconds=10, planned_bytes={'build': 5_000_000_000})
+        config = runner.diagnostic_budget_config(storage)
+        self.assertEqual(config['roots'], storage['roots'])
+        self.assertEqual(config['readonly_sudo_du_root'], '/qualified/docker')
+        self.assertEqual(config['readonly_sudo_du_timeout_seconds'], 60)
+        self.assertEqual(config['runtime_storage_roots'], storage['runtime_storage_roots'])
+        self.assertEqual(config['planned_bytes']['prepare'], runner.PEAK_ADDITIONAL_BYTES)
+        self.assertEqual(config['stop_bytes'], runner.STOP_BYTES)
+        with self.assertRaisesRegex(RuntimeError, 'qualified storage method differs'):
+            runner.diagnostic_budget_config(dict(storage, readonly_sudo_du_root=None))
+
+    def test_qualified_budget_uses_sudo_only_for_its_admitted_root(self):
+        repo = Path(runner.__file__).resolve().parents[3]
+        qualified = runner.same_job_wrapper.load_qualification_module(repo)
+        capacity = sys.modules[qualified.Budget.__module__]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            work, docker = root / 'work', root / 'docker'
+            work.mkdir(); docker.mkdir()
+            storage = dict(roots=[str(work), str(docker)],
+                           readonly_sudo_du_root=str(docker),
+                           readonly_sudo_du_timeout_seconds=60,
+                           stop_bytes=runner.STOP_BYTES)
+            observed = []
+            budget = qualified.Budget(runner.diagnostic_budget_config(storage),
+                                      measure=lambda roots: observed.append(roots) or 11)
+            with mock.patch.object(capacity, 'readonly_sudo_du_bytes', return_value=7) as sudo:
+                self.assertEqual(budget.used(), 18)
+            self.assertEqual(observed, [[str(work)]])
+            self.assertEqual(sudo.call_args.args, (docker,))
+            self.assertEqual(sudo.call_args.kwargs, {'timeout': 60})
+
     def test_versioned_source_lock_matches_diagnostic_modules(self):
         directory = Path(runner.__file__).parent
         locked = json.loads((directory / 'diagnostic_sources.lock.json').read_bytes())
@@ -35,9 +73,11 @@ class DiagnosticRunnerTests(unittest.TestCase):
                                          sources={'source.py': digest(frozen / 'source.py')})))
         private = root / 'qualification'
         private.mkdir()
-        (private / 'admission.private.json').write_text(json.dumps({'storage': {'roots': [str(root)]}}))
+        storage = dict(roots=[str(root)], readonly_sudo_du_root=str(root),
+                       readonly_sudo_du_timeout_seconds=60, stop_bytes=runner.STOP_BYTES)
+        (private / 'admission.private.json').write_text(json.dumps({'storage': storage}))
         (private / 'profile.json').write_text(json.dumps({'run_id': 'hosted-804-123',
-                                                          'storage': {'roots': [str(root)]}}))
+                                                          'storage': storage}))
         public = root / 'qualification.json'
         public.write_text(json.dumps(dict(schema='alopex.hosted-test-env-qualification/v1',
                                           case='HOST_QUALIFICATION', outcome='passed',
@@ -104,8 +144,10 @@ class DiagnosticRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             args = self.fixture(Path(directory))
             facts = {'same': 'host'}
+            qualified_budget = object()
             module = types.SimpleNamespace(verified_controller=lambda: None,
-                                           admission_facts=lambda: facts)
+                                           admission_facts=lambda: facts,
+                                           Budget=qualified_budget)
             storage = {'roots': [directory]}
             expected = '1' * 40
             with mock.patch.dict(runner.os.environ, {'GITHUB_SHA': expected,
@@ -116,7 +158,8 @@ class DiagnosticRunnerTests(unittest.TestCase):
                                    return_value=module), \
                  mock.patch.object(runner.same_job_wrapper, 'verify_qualification',
                                    return_value={'storage': storage}) as qualify:
-                self.assertEqual(runner.verify_same_job(args, storage), storage)
+                self.assertEqual(runner.verify_same_job(args, storage),
+                                 (storage, qualified_budget))
                 self.assertEqual(qualify.call_args.args[3:], ('123', facts))
                 qualify.side_effect = RuntimeError('qualification failed')
                 with self.assertRaisesRegex(RuntimeError, 'qualification failed'):
@@ -306,11 +349,15 @@ class DiagnosticRunnerTests(unittest.TestCase):
                     return 0
             def atomic_json(path, value):
                 path.write_text(json.dumps(value))
-            helper = types.SimpleNamespace(Budget=Budget, atomic_json=atomic_json)
+            helper = types.SimpleNamespace(Budget=lambda _: self.fail('frozen budget used'),
+                                           atomic_json=atomic_json)
+            qualified_storage = dict(roots=[directory], readonly_sudo_du_root=directory,
+                                     readonly_sudo_du_timeout_seconds=60,
+                                     stop_bytes=runner.STOP_BYTES)
             with mock.patch.object(runner, 'verify_inputs',
                                    return_value=({'products': {}}, {'roots': [directory]})), \
                  mock.patch.object(runner, 'verify_same_job',
-                                   return_value={'roots': [directory]}), \
+                                   return_value=(qualified_storage, Budget)), \
                  mock.patch.object(runner, 'load_frozen', return_value=helper), \
                  mock.patch.object(runner.os, 'umask'), \
                  mock.patch.object(runner.os, 'sched_getaffinity', return_value={0, 1},
