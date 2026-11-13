@@ -22,7 +22,7 @@ QUALIFICATION_CASES = ("E01", "E02", "E03", "E04", "E05", "E06", "E07",
 ORACLE = {"aggregate": "9526c7a7b4705e368f15fcc97fe25199d4cb2472b331236b560383d20c9807de",
           "ordered": "04ecfc3159f09b1f84e104801fd8c7bfa98469cd91072a47d60baf0b049c962f"}
 FILES = {"manifest.json": 16_384, "cells.ndjson": 131_072, "client.ndjson": 2_000_000,
-         "server.ndjson": 5_000_000, "join-audit.json": 131_072,
+         "server.ndjson": 5_000_000, "join-audit.json": 512_000,
          "paired-summary.json": 16_384}
 MAX_CLIENT = 12 * CLIENT_RECORDS_PER_CELL
 MAX_SERVER = 20_000

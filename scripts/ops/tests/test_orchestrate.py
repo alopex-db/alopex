@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 from orchestrate import (DiagnosticFailure, FILES, MAX_CLIENT, ORACLE, SOURCE_COMMIT, SOURCE_TREE, QUALIFICATION_CASES, orchestrate,
-                         plan, sha256, validate_dispatch)
+                         plan, sha256, validate_dispatch, write_evidence)
 from test_diagnostic import fixture
 from diagnostic import CLIENT_RECORDS_PER_CELL
 from common import Failure
@@ -69,6 +69,19 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(setup, 345)
         self.assertEqual(CLIENT_RECORDS_PER_CELL, setup + 1 + 3 + 21)
         self.assertEqual(MAX_CLIENT, 12 * CLIENT_RECORDS_PER_CELL)
+
+    def test_full_trace_residual_inventory_fits_bounded_evidence(self):
+        # Six traced cells each record the frozen setup plus measured calls.
+        residuals = [{"trace_id": f"00000000-0000-4000-8000-{index:012x}",
+                      "unattributed_ns": 2**63 - 1,
+                      "combined_transport_residual_ns": 2**63 - 1}
+                     for index in range(6 * CLIENT_RECORDS_PER_CELL)]
+        with tempfile.TemporaryDirectory() as directory:
+            hashes = write_evidence(directory, {}, [{} for _ in range(12)], [], [],
+                                    {"timer_residuals": residuals, "paired": {}}, True)
+            size = hashes["join-audit.json"]["size"]
+            self.assertGreater(size, 131_072)
+            self.assertLessEqual(size, FILES["join-audit.json"])
 
     def run_fake(self, *, mutate=None, cleanup=True, sealed=True,
                  qualification=True, cell_failure=False, job_limit_seconds=6_000,
