@@ -11,6 +11,7 @@ import json
 from pathlib import Path, PurePosixPath
 import shutil
 
+from common import atomic_json
 from orchestrate import (QUALIFICATION_CASES, SOURCE_COMMIT, SOURCE_TREE,
                          commit, digest, plan, require, sha256)
 
@@ -210,6 +211,6 @@ def prepare_diagnostic_cell(product_manifest, destination, harness, harness_reco
         shutil.copyfile(path, destination / target_name)
         add(role, target_name)
     output = destination / "assets.json"
-    output.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+    atomic_json(output, manifest)
     verify_assets(output, "linux/amd64")
     return output, config

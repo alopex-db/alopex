@@ -11,6 +11,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from common import atomic_json
 from orchestrate import QUALIFICATION_CASES, SOURCE_COMMIT, SOURCE_TREE, plan, validate_dispatch
 from same_job_1951 import (LOCK_SHA256, OPERATORS, SECCOMP_SHA256, derive_receipt,
                            prepare_diagnostic_cell)
@@ -137,6 +138,9 @@ class SameJob1951Tests(unittest.TestCase):
             self.assertEqual({item["role"] for item in json.loads(output.read_text())["files"]},
                              {"server", "wheel", "library", "receipt", "harness",
                               "measurement_config", *OPERATORS})
+            staged = root / "staged/assets.json"
+            atomic_json(staged, json.loads(output.read_text()))
+            self.assertEqual(output.read_bytes(), staged.read_bytes())
             self.assertEqual((root / "cell/controller.py").read_bytes(),
                              (HERE / "diagnostic_supervisor.py").read_bytes())
             altered = {role: dict(record) for role, record in operators.items()}
