@@ -46,6 +46,13 @@ class FakeChild:
 
 
 class DiagnosticSameJobWrapperTests(unittest.TestCase):
+    def test_checked_in_diagnostic_inputs_match_wrapper_pins(self):
+        root = Path(__file__).resolve().parents[1] / 'wal_cost_next'
+        self.assertEqual(wrapper.shared.sha(root / 'exact-a415-wal-cost-input.private.json'),
+                         wrapper.EXACT_CONFIG_SHA256)
+        self.assertEqual(wrapper.shared.sha(root / 'diagnostic_sources.lock.json'),
+                         wrapper.DIAGNOSTIC_LOCK_SHA256)
+
     def test_wrapper_command_parses_at_diagnostic_runner_boundary(self):
         root = Path('/example')
         args = types.SimpleNamespace(qualification_checkout=root / 'current',
