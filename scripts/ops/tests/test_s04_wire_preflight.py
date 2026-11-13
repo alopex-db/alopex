@@ -5,12 +5,14 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
 import socket
 import stat
 import struct
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -18,6 +20,32 @@ SCRIPT = Path(__file__).resolve().parents[1] / "s04_wire_preflight.py"
 SPEC = importlib.util.spec_from_file_location("s04_wire_preflight", SCRIPT)
 preflight = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(preflight)
+
+
+def reap_child_bounded(pid, timeout=2):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            reaped, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if reaped == pid:
+            return
+        time.sleep(0.01)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            reaped, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if reaped == pid:
+            return
+        time.sleep(0.01)
+    raise AssertionError("child_reap_timeout")
 
 
 class Parser(unittest.TestCase):
@@ -107,6 +135,14 @@ class PrivacyAndCleanup(unittest.TestCase):
 
 
 class DaemonPeer(unittest.TestCase):
+    def test_bounded_child_reap_kills_after_deadline(self):
+        with mock.patch.object(time, "monotonic", side_effect=[0, 3, 3, 3.1]), \
+             mock.patch.object(os, "kill") as kill, \
+             mock.patch.object(os, "waitpid", return_value=(12345, 0)) as wait:
+            reap_child_bounded(12345)
+        kill.assert_called_once_with(12345, signal.SIGKILL)
+        wait.assert_called_once_with(12345, os.WNOHANG)
+
     @staticmethod
     def write_stat(proc, pid=12345, starttime=42):
         (proc / "stat").write_text(f"{pid} (daemon) S " + "0 " * 18 + f"{starttime}\n")
@@ -363,16 +399,19 @@ class DaemonPeer(unittest.TestCase):
                 peer_fd = struct.unpack("i", raw_fd)[0]
                 self.assertTrue(preflight.pidfd_alive(peer_fd))
                 os.write(write_end, b"x")
-                os.waitpid(child, 0)
+                reaped_pid = child
+                reap_child_bounded(child)
                 child = None
                 self.assertFalse(preflight.pidfd_alive(peer_fd))
+                with self.assertRaises(ChildProcessError):
+                    os.waitpid(reaped_pid, os.WNOHANG)
             finally:
                 if child is not None:
                     try:
                         os.write(write_end, b"x")
                     except BrokenPipeError:
                         pass
-                    os.waitpid(child, 0)
+                    reap_child_bounded(child)
                 if peer_fd is not None:
                     os.close(peer_fd)
                 if accepted is not None:
