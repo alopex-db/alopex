@@ -1,6 +1,7 @@
 """Offline bounds and cleanup checks. Never calls a Docker daemon."""
-import importlib.util
+import errno
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -105,6 +106,10 @@ class PrivacyAndCleanup(unittest.TestCase):
 
 
 class DaemonPeer(unittest.TestCase):
+    @staticmethod
+    def write_stat(proc, pid=12345, starttime=42):
+        (proc / "stat").write_text(f"{pid} (daemon) S " + "0 " * 18 + f"{starttime}\n")
+
     def probe(self, pid, proc_root):
         with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
             path = Path(directory) / "daemon.sock"
@@ -135,12 +140,16 @@ class DaemonPeer(unittest.TestCase):
             executable.write_bytes(b"review-me")
             proc = root / "proc" / "12345"
             proc.mkdir(parents=True)
+            self.write_stat(proc)
             (proc / "exe").symlink_to(executable)
             with mock.patch.object(preflight.shutil, "which", return_value=None):
                 peer = self.probe(12345, root / "proc")
             self.assertEqual(peer["status"], "peer_executable_observed")
             self.assertEqual(peer["executable_sha256"],
                              hashlib.sha256(b"review-me").hexdigest())
+            self.assertEqual(peer["pid_lifecycle"], "stable")
+            self.assertEqual(peer["pid_before"]["starttime"], 42)
+            self.assertEqual(peer["pid_after"]["starttime"], 42)
             self.assertNotIn("package_lookup", peer)
 
     def test_oversized_peer_executable_is_not_hashed(self):
@@ -150,6 +159,7 @@ class DaemonPeer(unittest.TestCase):
             executable.write_bytes(b"too-large")
             proc = root / "proc" / "12345"
             proc.mkdir(parents=True)
+            self.write_stat(proc)
             (proc / "exe").symlink_to(executable)
             with mock.patch.object(preflight, "MAX_PEER_EXECUTABLE", 4):
                 peer = self.probe(12345, root / "proc")
@@ -164,7 +174,79 @@ class DaemonPeer(unittest.TestCase):
             (proc / "exe").symlink_to(root / "missing")
             peer = self.probe(12345, root / "proc")
             self.assertEqual(peer["status"], "peer_executable_unobservable")
+            self.assertEqual(peer["executable_errno_class"], "not_found")
             self.assertNotIn("executable_sha256", peer)
+
+    def test_permission_denied_executable_is_distinct_from_exited_peer(self):
+        with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
+            proc = Path(directory) / "proc" / "12345"
+            proc.mkdir(parents=True)
+            self.write_stat(proc)
+            real_open = preflight.os.open
+
+            def deny_executable(path, flags, *args, **kwargs):
+                if str(path).endswith("/exe"):
+                    raise PermissionError(errno.EACCES, "denied")
+                return real_open(path, flags, *args, **kwargs)
+
+            with mock.patch.object(preflight.os, "open", side_effect=deny_executable):
+                peer = self.probe(12345, Path(directory) / "proc")
+            self.assertEqual(peer["executable_errno_class"], "permission_denied")
+            self.assertEqual(peer["executable_error_stage"], "open")
+            self.assertEqual(peer["pid_lifecycle"], "stable")
+            self.assertNotIn("executable_sha256", peer)
+
+    def test_stat_and_readlink_denials_have_fixed_stage_and_class(self):
+        with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
+            root = Path(directory)
+            executable = root / "daemon-binary"
+            executable.write_bytes(b"review-me")
+            proc = root / "proc" / "12345"
+            proc.mkdir(parents=True)
+            self.write_stat(proc)
+            (proc / "exe").symlink_to(executable)
+            real_stat = preflight.Path.stat
+            real_readlink = preflight.os.readlink
+
+            def deny_stat(path, *args, **kwargs):
+                if str(path).endswith("/exe"):
+                    raise PermissionError(errno.EACCES, "denied")
+                return real_stat(path, *args, **kwargs)
+
+            def deny_readlink(path, *args, **kwargs):
+                if str(path).endswith("/exe"):
+                    raise PermissionError(errno.EACCES, "denied")
+                return real_readlink(path, *args, **kwargs)
+
+            for stage in ("stat", "readlink"):
+                patcher = (mock.patch.object(preflight.Path, "stat", autospec=True,
+                                             side_effect=deny_stat) if stage == "stat" else
+                           mock.patch.object(preflight.os, "readlink", side_effect=deny_readlink))
+                with self.subTest(stage=stage), patcher:
+                    peer = self.probe(12345, root / "proc")
+                self.assertEqual(peer["executable_error_stage"], stage)
+                self.assertEqual(peer["executable_errno_class"], "permission_denied")
+                self.assertEqual(peer["pid_lifecycle"], "stable")
+                self.assertNotIn("executable_sha256", peer)
+
+    def test_vanished_or_reused_pid_never_attributes_executable(self):
+        with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
+            root = Path(directory)
+            executable = root / "daemon-binary"
+            executable.write_bytes(b"review-me")
+            proc = root / "proc" / "12345"
+            proc.mkdir(parents=True)
+            (proc / "exe").symlink_to(executable)
+            for after, lifecycle in (({"state": "not_found"}, "exited"),
+                                     ({"state": "present", "starttime": 43}, "reused")):
+                with self.subTest(lifecycle=lifecycle), \
+                     mock.patch.object(preflight, "pid_starttime", side_effect=[
+                         {"state": "present", "starttime": 42}, after]), \
+                     mock.patch.object(preflight.shutil, "which", return_value=None):
+                    peer = self.probe(12345, root / "proc")
+                self.assertEqual(peer["pid_lifecycle"], lifecycle)
+                self.assertEqual(peer["status"], "peer_executable_unobservable")
+                self.assertNotIn("executable_sha256", peer)
 
     def test_connection_failure_records_no_provenance(self):
         with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:

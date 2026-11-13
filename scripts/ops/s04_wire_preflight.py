@@ -7,6 +7,7 @@ the selected Docker endpoint and never creates a real Docker resource.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -27,6 +28,7 @@ MAX_CONNECTIONS = 8
 MAX_SECONDS = 45
 MAX_OUTPUT = 1_048_576
 MAX_PEER_EXECUTABLE = 268_435_456
+MAX_PROC_STAT = 4096
 SOURCE_HEAD = "69c31a7950743d130ac3f96fb1ffb795a2818528"
 SOURCE_HASHES = {
     "scripts/test-env/common.py": "a84a6951f6b1303869cc74f12a92053e691b854c2ac9b8835811bfdcf135c47f",
@@ -237,6 +239,33 @@ def capture(args: argparse.Namespace) -> dict:
         os.umask(old_umask)
 
 
+def errno_class(error: OSError) -> str:
+    if error.errno in (errno.EACCES, errno.EPERM):
+        return "permission_denied"
+    if error.errno in (errno.ENOENT, errno.ESRCH):
+        return "not_found"
+    return "other"
+
+
+def pid_starttime(pid: int, proc_root: Path) -> dict:
+    """Read only bounded /proc stat field 22, without exposing command text."""
+    try:
+        fd = os.open(proc_root / str(pid) / "stat", os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            raw = os.read(fd, MAX_PROC_STAT + 1)
+        finally:
+            os.close(fd)
+    except OSError as error:
+        return {"state": errno_class(error)}
+    if len(raw) > MAX_PROC_STAT or not raw.startswith(str(pid).encode() + b" ("):
+        return {"state": "invalid"}
+    end = raw.rfind(b") ")
+    fields = raw[end + 2:].split() if end >= 0 else []
+    if len(fields) < 20 or not fields[19].isascii() or not fields[19].isdigit():
+        return {"state": "invalid"}
+    return {"state": "present", "starttime": int(fields[19])}
+
+
 def inspect_daemon_peer(path: Path, proc_root: Path = Path("/proc")) -> dict:
     """Connect without sending HTTP bytes; keep unobservable provenance explicit."""
     before = path.lstat()
@@ -260,30 +289,52 @@ def inspect_daemon_peer(path: Path, proc_root: Path = Path("/proc")) -> dict:
     if pid <= 0:
         peer["status"] = "pid_unmapped"
         return peer
+    peer["pid_before"] = pid_starttime(pid, proc_root)
     proc_exe = proc_root / str(pid) / "exe"
+    executable = None
+    info = None
+    digest = None
+    stage = "open"
     try:
         fd = os.open(proc_exe, os.O_RDONLY | os.O_CLOEXEC)
         try:
+            stage = "fstat"
             info = os.fstat(fd)
             if info.st_size > MAX_PEER_EXECUTABLE:
                 peer["status"] = "peer_executable_too_large"
-                return peer
-            digest = hashlib.sha256()
-            total = 0
-            while chunk := os.read(fd, min(1_048_576, MAX_PEER_EXECUTABLE - total + 1)):
-                total += len(chunk)
-                if total > MAX_PEER_EXECUTABLE:
-                    peer["status"] = "peer_executable_too_large"
-                    return peer
-                digest.update(chunk)
-            current = proc_exe.stat()
-            if (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
-                peer["status"] = "peer_executable_changed"
-                return peer
-            executable = os.readlink(proc_exe)
+            else:
+                digest = hashlib.sha256()
+                total = 0
+                stage = "read"
+                while chunk := os.read(fd, min(1_048_576, MAX_PEER_EXECUTABLE - total + 1)):
+                    total += len(chunk)
+                    if total > MAX_PEER_EXECUTABLE:
+                        peer["status"] = "peer_executable_too_large"
+                        break
+                    digest.update(chunk)
+                if peer["status"] != "peer_executable_too_large":
+                    stage = "stat"
+                    current = proc_exe.stat()
+                    if (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
+                        peer["status"] = "peer_executable_changed"
+                    else:
+                        stage = "readlink"
+                        executable = os.readlink(proc_exe)
         finally:
             os.close(fd)
-    except (OSError, PermissionError):
+    except OSError as error:
+        peer["executable_error_stage"] = stage
+        peer["executable_errno_class"] = errno_class(error)
+    peer["pid_after"] = pid_starttime(pid, proc_root)
+    before_state, after_state = peer["pid_before"], peer["pid_after"]
+    if before_state["state"] == after_state["state"] == "present":
+        peer["pid_lifecycle"] = ("stable" if before_state["starttime"] == after_state["starttime"]
+                                 else "reused")
+    elif after_state["state"] == "not_found":
+        peer["pid_lifecycle"] = "exited"
+    else:
+        peer["pid_lifecycle"] = "unverified"
+    if peer["pid_lifecycle"] != "stable" or executable is None:
         return peer
     peer.update(status="peer_executable_observed", executable=str(executable),
                 executable_dev=info.st_dev, executable_ino=info.st_ino,
