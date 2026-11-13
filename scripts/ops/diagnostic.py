@@ -31,6 +31,92 @@ CLIENT_FIELDS = ("bind_ns", "transport_ns", "parse_ns", "rows_ns", "residual_ns"
                  "response_chars", "result_rows")
 STAGES = frozenset(("transaction_setup", "route_plan", "execute_multi",
                     "completion_and_commit", "result_map", "execute_and_map", "response_build"))
+INNER_STAGES = frozenset((
+    "session_lookup_wait", "session_operation_wait", "session_txn_wait",
+    "bridge_operation_wait", "bridge_state_wait", "worker_dispatch",
+    "blocking_dispatch", "worker_parse", "worker_plan", "worker_execute_plan",
+    "query_pipeline_build", "query_row_iteration", "query_projection",
+    "query_row_scan", "aggregate_parallel_build"))
+INNER_ROUTES = frozenset(("local_only", "future_distributed_required",
+                          "scatter_gather_simulated"))
+INNER_ROOTS = frozenset(("aggregate", "sort", "filter", "scan", "limit", "project", "other"))
+INNER_BRANCHES = frozenset((
+    "ordered_limit_primary_key", "filter_btree_index", "filter_btree_fallback",
+    "aggregate_streaming_global", "aggregate_streaming_grouped", "aggregate_parallel",
+    "aggregate_iterator", "aggregate", "sort", "filter", "scan", "limit",
+    "project", "explain", "other"))
+
+
+def audit_inner_events(events, mode, clients, servers):
+    """Reduce private inner events to measured UUIDs; never qualify performance."""
+    if mode not in ("on", "off") or type(events) is not list or len(events) > 8_000:
+        raise ValueError("INNER_BOUND")
+    if mode == "off" and events:
+        raise ValueError("INNER_OFF")
+    if type(clients) is not list or type(servers) is not list:
+        raise ValueError("INNER_JOIN")
+    client_ids = set()
+    measured_ids = set()
+    for client in clients:
+        if type(client) is not dict or "trace_id" not in client:
+            if mode == "off":
+                continue
+            raise ValueError("INNER_JOIN")
+        trace_id = canonical_uuid(client["trace_id"])
+        if trace_id in client_ids:
+            raise ValueError("INNER_JOIN")
+        client_ids.add(trace_id)
+        if client.get("phase") == "measured":
+            measured_ids.add(trace_id)
+    server_ids = set()
+    for server in servers:
+        if type(server) is not dict or set(server) != {"trace_id", "stage", "duration_ns"} or \
+                server["stage"] not in STAGES or not _integer(server["duration_ns"]):
+            raise ValueError("INNER_JOIN")
+        server_ids.add(canonical_uuid(server["trace_id"]))
+    if mode == "on" and not measured_ids.issubset(server_ids):
+        raise ValueError("INNER_JOIN")
+    grouped = {}
+    seen = set()
+    for event in events:
+        if type(event) is not dict or event.get("kind") not in ("stage", "route", "branch"):
+            raise ValueError("INNER_FORMAT")
+        trace_id = canonical_uuid(event.get("trace_id"))
+        if trace_id not in client_ids or trace_id not in server_ids:
+            raise ValueError("INNER_JOIN")
+        kind = event["kind"]
+        if kind == "stage":
+            if set(event) != {"kind", "trace_id", "stage", "duration_ns"} or \
+                    event["stage"] not in INNER_STAGES or not _integer(event["duration_ns"]) or \
+                    event["duration_ns"] > 300_000_000_000:
+                raise ValueError("INNER_FORMAT")
+        elif kind == "route":
+            if set(event) != {"kind", "trace_id", "statement_index", "route", "root"} or \
+                    type(event["statement_index"]) is not int or not 0 <= event["statement_index"] < 16 or \
+                    event["route"] not in INNER_ROUTES or event["root"] not in INNER_ROOTS:
+                raise ValueError("INNER_FORMAT")
+        elif set(event) != {"kind", "trace_id", "branch"} or event["branch"] not in INNER_BRANCHES:
+            raise ValueError("INNER_FORMAT")
+        key = (trace_id, kind, tuple((name, event[name]) for name in sorted(event) if name not in ("trace_id", "kind")))
+        if key in seen:
+            raise ValueError("INNER_DUPLICATE")
+        seen.add(key)
+        row = grouped.setdefault(trace_id, {"trace_id": trace_id, "stages": [], "routes": [], "branches": []})
+        bucket = {"stage": "stages", "route": "routes", "branch": "branches"}[kind]
+        item = {name: value for name, value in event.items() if name not in ("kind", "trace_id")}
+        row[bucket].append(item)
+        if len(row["stages"]) > 64 or len(row["routes"]) > 16 or len(row["branches"]) > 64 or \
+                sum(len(row[name]) for name in ("stages", "routes", "branches")) > 128 or \
+                (kind == "route" and len({x["statement_index"] for x in row["routes"]}) != len(row["routes"])):
+            raise ValueError("INNER_BOUND")
+    if mode == "on":
+        if not measured_ids.issubset(grouped) or any(
+            not grouped[trace_id]["stages"] or not grouped[trace_id]["routes"] or
+            not grouped[trace_id]["branches"] for trace_id in measured_ids
+        ):
+            raise ValueError("INNER_JOIN")
+    return {"schema": "alopex.sql-private-inner/v1", "performance_qualification": False,
+            "measured": [grouped[trace_id] for trace_id in sorted(grouped) if trace_id in measured_ids]}
 
 
 def canonical_uuid(value):

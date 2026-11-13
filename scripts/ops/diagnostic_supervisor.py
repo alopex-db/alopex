@@ -7,7 +7,7 @@ import re
 import signal
 from pathlib import Path
 import sys
-from diagnostic import expected_client_records
+from diagnostic import audit_inner_events, expected_client_records
 
 SOURCE = {"commit": "1951a3fdfe086ea6e8bc537c16766f91f619396f",
           "tree": "b55feda6be535a3e2168835a5ad9c88c0b669c68", "profile": "release"}
@@ -17,6 +17,15 @@ STAGES = {"transaction_setup", "route_plan", "execute_multi",
 TIMING = re.compile(
     r"\bINFO (?:http_request\{[^{}\r\n]*\}: )?alopex_sql_private_timing: sql diagnostic stage "
     r"trace_id=([0-9a-f-]{36}) stage=\"?([a-z_]+)\"? duration_ns=([0-9]+)\s*$")
+INNER_TARGET = "alopex_sql_private_inner"
+INNER_PREFIX = (r"\bINFO (?:http_request\{[^{}\r\n]*\}: )?"
+                r"alopex_sql_private_inner: ")
+INNER_STAGE = re.compile(INNER_PREFIX +
+    r"sql (?:inner )?diagnostic stage trace_id=([0-9a-f-]{36}) stage=\"([a-z_]+)\" duration_ns=([0-9]+)\s*$")
+INNER_ROUTE = re.compile(INNER_PREFIX +
+    r"sql diagnostic route trace_id=([0-9a-f-]{36}) statement_index=([0-9]+) route=\"([a-z_]+)\" root=\"([a-z_]+)\"\s*$")
+INNER_BRANCH = re.compile(INNER_PREFIX +
+    r"sql diagnostic (branch|plan) trace_id=([0-9a-f-]{36}) branch=\"([a-z_]+)\"\s*$")
 
 
 def server_environment(base, mode):
@@ -75,6 +84,39 @@ def parse_server_timing(path, mode):
             events.append({"trace_id": trace_id, "stage": stage,
                            "duration_ns": elapsed})
     return events
+
+
+def parse_inner_diagnostics(path, mode, clients, servers):
+    """Optional private reduction for a new native asset, separate from frozen timing.
+
+    A later controller can call this after parse_server_timing using the same
+    server.log, client.ndjson and server-timing.json, then seal the returned
+    schema in a private artifact. The 1951 path need not call it.
+    """
+    if mode not in ("on", "off") or path.is_symlink() or not path.is_file() or \
+            path.stat().st_size > 8_000_000:
+        raise ValueError("INNER_BOUND")
+    events = []
+    with path.open("r", encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            if INNER_TARGET not in line:
+                continue
+            if len(events) >= 8_000:
+                raise ValueError("INNER_BOUND")
+            if match := INNER_STAGE.search(line):
+                trace_id, stage, duration = match.groups()
+                events.append({"kind": "stage", "trace_id": trace_id,
+                               "stage": stage, "duration_ns": int(duration)})
+            elif match := INNER_ROUTE.search(line):
+                trace_id, index, route, root = match.groups()
+                events.append({"kind": "route", "trace_id": trace_id,
+                               "statement_index": int(index), "route": route, "root": root})
+            elif match := INNER_BRANCH.search(line):
+                _, trace_id, branch = match.groups()
+                events.append({"kind": "branch", "trace_id": trace_id, "branch": branch})
+            else:
+                raise ValueError("INNER_FORMAT")
+    return audit_inner_events(events, mode, clients, servers)
 
 
 def run_owned_server(start, measure, save):
