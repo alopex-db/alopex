@@ -14,6 +14,7 @@ from pathlib import Path
 import shutil
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,7 @@ MAX_BODY = 65536
 MAX_CONNECTIONS = 8
 MAX_SECONDS = 45
 MAX_OUTPUT = 1_048_576
+MAX_PEER_EXECUTABLE = 268_435_456
 SOURCE_HEAD = "69c31a7950743d130ac3f96fb1ffb795a2818528"
 SOURCE_HASHES = {
     "scripts/test-env/common.py": "a84a6951f6b1303869cc74f12a92053e691b854c2ac9b8835811bfdcf135c47f",
@@ -235,6 +237,68 @@ def capture(args: argparse.Namespace) -> dict:
         os.umask(old_umask)
 
 
+def inspect_daemon_peer(path: Path, proc_root: Path = Path("/proc")) -> dict:
+    """Connect without sending HTTP bytes; keep unobservable provenance explicit."""
+    before = path.lstat()
+    if not stat.S_ISSOCK(before.st_mode):
+        raise PreflightError("ENDPOINT_TYPE")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2)
+            client.connect(str(path))
+            raw = client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                    struct.calcsize("3i"))
+            pid, uid, gid = struct.unpack("3i", raw)
+    except OSError:
+        return {"status": "connection_unavailable", "parser_provenance": "unverified"}
+    after = path.lstat()
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        raise PreflightError("ENDPOINT_REPLACED")
+    peer = {"status": "peer_executable_unobservable", "pid": pid, "uid": uid,
+            "gid": gid, "endpoint_dev": after.st_dev, "endpoint_ino": after.st_ino,
+            "parser_provenance": "unverified"}
+    if pid <= 0:
+        peer["status"] = "pid_unmapped"
+        return peer
+    proc_exe = proc_root / str(pid) / "exe"
+    try:
+        fd = os.open(proc_exe, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            info = os.fstat(fd)
+            if info.st_size > MAX_PEER_EXECUTABLE:
+                peer["status"] = "peer_executable_too_large"
+                return peer
+            digest = hashlib.sha256()
+            total = 0
+            while chunk := os.read(fd, min(1_048_576, MAX_PEER_EXECUTABLE - total + 1)):
+                total += len(chunk)
+                if total > MAX_PEER_EXECUTABLE:
+                    peer["status"] = "peer_executable_too_large"
+                    return peer
+                digest.update(chunk)
+            current = proc_exe.stat()
+            if (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
+                peer["status"] = "peer_executable_changed"
+                return peer
+            executable = os.readlink(proc_exe)
+        finally:
+            os.close(fd)
+    except (OSError, PermissionError):
+        return peer
+    peer.update(status="peer_executable_observed", executable=str(executable),
+                executable_dev=info.st_dev, executable_ino=info.st_ino,
+                executable_sha256=digest.hexdigest())
+    if executable.startswith("/") and not executable.endswith(" (deleted)") and shutil.which("dpkg-query"):
+        try:
+            package = run(["dpkg-query", "-S", str(executable)])
+            peer["package_lookup"] = {"exit_code": package.returncode,
+                                      "stdout": package.stdout[:8192].decode("utf-8", "replace"),
+                                      "truncated": len(package.stdout) > 8192}
+        except (OSError, subprocess.TimeoutExpired):
+            peer["package_lookup"] = {"error": "unavailable"}
+    return peer
+
+
 def inspect(args: argparse.Namespace) -> dict:
     """No create/stop/build: only CLI provenance and selected endpoint metadata."""
     if sys.platform != "linux":
@@ -251,6 +315,7 @@ def inspect(args: argparse.Namespace) -> dict:
     path = Path(endpoint.removeprefix("unix://"))
     if not path.is_absolute() or not stat.S_ISSOCK(path.stat().st_mode):
         raise PreflightError("ENDPOINT_TYPE")
+    peer = inspect_daemon_peer(path)
     lineage = []
     for item in (path, *path.parents):
         info = item.lstat()
@@ -280,6 +345,7 @@ def inspect(args: argparse.Namespace) -> dict:
             "context": args.context, "endpoint": endpoint, "lineage": lineage,
             "acl": acl, "mountinfo": Path("/proc/self/mountinfo").read_text()[:131072],
             "version": json.loads(version.stdout), "daemon_processes": daemon_processes,
+            "daemon_peer": peer,
             "uid": os.getuid(), "groups": os.getgroups(), "read_only": True}
 
 

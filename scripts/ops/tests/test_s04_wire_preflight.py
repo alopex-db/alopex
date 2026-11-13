@@ -1,13 +1,16 @@
 """Offline bounds and cleanup checks. Never calls a Docker daemon."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
 import socket
 import stat
+import struct
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "s04_wire_preflight.py"
 SPEC = importlib.util.spec_from_file_location("s04_wire_preflight", SCRIPT)
@@ -99,6 +102,80 @@ class PrivacyAndCleanup(unittest.TestCase):
             self.assertFalse(thread.is_alive())
             self.assertEqual(len(records), 1)
         self.assertFalse(sock.exists())
+
+
+class DaemonPeer(unittest.TestCase):
+    def probe(self, pid, proc_root):
+        with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
+            path = Path(directory) / "daemon.sock"
+            path.touch()
+            with mock.patch.object(preflight.socket, "SO_PEERCRED", 17, create=True), \
+                 mock.patch.object(preflight.stat, "S_ISSOCK", return_value=True), \
+                 mock.patch.object(preflight.socket, "socket") as factory:
+                client = factory.return_value.__enter__.return_value
+                client.getsockopt.return_value = struct.pack("3i", pid, 1, 1)
+                return preflight.inspect_daemon_peer(path, proc_root)
+
+    def test_connected_peer_with_inaccessible_proc_is_unobservable(self):
+        with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
+            peer = self.probe(12345, Path(directory) / "empty-proc")
+            self.assertEqual(peer["status"], "peer_executable_unobservable")
+            self.assertGreater(peer["pid"], 0)
+            self.assertNotIn("executable_sha256", peer)
+
+    def test_unmapped_peer_pid_does_not_claim_binary_provenance(self):
+        peer = self.probe(0, Path("/proc"))
+        self.assertEqual(peer["status"], "pid_unmapped")
+        self.assertNotIn("executable_sha256", peer)
+
+    def test_visible_peer_hashes_exact_executable(self):
+        with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
+            root = Path(directory)
+            executable = root / "daemon-binary"
+            executable.write_bytes(b"review-me")
+            proc = root / "proc" / "12345"
+            proc.mkdir(parents=True)
+            (proc / "exe").symlink_to(executable)
+            with mock.patch.object(preflight.shutil, "which", return_value=None):
+                peer = self.probe(12345, root / "proc")
+            self.assertEqual(peer["status"], "peer_executable_observed")
+            self.assertEqual(peer["executable_sha256"],
+                             hashlib.sha256(b"review-me").hexdigest())
+            self.assertNotIn("package_lookup", peer)
+
+    def test_oversized_peer_executable_is_not_hashed(self):
+        with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
+            root = Path(directory)
+            executable = root / "daemon-binary"
+            executable.write_bytes(b"too-large")
+            proc = root / "proc" / "12345"
+            proc.mkdir(parents=True)
+            (proc / "exe").symlink_to(executable)
+            with mock.patch.object(preflight, "MAX_PEER_EXECUTABLE", 4):
+                peer = self.probe(12345, root / "proc")
+            self.assertEqual(peer["status"], "peer_executable_too_large")
+            self.assertNotIn("executable_sha256", peer)
+
+    def test_unreadable_peer_executable_is_not_attributed(self):
+        with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
+            root = Path(directory)
+            proc = root / "proc" / "12345"
+            proc.mkdir(parents=True)
+            (proc / "exe").symlink_to(root / "missing")
+            peer = self.probe(12345, root / "proc")
+            self.assertEqual(peer["status"], "peer_executable_unobservable")
+            self.assertNotIn("executable_sha256", peer)
+
+    def test_connection_failure_records_no_provenance(self):
+        with tempfile.TemporaryDirectory(prefix="s04-", dir="/private/tmp") as directory:
+            path = Path(directory) / "daemon.sock"
+            path.touch()
+            with mock.patch.object(preflight.stat, "S_ISSOCK", return_value=True), \
+                 mock.patch.object(preflight.socket, "socket") as factory:
+                factory.return_value.__enter__.return_value.connect.side_effect = OSError("denied")
+                peer = preflight.inspect_daemon_peer(path)
+            self.assertEqual(peer, {"status": "connection_unavailable",
+                                    "parser_provenance": "unverified"})
 
 
 if __name__ == "__main__":
