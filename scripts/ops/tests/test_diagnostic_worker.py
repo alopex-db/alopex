@@ -100,9 +100,12 @@ class DiagnosticWorkerTests(unittest.TestCase):
                                    return_value=diagnostic_worker.FROZEN + "\n"), \
                  mock.patch.object(Path, "read_text", read_text), \
                  mock.patch.dict(sys.modules, modules), \
+                 mock.patch.object(diagnostic_worker.time, "sleep",
+                                   side_effect=lambda seconds: events.append(("hold", seconds))), \
                  mock.patch.object(diagnostic_worker, "scheduler_observe", scheduler):
                 diagnostic_worker.main()
-            self.assertEqual(events, ["sched-before", "timer", "commit", "sched-after"])
+            self.assertEqual(events, ["sched-before", "timer", "commit", "sched-after",
+                                      ("hold", 10)])
             observation = json.loads((output / "commit-observation.json").read_text())
             self.assertEqual(observation["timer_nanoseconds"], 17)
             self.assertEqual(observation["schedstat"]["original_timer_ns"], 17)

@@ -12,6 +12,7 @@ from pathlib import Path
 import resource
 import subprocess
 import sys
+import time
 
 if __package__:
     from .diagnostic_commit_observer import observe as diagnostic_observe
@@ -94,6 +95,9 @@ def main():
     workload.measure = measure
     workload.child(config["phase"], Path(config["fixture"]), config["surface"],
                    config["value_bytes"], native_digest)
+    # The frozen supervisor checks storage before its first /proc sample. Keep
+    # this diagnostic child alive after its timer and result have been recorded.
+    time.sleep(10)
 
 
 if __name__ == "__main__":
