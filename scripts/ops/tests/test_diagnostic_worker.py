@@ -14,6 +14,21 @@ from scripts.ops.wal_cost_next import diagnostic_worker
 
 
 class DiagnosticWorkerTests(unittest.TestCase):
+    def test_writer_exit_hold_requires_successful_observation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            events = []
+            held = diagnostic_worker.hold_writer_exit(
+                lambda code: events.append(("exit", code)), output)
+            with mock.patch.object(diagnostic_worker.time, "sleep",
+                                   side_effect=lambda seconds: events.append(("hold", seconds))):
+                held(1)
+                held(0)
+                (output / "commit-observation.json").write_text("{}")
+                held(0)
+            self.assertEqual(events, [("exit", 1), ("exit", 0),
+                                      ("hold", 10), ("exit", 0)])
+
     def test_wrong_config_digest_stops_before_product_import(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -51,6 +66,7 @@ class DiagnosticWorkerTests(unittest.TestCase):
             }))
             events = []
             workload = types.ModuleType("public_api_cost")
+            workload.os = os
             workload.OPTIONS = {"fixed": True}
             workload.SHAPES = (("kv", 16),)
             def original_measure(action):
@@ -65,7 +81,11 @@ class DiagnosticWorkerTests(unittest.TestCase):
                         events.append("commit")
                         return "done"
                 self.assertEqual(workload.measure(Pending().commit), ("done", 17))
+                workload.os._exit(0)
             workload.child = child
+            def fake_exit(code):
+                events.append(("exit", code))
+                raise SystemExit(code)
             subject = types.ModuleType("subject_identity")
             subject.verify_subject = lambda: {"manifest_sha256": "fixed-manifest"}
             product = types.ModuleType("alopex")
@@ -102,10 +122,13 @@ class DiagnosticWorkerTests(unittest.TestCase):
                  mock.patch.dict(sys.modules, modules), \
                  mock.patch.object(diagnostic_worker.time, "sleep",
                                    side_effect=lambda seconds: events.append(("hold", seconds))), \
+                 mock.patch.object(os, "_exit", side_effect=fake_exit), \
                  mock.patch.object(diagnostic_worker, "scheduler_observe", scheduler):
-                diagnostic_worker.main()
+                with self.assertRaises(SystemExit) as caught:
+                    diagnostic_worker.main()
+            self.assertEqual(caught.exception.code, 0)
             self.assertEqual(events, ["sched-before", "timer", "commit", "sched-after",
-                                      ("hold", 10)])
+                                      ("hold", 10), ("exit", 0)])
             observation = json.loads((output / "commit-observation.json").read_text())
             self.assertEqual(observation["timer_nanoseconds"], 17)
             self.assertEqual(observation["schedstat"]["original_timer_ns"], 17)

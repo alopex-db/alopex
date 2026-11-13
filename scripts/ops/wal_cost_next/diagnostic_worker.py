@@ -34,6 +34,16 @@ def sha(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def hold_writer_exit(original_exit, output):
+    def delayed_exit(code):
+        # The frozen writer calls os._exit(0) after flushing its result.
+        # Keep that same process observable without unwinding its WAL state.
+        if code == 0 and (output / "commit-observation.json").is_file():
+            time.sleep(10)
+        original_exit(code)
+    return delayed_exit
+
+
 def main():
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--configuration", required=True, type=Path)
@@ -93,11 +103,15 @@ def main():
             json.dumps(observation, allow_nan=False) + "\n")
         return result
     workload.measure = measure
-    workload.child(config["phase"], Path(config["fixture"]), config["surface"],
-                   config["value_bytes"], native_digest)
-    # The frozen supervisor checks storage before its first /proc sample. Keep
-    # this diagnostic child alive after its timer and result have been recorded.
-    time.sleep(10)
+    require(workload.os is os, "frozen exit differs")
+    original_exit = os._exit
+    if config["phase"] == "write":
+        os._exit = hold_writer_exit(original_exit, output)
+    try:
+        workload.child(config["phase"], Path(config["fixture"]), config["surface"],
+                       config["value_bytes"], native_digest)
+    finally:
+        os._exit = original_exit
 
 
 if __name__ == "__main__":
