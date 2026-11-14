@@ -15,10 +15,13 @@ def main() -> int:
     private = Path(os.environ["RUNNER_TEMP"]) / "alopex-s04-socket-inventory"
     export = Path("native-s04-socket-inventory-export")
     outcome = os.environ.get("COLLECT_OUTCOME", "failure")
-    public, code = _seal_inner(private, export, outcome)
-    public.update(schema="alopex.s04-socket-inventory-public/v1", case="S04_SOCKET_INVENTORY")
+    sealed, code = _seal_inner(private, export, outcome)
+    public = {"schema": "alopex.s04-socket-inventory-public/v1",
+              "case": "S04_SOCKET_INVENTORY",
+              "outcome": "collected_not_qualified" if code == 0 else "failed",
+              "error_code": sealed["error_code"]}
     if code == 0:
-        public["outcome"] = "collected_not_qualified"
+        public["ciphertext_sha256"] = sealed["ciphertext_sha256"]
     try:
         if private.is_dir() and not private.is_symlink() and private.lstat().st_uid == os.getuid():
             shutil.rmtree(private)

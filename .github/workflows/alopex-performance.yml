@@ -81,13 +81,20 @@ jobs:
                   if not entry.name.isdecimal():
                       continue
                   try:
+                      comm = (entry / 'comm').read_text().strip()
+                  except FileNotFoundError:
+                      continue
+                  assert comm
+                  if comm != 'dockerd':
+                      continue
+                  try:
                       raw = (entry / 'cmdline').read_bytes()
-                  except (OSError, PermissionError):
+                  except FileNotFoundError:
                       continue
                   assert len(raw) <= 65536
                   args = [os.fsdecode(part) for part in raw.split(b'\0') if part]
-                  if args and pathlib.Path(args[0]).name == 'dockerd':
-                      daemons.append(args)
+                  assert args and pathlib.Path(args[0]).name == 'dockerd'
+                  daemons.append(args)
               assert len(daemons) == 1
               args = daemons[0][1:]
               assert not any(arg.startswith('--rootless') or arg.startswith('--config-file') or
