@@ -7,7 +7,7 @@ mod stats;
 mod storage;
 mod types;
 
-pub(crate) use graph::HnswGraph;
+pub(crate) use graph::{HnswGraph, PairScoreCache};
 pub(crate) use storage::HnswStorage;
 #[cfg(feature = "async")]
 pub(crate) use types::HnswMetadata;
@@ -156,19 +156,25 @@ impl HnswIndex {
             .iter()
             .all(|(key, _, _)| graph.find_node_id(key).is_none());
         let mut previous_insert = None;
-        for (position, (key, vector, metadata)) in entries.iter().enumerate() {
-            if all_new {
-                previous_insert =
-                    Some(graph.insert_unpruned(key, vector, metadata, previous_insert)?);
-                if (position + 1) % BULK_PRUNE_INTERVAL == 0 {
-                    graph.prune_overfull_neighbors();
+        let mut overfull = HashSet::new();
+        let mut pair_scores = PairScoreCache::default();
+        for chunk in entries.chunks(BULK_PRUNE_INTERVAL) {
+            for (key, vector, metadata) in chunk {
+                if all_new {
+                    previous_insert = Some(graph.insert_unpruned_tracked(
+                        key,
+                        vector,
+                        metadata,
+                        previous_insert,
+                        &mut overfull,
+                    )?);
+                } else {
+                    graph.upsert(key, vector, metadata)?;
                 }
-            } else {
-                graph.upsert(key, vector, metadata)?;
             }
-        }
-        if all_new {
-            graph.prune_overfull_neighbors();
+            if all_new {
+                graph.prune_tracked_overfull_neighbors_cached(&mut overfull, &mut pair_scores);
+            }
         }
         self.stats_cache = graph.refresh_statistics();
         Ok(())
@@ -325,22 +331,29 @@ impl HnswIndex {
             .iter()
             .all(|(key, _, _)| graph.find_node_id(key).is_none());
         let mut previous_insert = None;
-        for (position, (key, vector, metadata)) in entries.iter().enumerate() {
-            let existed = graph.find_node_id(key).is_some();
-            let node_id = if all_new {
-                let node_id = graph.insert_unpruned(key, vector, metadata, previous_insert)?;
-                previous_insert = Some(node_id);
-                node_id
-            } else {
-                graph.upsert(key, vector, metadata)?
-            };
-            state.record_upsert(node_id, !existed);
-            if all_new && (position + 1) % BULK_PRUNE_INTERVAL == 0 {
-                graph.prune_overfull_neighbors();
+        let mut overfull = HashSet::new();
+        let mut pair_scores = PairScoreCache::default();
+        for chunk in entries.chunks(BULK_PRUNE_INTERVAL) {
+            for (key, vector, metadata) in chunk {
+                let existed = graph.find_node_id(key).is_some();
+                let node_id = if all_new {
+                    let node_id = graph.insert_unpruned_tracked(
+                        key,
+                        vector,
+                        metadata,
+                        previous_insert,
+                        &mut overfull,
+                    )?;
+                    previous_insert = Some(node_id);
+                    node_id
+                } else {
+                    graph.upsert(key, vector, metadata)?
+                };
+                state.record_upsert(node_id, !existed);
             }
-        }
-        if all_new {
-            graph.prune_overfull_neighbors();
+            if all_new {
+                graph.prune_tracked_overfull_neighbors_cached(&mut overfull, &mut pair_scores);
+            }
         }
         Ok(())
     }
