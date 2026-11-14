@@ -184,6 +184,13 @@ def run(args):
         run_phase(args.qualification_checkout, flag, environment)
     public = read(args.qualification_checkout / 'native-qualification-export/public.json')
     prior = verify_qualification(public, private, module, os.environ['GITHUB_RUN_ID'], module.admission_facts())
+    from capture_signed_indexes import capture
+    from seal_signed_indexes import seal as seal_indexes
+    same_host(prior, module.admission_facts())
+    capture(module, prior, private)
+    seal_indexes(private,
+                 args.qualification_checkout / '.github/ops/native-evidence-cert.pem',
+                 Path(os.environ['GITHUB_WORKSPACE']) / 'signed-index-export')
     environment['WAL_COST_CONFIG'] = base64.b64encode(args.config.read_bytes()).decode('ascii')
     monitor_comparator(args.frozen_checkout, config, module, prior, private, environment)
 
