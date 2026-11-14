@@ -26,6 +26,16 @@ BOOT_ID = "12345678-1234-4234-8234-123456789abc"
 
 
 class Inputs(unittest.TestCase):
+    def test_envctl_failure_preserves_fixed_inner_code_and_phase(self):
+        response = SimpleNamespace(returncode=1,
+                                   stdout='{"status":"failed","error_code":"ARCHIVE"}')
+        with patch.object(qualification.subprocess, "run", return_value=response), \
+             patch.object(qualification, "EXPECTED_TEMP_SNAPSHOT", None):
+            with self.assertRaises(qualification.Failure) as caught:
+                qualification.envctl(Path("unused"), "doctor", "--phase", "preflight")
+        self.assertEqual(caught.exception.code, "ARCHIVE")
+        self.assertEqual(qualification.PRIVATE_STAGE, "envctl_doctor_preflight")
+
     def test_controller_digest_matches_checked_out_test_env_sources(self):
         identity = qualification.source_identity()
         self.assertEqual(identity["controller_digest"], qualification.CONTROLLER_DIGEST)
@@ -522,15 +532,17 @@ class Sequence(unittest.TestCase):
         workflow = Path(__file__).resolve().parents[3] / (
             ".github/workflows/alopex-performance.yml")
         source = workflow.read_text()
-        self.assertIn("inventory:\n    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode }}", source)
+        self.assertIn("inventory:\n    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}", source)
         self.assertIn("qualification:\n    if: inputs.qualification_mode", source)
-        self.assertIn("inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode", source)
-        self.assertIn("inputs.issue_number == '712' && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode)", source)
+        self.assertIn("inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode", source)
+        self.assertIn("inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode)", source)
+        self.assertIn("inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode", source)
         source = source.split("  qualification:\n", 1)[1]
         positions = [source.index(token) for token in (
             "Bound checkout before source acquisition", "uses: actions/checkout@v4",
             "Admit this runner before candidate acquisition",
-            "Retrieve exact candidate assets", "Qualify on this runner")]
+            "Retrieve exact candidate assets", "Qualify on this runner",
+            "Capture selected CLI wire against offline fake socket")]
         self.assertEqual(positions, sorted(positions))
 
     def test_qualification_uses_a_default_branch_registered_workflow_path(self):

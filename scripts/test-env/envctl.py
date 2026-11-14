@@ -198,10 +198,10 @@ def stage(profile, docker, budget, run, image, inputs, work, cases):
                "--mount", f"type=volume,src={work},dst=/work,volume-nocopy",
                *docker.policy(), "--entrypoint", "python3", image, "/tool/stage.py"]
     run.intent("container", helper)
-    identity = docker.call(*command)
-    run.resource("container", helper, identity)
     primary = None
     try:
+        identity = docker.call(*command)
+        run.resource("container", helper, identity)
         budget.run([*docker.prefix, "cp", str(bundle) + "/.", helper + ":/input"],
                    timeout=profile["limits"]["case_seconds"], log=run.root / "stage.log",
                    cancel=lambda: docker.stop(helper))
@@ -215,7 +215,8 @@ def stage(profile, docker, budget, run, image, inputs, work, cases):
         raise
     finally:
         cleanup_failure = None
-        for operation, action in (("stop_stage", lambda: docker.stop(helper)),
+        for operation, action in (("stop_stage", lambda: docker.stop(identity)
+                                   if run.record["resources"][-1]["id"] is not None else None),
                                   ("remove_stage_copy", lambda: shutil.rmtree(bundle))):
             try:
                 action()
@@ -309,7 +310,8 @@ def recover(run, docker):
             # unresolved until an owned identity can be bound and stopped.
             require(item["id"] is not None, "CLEANUP")
             continue
-        require(live["labels"].get("org.alopex.test-env.run") == run.run_id and
+        require(live["kind"] == item["kind"] and live["name"] == item["name"] and
+                live["labels"].get("org.alopex.test-env.run") == run.run_id and
                 live["labels"].get("org.alopex.test-env.owner") == "envctl" and
                 live["labels"].get("org.alopex.test-env.token") == run.record["ownership_token"], "CLEANUP")
         require(item["id"] in (None, live["id"]), "IDENTITY")
@@ -317,6 +319,9 @@ def recover(run, docker):
             run.resource(item["kind"], item["name"], live["id"])
         if item["kind"] == "container":
             docker.stop(live["id"])
+            stopped = docker.inspect(item)
+            require(stopped is not None and stopped["id"] == live["id"] and
+                    not stopped["running"], "CLEANUP")
     if run.record["phase"] in ("preparing", "running"):
         if not (run.root / "failure.json").exists():
             atomic_json(run.root / "failure.json", {"error_code": "INTERRUPTED"})
