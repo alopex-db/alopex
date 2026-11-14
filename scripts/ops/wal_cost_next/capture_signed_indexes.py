@@ -63,17 +63,25 @@ def admissible(profile, prior, module, private):
             prior["baseline_bytes"] < 29_000_000_000, "MEASUREMENT")
     budget = Budget(profile["storage"])
     used = budget.used()
-    require(used <= prior["baseline_bytes"] + ORIGINAL_ALLOWANCE and
-            used + EXTRA_LIMIT + RESERVE < STOP, "CAPACITY")
+    if used > prior["baseline_bytes"] + ORIGINAL_ALLOWANCE:
+        raise Failure("CAPACITY", "capture_original_allowance")
+    if used + EXTRA_LIMIT + RESERVE >= STOP:
+        raise Failure("CAPACITY", "capture_host_stop")
     for root in (Path(os.environ["GITHUB_WORKSPACE"]),
                  Path(prior["docker_info"]["DockerRootDir"])):
         stat = os.statvfs(root)
-        require(stat.f_bavail * stat.f_frsize > EXTRA_LIMIT + RESERVE, "CAPACITY")
+        if stat.f_bavail * stat.f_frsize <= EXTRA_LIMIT + RESERVE:
+            raise Failure("CAPACITY", "capture_free_space")
     capture_storage = dict(profile["storage"])
     capture_storage["planned_bytes"] = {**capture_storage["planned_bytes"],
                                          "signed_capture": EXTRA_LIMIT}
     budget = Budget(capture_storage)
-    budget.before("signed_capture")
+    try:
+        budget.before("signed_capture")
+    except Failure as error:
+        if error.code == "CAPACITY":
+            raise Failure("CAPACITY", "capture_planned_budget") from error
+        raise
     return budget, lock
 
 
@@ -150,8 +158,10 @@ def collect_resolver_results(run, docker, monitor, identity, limits, exit_code):
 
 
 def capture(module, prior, private):
+    stage = "capture_admission"
     profile = read_json(private / "profile.json", private=True)
     budget, _ = admissible(profile, prior, module, private)
+    stage = "capture_prerequisites"
     docker = Docker(profile)
     docker.prerequisites()
     docker.policy()
@@ -164,12 +174,15 @@ def capture(module, prior, private):
                           budget.initial, EXTRA_LIMIT)
     docker = MonitoredDocker(profile, monitor)
     try:
+        stage = "capture_monitor_start"
         monitor.start()
+        stage = "capture_image"
         ensure_base_image(docker, monitor, profile, run)
         capture_storage = dict(profile["storage"])
         capture_storage["planned_bytes"] = {**capture_storage["planned_bytes"],
                                              "capture_files": CAPTURE_LIMIT}
         capture_budget = Budget(capture_storage)
+        stage = "capture_file_budget"
         capture_budget.before("capture_files")
         monitor.stage(capture_budget.initial, CAPTURE_LIMIT)
         atomic_json(run.root / "capture-budget.private.json", {
@@ -187,6 +200,7 @@ def capture(module, prior, private):
         atomic_json(run.root / "bootstrap.private.json", {
             "resolver_sha256": digest(bootstrap / "resolve.sh"),
             "ca_sha256": digest(bootstrap / "ca.pem")})
+        stage = "capture_bootstrap_budget"
         capture_budget.check()
         limits = profile["limits"]
         cpus = sorted(set(profile["cpu"]["server"] + profile["cpu"]["client"]))
@@ -204,30 +218,38 @@ def capture(module, prior, private):
         args.extend([*docker.policy(), "--entrypoint", "/bin/sh", BASE,
                      "/resolution/resolve.sh"])
         run.intent("container", name)
+        stage = "capture_container_create"
         identity = docker.call(*args)
         run.resource("container", name, identity)
         inspect_resolver(docker, identity, profile, run.record["ownership_token"])
+        stage = "capture_container_budget"
         budget.check()
+        stage = "capture_container_stage"
         monitor.run([*docker.prefix, "cp", str(bootstrap), identity + ":/resolution"],
                     timeout=limits["case_seconds"], log=run.root / "stage.log")
         run.transition("running")
+        stage = "capture_resolver"
         resolver_exit = monitor.run([*docker.prefix, "start", "--attach", identity],
                                     timeout=limits["run_seconds"], log=run.root / "container.log",
                                     allow_nonzero=True)
         state = json.loads(docker.call("container", "inspect", identity))[0]["State"]
         require(not state["Running"] and state["ExitCode"] == resolver_exit, "STATE")
         run.transition("stopped")
+        stage = "capture_collect"
         collected = collect_resolver_results(run, docker, monitor, identity, limits,
                                              resolver_exit)
         require(resolver_exit == 0 and not state["OOMKilled"], "COMMAND")
         actual = sum(path.stat().st_size for path in collected.rglob("*") if path.is_file())
-        require(actual <= CAPTURE_LIMIT and
-                (collected / "capture.status").read_text() == "capture-complete\n", "CAPACITY")
+        if actual > CAPTURE_LIMIT:
+            raise Failure("CAPACITY", "capture_collected_size")
+        require((collected / "capture.status").read_text() == "capture-complete\n", "COLLECT")
+        stage = "capture_proof"
         monitor.run([sys.executable, "-B", str(HERE / "verify_captured_indexes.py"),
                      "--capture", str(collected), "--resolver-script",
                      str(HERE / "capture_ubuntu_indexes.sh"), "--output",
                      str(run.root / "proof")], timeout=300, log=run.root / "proof.log")
         require((run.root / "proof" / "proof.sha256").is_file(), "COLLECT")
+        stage = "capture_final_budget"
         capture_budget.check()
         budget.check()
         run.clean(docker.inspect, docker.remove)
@@ -236,8 +258,16 @@ def capture(module, prior, private):
         return run.root
     except BaseException as error:
         monitor.cleanup_mode = True
+        error.capture_stage = stage
         atomic_json(run.root / "failure.json", {
             "error_code": getattr(error, "code", "COMMAND"),
+            "capture_stage": stage,
+            "capacity_gate": error.detail if isinstance(error, Failure) and
+            error.code == "CAPACITY" and error.detail in (
+                "capture_original_allowance", "capture_host_stop", "capture_free_space",
+                "capture_planned_budget",
+                "capture_collected_size", "host_stop", "host_growth",
+                "capture_stage_growth") else None,
             "detail": repr(error)[:4096]})
         run.load()
         if run.record["phase"] == "collected":

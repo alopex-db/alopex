@@ -62,14 +62,17 @@ class HostMonitor:
         require(child.returncode == 0 and not stderr and value.isascii() and
                 value.isdecimal(), "MEASUREMENT")
         used = int(value)
-        require(used >= 0 and used + self.storage["reserve_bytes"] <
-                self.storage["stop_bytes"] and used - self.baseline <= self.ceiling,
-                "CAPACITY")
+        require(used >= 0, "MEASUREMENT")
+        if used + self.storage["reserve_bytes"] >= self.storage["stop_bytes"]:
+            raise Failure("CAPACITY", "host_stop")
+        if used - self.baseline > self.ceiling:
+            raise Failure("CAPACITY", "host_growth")
         with self.lock:
             stage = self.stage_baseline
             limit = self.stage_limit
         if stage is not None:
-            require(used - stage <= limit, "CAPACITY")
+            if used - stage > limit:
+                raise Failure("CAPACITY", "capture_stage_growth")
         return used
 
     def start(self):

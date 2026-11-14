@@ -55,6 +55,25 @@ class HostMonitorTests(unittest.TestCase):
             with self.assertRaises(Failure) as raised:
                 monitor.sample()
         self.assertEqual(raised.exception.code, "CAPACITY")
+        self.assertEqual(raised.exception.detail, "host_growth")
+
+    def test_stage_growth_has_distinct_fixed_capacity_gate(self):
+        monitor = monitored.HostMonitor(
+            Path("/unused/profile.json"),
+            {"reserve_bytes": 1, "stop_bytes": 40_000_000_000}, 100, 500)
+        monitor.stage_baseline, monitor.stage_limit = 150, 200
+
+        class SampleChild:
+            returncode = 0
+
+            def communicate(self, timeout):
+                return b"400\n", b""
+
+        with patch.object(monitored.subprocess, "Popen", return_value=SampleChild()):
+            with self.assertRaises(Failure) as raised:
+                monitor.sample()
+        self.assertEqual((raised.exception.code, raised.exception.detail),
+                         ("CAPACITY", "capture_stage_growth"))
 
     def test_image_inspect_only_treats_exact_missing_error_as_cache_miss(self):
         monitor = self.monitor()

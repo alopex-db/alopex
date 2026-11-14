@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tarfile
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "test-env"))
@@ -21,6 +23,15 @@ from common import read_json, require  # noqa: E402
 
 LIMIT = 250_000_000
 SEAL_RESERVE = 2_000_000
+FAILURE_FILE_LIMIT = 256_000
+FAILURE_PLAINTEXT_LIMIT = 1_000_000
+FAILURE_CIPHERTEXT_LIMIT = 2_000_000
+FAILURE_FILES = ("failure.json", "run.json", "capture-budget.private.json")
+OMITTED_FAILURE_FILES = ("collected", "collection.pending", "proof", "pull.log",
+                         "stage.log", "container.log", "collect.log", "proof.log",
+                         "bootstrap.private.json", "collection.json")
+FAILURE_CODES = frozenset(("CAPACITY", "COLLECT", "COMMAND", "IDENTITY",
+                           "MEASUREMENT", "PREREQUISITE", "STATE", "TIMEOUT"))
 
 
 def digest(path):
@@ -43,7 +54,7 @@ def audit(root):
     return size
 
 
-def seal(private, certificate, output):
+def _seal_full(private, certificate, output):
     if output.exists():
         require(output.is_dir() and not output.is_symlink(), "COLLECT")
         public = read_json(output / "public.json")
@@ -158,6 +169,93 @@ def seal(private, certificate, output):
             shutil.rmtree(staging)
 
 
+def _seal_failure(private, certificate, output, original):
+    """Seal only bounded diagnostic metadata when the complete archive cannot fit."""
+    profile = read_json(private / "profile.json", private=True)
+    run = private / "runs" / (profile["run_id"] + "-trace-resolve")
+    require(run.is_dir() and not run.is_symlink() and not output.exists() and
+            not output.is_symlink(), "COLLECT")
+    require(certificate.is_file() and not certificate.is_symlink(), "PREREQUISITE")
+    require(output.parent.is_dir() and not output.parent.is_symlink(), "COLLECT")
+    retained = {}
+    for name in FAILURE_FILES:
+        path = run / name
+        if path.exists():
+            mode = path.lstat().st_mode
+            require(stat.S_ISREG(mode) and path.stat().st_size <= FAILURE_FILE_LIMIT,
+                    "COLLECT")
+            retained[name] = path.read_bytes()
+    require("run.json" in retained, "COLLECT")
+    original_code = getattr(original, "code", None)
+    failure = {
+        "schema": "alopex.signed-index-failure/v1",
+        "seal_error_code": original_code if original_code in FAILURE_CODES else "INTERNAL",
+        "seal_error_stage": "full_seal",
+        "full_evidence_incomplete": True,
+        "retained": sorted(retained),
+        "omitted_from_failure_receipt": list(OMITTED_FAILURE_FILES),
+    }
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w:gz") as archive:
+        for name, data in retained.items():
+            info = tarfile.TarInfo("evidence/" + name)
+            info.mode = 0o600
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+        data = (json.dumps(failure, sort_keys=True) + "\n").encode()
+        info = tarfile.TarInfo("evidence/seal-failure.private.json")
+        info.mode = 0o600
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+    require(payload.tell() <= FAILURE_PLAINTEXT_LIMIT, "CAPACITY")
+    encrypted = subprocess.run(
+        ["openssl", "cms", "-encrypt", "-aes-256-cbc", "-binary", "-outform", "DER",
+         "-in", "/dev/stdin", str(certificate)], input=payload.getvalue(),
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30, check=False)
+    require(encrypted.returncode == 0 and
+            0 < len(encrypted.stdout) <= FAILURE_CIPHERTEXT_LIMIT, "COLLECT")
+    budget = Budget(profile["storage"])
+    receipt_path = run / "capture-budget.private.json"
+    receipt = read_json(receipt_path, private=True) if receipt_path.exists() else None
+    if receipt is not None:
+        require(receipt.get("capture_limit_bytes") == LIMIT, "IDENTITY")
+    baseline = receipt.get("allocated_before_bytes") if receipt is not None else None
+    require(baseline is None or type(baseline) is int, "IDENTITY")
+    used = budget.used()
+    growth = len(encrypted.stdout) + SEAL_RESERVE
+    require((baseline is None or used - baseline + growth <= LIMIT) and
+            used + profile["storage"]["reserve_bytes"] + growth <
+            profile["storage"]["stop_bytes"], "CAPACITY")
+    staging = Path(tempfile.mkdtemp(prefix=output.name + ".pending-", dir=output.parent))
+    try:
+        ciphertext = staging / "private-evidence.cms"
+        ciphertext.write_bytes(encrypted.stdout)
+        public = {"schema": "alopex.signed-index-capture/v1",
+                  "case": "SIGNED_INDEX_CAPTURE", "outcome": "failed",
+                  "error_code": "EVIDENCE_FAILURE",
+                  "evidence_sha256": digest(ciphertext)}
+        (staging / "public.json").write_text(json.dumps(public, sort_keys=True) + "\n")
+        used = budget.used()
+        require((baseline is None or used - baseline <= LIMIT) and
+                used + profile["storage"]["reserve_bytes"] <
+                profile["storage"]["stop_bytes"], "CAPACITY")
+        require(not output.exists() and not output.is_symlink(), "COLLECT")
+        staging.rename(output)
+        return public
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
+def seal(private, certificate, output):
+    try:
+        return _seal_full(private, certificate, output)
+    except Exception as original:
+        if output.exists() or output.is_symlink():
+            raise
+        return _seal_failure(private, certificate, output, original)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--private", type=Path, required=True)
@@ -168,8 +266,9 @@ def main():
         result = seal(args.private, args.certificate, args.output)
         if result is None:
             return 0  # Wrapper failed before capture was attempted.
-        print(json.dumps({"case": result["case"], "outcome": result["outcome"]}))
-        return 0
+        print(json.dumps({"case": result["case"], "outcome": result["outcome"],
+                          "error_code": result["error_code"]}))
+        return 0 if result["outcome"] == "passed" else 1
     except BaseException:
         print('{"case":"SIGNED_INDEX_CAPTURE","outcome":"failed","error_code":"EVIDENCE_FAILURE"}')
         return 1

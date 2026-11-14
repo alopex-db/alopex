@@ -187,10 +187,21 @@ def run(args):
     from capture_signed_indexes import capture
     from seal_signed_indexes import seal as seal_indexes
     same_host(prior, module.admission_facts())
-    capture(module, prior, private)
-    seal_indexes(private,
-                 args.qualification_checkout / '.github/ops/native-evidence-cert.pem',
-                 Path(os.environ['GITHUB_WORKSPACE']) / 'signed-index-export')
+    try:
+        capture(module, prior, private)
+    except BaseException as error:
+        error.wrapper_phase = 'capture_signed_indexes'
+        raise
+    try:
+        signed_receipt = seal_indexes(
+            private,
+            args.qualification_checkout / '.github/ops/native-evidence-cert.pem',
+            Path(os.environ['GITHUB_WORKSPACE']) / 'signed-index-export')
+        require(signed_receipt is not None and signed_receipt.get('outcome') == 'passed',
+                'signed index evidence incomplete')
+    except BaseException as error:
+        error.wrapper_phase = 'seal_signed_indexes'
+        raise
     environment['WAL_COST_CONFIG'] = base64.b64encode(args.config.read_bytes()).decode('ascii')
     monitor_comparator(args.frozen_checkout, config, module, prior, private, environment)
 
@@ -205,6 +216,23 @@ def seal_wrapper_failure(error):
         return  # Preserve the comparator's original error and cleanup result.
     payload = {'run_id': os.environ.get('GITHUB_RUN_ID'),
                'pre_comparator_error': True, 'original_error': repr(error)[:4096],
+               'wrapper_phase': getattr(error, 'wrapper_phase', None),
+               'capture_stage': (getattr(error, 'capture_stage', None)
+                                 if getattr(error, 'capture_stage', None) in (
+                                     'capture_admission', 'capture_prerequisites',
+                                     'capture_monitor_start', 'capture_image',
+                                     'capture_file_budget', 'capture_bootstrap_budget',
+                                     'capture_container_create', 'capture_container_budget',
+                                     'capture_container_stage', 'capture_resolver',
+                                     'capture_collect', 'capture_proof',
+                                     'capture_final_budget') else None),
+               'capacity_gate': (error.detail if getattr(error, 'code', None) == 'CAPACITY' and
+                                 getattr(error, 'detail', None) in (
+                                     'capture_original_allowance', 'capture_host_stop',
+                                     'capture_free_space', 'capture_planned_budget',
+                                     'capture_collected_size',
+                                     'host_stop', 'host_growth', 'capture_stage_growth')
+                                 else None),
                'cleanup_error': None, 'comparator_exit': None,
                'all_owned_children_waited': False}
     with receipt.open('x', encoding='utf-8') as output:
