@@ -8,10 +8,25 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from verify_captured_indexes import ProofError, prove, signed_hashes, signer
+from verify_captured_indexes import ProofError, prove, signed_hashes, signer, validate_sources
 
 
 class CaptureProofTests(unittest.TestCase):
+    def test_pinned_resolver_sources_match_offline_verifier_boundary(self):
+        script = (Path(__file__).parent / "capture_ubuntu_indexes.sh").read_text()
+        marker = "cat > \"$out/ubuntu.sources\" <<'EOF'\n"
+        source = script.split(marker, 1)[1].split("\nEOF\n", 1)[0] + "\n"
+        declared = validate_sources(source)
+        self.assertEqual(declared, {
+            (host, suite, component)
+            for host, suites in (("archive.ubuntu.com", ("noble", "noble-updates")),
+                                 ("security.ubuntu.com", ("noble-security",)))
+            for suite in suites
+            for component in ("main", "universe", "restricted", "multiverse")
+        })
+        with self.assertRaisesRegex(ProofError, "unexpected APT suite/component"):
+            validate_sources(source.replace("noble noble-updates", "noble noble-backports"))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

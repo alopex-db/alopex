@@ -6,29 +6,38 @@ umask 077
 export LC_ALL=C
 
 out=/resolution/results
+legacy=/etc/apt/sources.list
 sources=/etc/apt/sources.list.d/ubuntu.sources
 keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg
 test "$(dpkg --print-architecture)" = amd64
 . /etc/os-release
 test "$ID:$VERSION_ID" = ubuntu:24.04
-test -r "$sources" && test -r "$keyring"
+test -r "$legacy" && test -r "$sources" && test -r "$keyring"
 test -s /resolution/ca.pem
-test ! -e /etc/apt/sources.list || test ! -s /etc/apt/sources.list
+test "$(sha256sum "$legacy" | awk '{print $1}')" = 8ce6407d5487bed332b5fcb4aab26dacf3f516d811c26792efb0c67f06f1958b
+test "$(sha256sum "$sources" | awk '{print $1}')" = 9a4af756e974a7a6b0a447705d1d12366cfa4d860d8722b652d69d8e1b44e34f
+# The pinned image keeps a comment-only migration notice in sources.list.
+awk '/^[[:space:]]*($|#)/ { next } { exit 1 }' "$legacy"
 # A second enabled source could silently alter APT's dependency solution.
 test "$(find /etc/apt/sources.list.d -maxdepth 1 -type f \( -name '*.list' -o -name '*.sources' \) | wc -l | tr -d ' ')" = 1
 test "$(find /etc/apt/sources.list.d -maxdepth 1 -type f \( -name '*.list' -o -name '*.sources' \) -print)" = "$sources"
-awk '
-  /^URIs: / { if ($0 !~ /^URIs: https?:\/\/(archive|security)\.ubuntu\.com\/ubuntu$/) exit 1; u++ }
-  /^Signed-By: / { if ($0 != "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg") exit 1; k++ }
-  /^Types: / { if ($0 != "Types: deb") exit 1; t++ }
-  /^Suites: / { if ($0 !~ /^Suites: noble(-updates|-security)?( noble(-updates|-security)?)*$/) exit 1; s++ }
-  END { if (!u || u != k || u != t || u != s) exit 1 }
-' "$sources"
 test ! -e "$out"
 mkdir -p "$out/lists/partial" "$out/archives/partial"
 chmod 755 "$out" "$out/lists" "$out/lists/partial" "$out/archives" "$out/archives/partial"
 chown _apt:root "$out/lists/partial" "$out/archives/partial"
-sed 's|http://|https://|g' "$sources" > "$out/ubuntu.sources"
+cat > "$out/ubuntu.sources" <<'EOF'
+Types: deb
+URIs: https://archive.ubuntu.com/ubuntu
+Suites: noble noble-updates
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: https://security.ubuntu.com/ubuntu
+Suites: noble-security
+Components: main universe restricted multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
 chmod 644 "$out/ubuntu.sources"
 cat > "$out/apt.conf" <<EOF
 Dir::Etc::sourcelist "$out/ubuntu.sources";
@@ -49,7 +58,7 @@ chmod 644 "$out/apt.conf"
 sha256sum "$0" > "$out/resolver.sha256"
 dpkg-query -W -f='${Package}\t${Version}\n' > "$out/base.tsv"
 cp "$keyring" "$out/trusted-keyring.gpg"
-sha256sum "$sources" "$keyring" > "$out/source-keyring.sha256"
+sha256sum "$legacy" "$sources" "$keyring" > "$out/source-keyring.sha256"
 apt-get -c "$out/apt.conf" update > "$out/apt-update.log" 2>&1
 apt-get -c "$out/apt.conf" indextargets > "$out/indextargets.raw"
 mkdir "$out/packages"
