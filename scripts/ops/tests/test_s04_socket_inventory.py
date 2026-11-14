@@ -8,7 +8,6 @@ import stat
 import tempfile
 import unittest
 from unittest.mock import patch
-import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 MODULE = ROOT / "scripts/ops/s04_socket_inventory.py"
@@ -150,10 +149,10 @@ class SocketInventoryTests(unittest.TestCase):
 
     def test_workflow_separates_inventory_from_connection_jobs(self):
         source = (ROOT / ".github/workflows/alopex-performance.yml").read_text()
-        workflow = yaml.safe_load(source)
-        steps = workflow["jobs"]["s04_socket_inventory"]["steps"]
-        precheckout = steps[0]["run"]
         job = source.split("  s04_socket_inventory:\n", 1)[1].split("  inventory:\n", 1)[0]
+        precheckout = job.split(
+            "      - name: Gate exact source and host allocation before checkout\n", 1
+        )[1].split("\n      - name:", 1)[0]
         self.assertIn("!inputs.s04_inspect_mode", job)
         self.assertIn("expected_controller_sha", job)
         self.assertNotIn("docker context", job)
