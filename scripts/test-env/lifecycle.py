@@ -94,6 +94,8 @@ class Run:
             return
         require(self.record["phase"] == "collected", "STATE")
         self.verify_collection()
+        # A timed-out create can still publish after a negative inspect.
+        require(all(item["id"] is not None for item in self.record["resources"]), "CLEANUP")
         # Inspect every surviving resource before deleting any resource.
         owned = []
         for item in self.record["resources"]:
@@ -103,7 +105,8 @@ class Run:
                 # not proof that this ownership intent has been settled.
                 require(item["id"] is not None, "CLEANUP")
                 continue
-            require(live["id"] == item["id"] and
+            require(live["kind"] == item["kind"] and live["name"] == item["name"] and
+                    live["id"] == item["id"] and
                     live["labels"].get("org.alopex.test-env.run") == self.run_id and
                     live["labels"].get("org.alopex.test-env.owner") == "envctl" and
                     live["labels"].get("org.alopex.test-env.token") == self.record["ownership_token"] and
@@ -111,4 +114,6 @@ class Run:
             owned.append(item)
         for item in sorted(owned, key=lambda i: i["kind"] != "container"):
             remove(item)
+            require(inspect(item) is None, "CLEANUP")
+        require(all(inspect(item) is None for item in self.record["resources"]), "CLEANUP")
         self.transition("deleted")

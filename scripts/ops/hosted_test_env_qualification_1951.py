@@ -17,6 +17,7 @@ import sys
 import tarfile
 import tempfile
 import traceback
+import uuid
 import zipfile
 
 HERE = Path(__file__).resolve().parent
@@ -25,7 +26,7 @@ sys.path.insert(0, str(REPO / "scripts/test-env"))
 sys.path.insert(0, str(HERE))
 
 from capacity import Budget, DU_BINARY, SUDO_BINARY, trusted_executable  # noqa: E402
-from common import (CASES, Failure, atomic_json, digest, elf_signature, load_profile,  # noqa: E402
+from common import (CASES, ERRORS, Failure, atomic_json, digest, elf_signature, load_profile,  # noqa: E402
                     private_dir, read_json, require, verify_assets)
 from docker_backend import Docker  # noqa: E402
 from envctl import image_lock, source_identity  # noqa: E402
@@ -46,7 +47,7 @@ FILE_DIGESTS = {"server": "1046dfb22250cb21df1193e69107affa4d88de4d274fc55e97351
                 "harness": "9012c7ead25e606fbe945298b435cdae2a02a6d293a946c44fd07dbc69c60b37"}
 LOCK_DIGEST = "37d2499475142c5f5341296c3ce90e5a2d7b4d95a803375ee56dacf7932b50f7"
 POLICY_DIGEST = "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74"
-CONTROLLER_DIGEST = "6427057ba05cf70d6d088f8f6c8e4ac20103fcc7dd4baf737453cbd63a1b49c8"
+CONTROLLER_DIGEST = "6253a941e1428612c8531e0906f1ce3e005d401b944d2fb02a87b835e8e84887"
 EXPECTED_DOCKER_VERSION = "28.0.4"
 DOCKER_BINARY = Path("/usr/bin/docker")
 PLANNED = {"fetch": 1_000_000_000, "build": 5_000_000_000,
@@ -392,13 +393,21 @@ def admission_facts():
             lsm.get("status") == "read" and "apparmor" in lsm["value"].split(",") and
             apparmor.get("status") == "read" and apparmor["value"].strip() == "Y", "PREREQUISITE")
     sibling = sibling_observation()
-    dmi = read_text(Path("/sys/class/dmi/id/product_uuid"))
+    boot_id = read_text(Path("/proc/sys/kernel/random/boot_id"))
     mountinfo = read_text(Path("/proc/self/mountinfo"))
-    for source, result in (("DMI", dmi), ("MOUNTINFO", mountinfo)):
+    for source, result in (("BOOT_ID", boot_id), ("MOUNTINFO", mountinfo)):
         status = result.get("status")
         if status != "read":
             safe_status = status if status in ("unreadable", "missing_or_oversize") else "unexpected"
             raise Failure("PREREQUISITE", f"{source}:{safe_status}")
+    try:
+        boot_value = boot_id.get("value").removesuffix("\n")
+        parsed_boot_id = uuid.UUID(boot_value)
+        valid_boot_id = str(parsed_boot_id) == boot_value and parsed_boot_id.int != 0
+    except (TypeError, ValueError, AttributeError):
+        valid_boot_id = False
+    if not valid_boot_id:
+        raise Failure("PREREQUISITE", "BOOT_ID:invalid")
     context = checked_command(["docker", "context", "show"])
     inspection = json.loads(checked_command(["docker", "context", "inspect", context]))[0]
     endpoint = inspection["Endpoints"]["docker"]["Host"]
@@ -451,7 +460,7 @@ def admission_facts():
     return {"context": context, "docker_info": docker_info, "storage": storage,
             "baseline_bytes": baseline, "cpus": cpu_set[:2], "sibling": sibling,
             "kernel": kernel, "lsm": lsm, "apparmor": apparmor,
-            "dmi": dmi, "mountinfo": mountinfo, "root_metadata": root_metadata,
+            "boot_id": boot_id, "mountinfo": mountinfo, "root_metadata": root_metadata,
             "temp_snapshot": temp_snapshot}
 
 
@@ -487,7 +496,7 @@ def same_runner(previous, current):
     require(current["context"] == previous["context"] and
             current["docker_info"]["DockerRootDir"] ==
             previous["docker_info"]["DockerRootDir"] and
-            current["dmi"] == previous["dmi"] and
+            current["boot_id"] == previous["boot_id"] and
             current["kernel"] == previous["kernel"] and
             current["baseline_bytes"] <= previous["baseline_bytes"] + 1_000_000_000,
             "IDENTITY")
@@ -495,6 +504,10 @@ def same_runner(previous, current):
 
 
 def envctl(profile, *args):
+    global PRIVATE_STAGE
+    PRIVATE_STAGE = ("envctl_doctor_preflight" if args[:3] == ("doctor", "--phase", "preflight")
+                     else "envctl_doctor_runtime" if args[:3] == ("doctor", "--phase", "runtime")
+                     else "envctl_" + args[0])
     if EXPECTED_TEMP_SNAPSHOT is not None and args[0] not in ("collect", "clean"):
         verify_temp_snapshot(EXPECTED_TEMP_SNAPSHOT)
     command = [sys.executable, "-B", str(REPO / "scripts/test-env/envctl.py"),
@@ -506,10 +519,10 @@ def envctl(profile, *args):
         output = json.loads(result.stdout)
     except ValueError as error:
         raise Failure("COMMAND") from error
+    if not isinstance(output, dict):
+        raise Failure("COMMAND")
     require(result.returncode == 0 and output == {"status": "passed", "error_code": None},
-            output.get("error_code") if output.get("error_code") in
-            ("CAPACITY", "MEASUREMENT", "POLICY", "IDENTITY", "PREREQUISITE", "TIMEOUT")
-            else "COMMAND")
+            output.get("error_code") if output.get("error_code") in ERRORS else "COMMAND")
     if EXPECTED_TEMP_SNAPSHOT is not None and args[0] not in ("collect", "clean"):
         verify_temp_snapshot(EXPECTED_TEMP_SNAPSHOT)
 
@@ -662,7 +675,8 @@ def main(argv=None):
         code = error.code if isinstance(error, Failure) else "INTERNAL"
         public["error_code"] = code
         read_status = error.detail if isinstance(error, Failure) and error.detail in {
-            "DMI:unreadable", "DMI:missing_or_oversize", "DMI:unexpected",
+            "BOOT_ID:unreadable", "BOOT_ID:missing_or_oversize", "BOOT_ID:unexpected",
+            "BOOT_ID:invalid",
             "MOUNTINFO:unreadable", "MOUNTINFO:missing_or_oversize", "MOUNTINFO:unexpected"
         } else None
         atomic_json(private / "failure.private.json", {"error_code": code,

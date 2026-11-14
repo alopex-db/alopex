@@ -17,9 +17,25 @@ SCRIPT = Path(__file__).resolve().parents[1] / "hosted_test_env_qualification.py
 SPEC = importlib.util.spec_from_file_location("hosted_test_env_qualification", SCRIPT)
 qualification = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(qualification)
+SCRIPT_1951 = SCRIPT.with_name("hosted_test_env_qualification_1951.py")
+SPEC_1951 = importlib.util.spec_from_file_location("hosted_test_env_qualification_1951", SCRIPT_1951)
+qualification_1951 = importlib.util.module_from_spec(SPEC_1951)
+SPEC_1951.loader.exec_module(qualification_1951)
+QUALIFIERS = (qualification, qualification_1951)
+BOOT_ID = "12345678-1234-4234-8234-123456789abc"
 
 
 class Inputs(unittest.TestCase):
+    def test_envctl_failure_preserves_fixed_inner_code_and_phase(self):
+        response = SimpleNamespace(returncode=1,
+                                   stdout='{"status":"failed","error_code":"ARCHIVE"}')
+        with patch.object(qualification.subprocess, "run", return_value=response), \
+             patch.object(qualification, "EXPECTED_TEMP_SNAPSHOT", None):
+            with self.assertRaises(qualification.Failure) as caught:
+                qualification.envctl(Path("unused"), "doctor", "--phase", "preflight")
+        self.assertEqual(caught.exception.code, "ARCHIVE")
+        self.assertEqual(qualification.PRIVATE_STAGE, "envctl_doctor_preflight")
+
     def test_controller_digest_matches_checked_out_test_env_sources(self):
         identity = qualification.source_identity()
         self.assertEqual(identity["controller_digest"], qualification.CONTROLLER_DIGEST)
@@ -122,16 +138,22 @@ class Inputs(unittest.TestCase):
 
     def test_same_runner_requires_stable_temp_snapshot_after_json_receipt(self):
         original = {"context": "default", "docker_info": {"DockerRootDir": "/docker"},
-                    "dmi": {"status": "read", "value": "private"},
+                    "boot_id": {"status": "read", "value": BOOT_ID + "\n"},
                     "kernel": {"status": "read", "value": "private"},
                     "baseline_bytes": 100,
                     "temp_snapshot": [["/tmp", "alopex-existing", 1, 2, 3, "/tmp/alopex-existing"]]}
         previous = json.loads(json.dumps(original))
-        qualification.same_runner(previous, original)
-        changed = dict(original, temp_snapshot=[])
-        with self.assertRaises(qualification.Failure) as caught:
-            qualification.same_runner(previous, changed)
-        self.assertEqual(caught.exception.code, "MEASUREMENT")
+        for module in QUALIFIERS:
+            with self.subTest(module=module.__name__):
+                module.same_runner(previous, original)
+                for change in ({"temp_snapshot": []},
+                               {"boot_id": {"status": "read", "value": "different"}},
+                               {"context": "other"},
+                               {"docker_info": {"DockerRootDir": "/other"}}):
+                    with self.subTest(change=change), self.assertRaises(module.Failure) as caught:
+                        module.same_runner(previous, dict(original, **change))
+                    self.assertEqual(caught.exception.code,
+                                     "MEASUREMENT" if "temp_snapshot" in change else "IDENTITY")
 
     def test_tmpdir_must_resolve_to_measured_runner_temp(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -201,12 +223,16 @@ class Inputs(unittest.TestCase):
                            "MemTotal": 3_000_000_000}
             def observed(path):
                 name = str(path)
+                if name == "/sys/class/dmi/id/product_uuid":
+                    raise AssertionError("DMI must not be read")
                 if "config-" in name:
                     value = "CONFIG_TASK_IO_ACCOUNTING=y"
                 elif name.endswith("/lsm"):
                     value = "apparmor"
                 elif name.endswith("/enabled"):
                     value = "Y"
+                elif name == "/proc/sys/kernel/random/boot_id":
+                    value = BOOT_ID + "\n"
                 else:
                     value = "private"
                 return {"status": "read", "value": value}
@@ -244,6 +270,7 @@ class Inputs(unittest.TestCase):
                 budget.return_value.used.return_value = 100
                 facts = qualification.admission_facts()
             self.assertEqual(facts["docker_info"]["DockerRootDir"], str(docker_root))
+            self.assertEqual(facts["boot_id"]["value"], BOOT_ID + "\n")
             json.dumps(facts)
 
     def test_checkout_head_must_match_expected_controller_sha(self):
@@ -505,15 +532,17 @@ class Sequence(unittest.TestCase):
         workflow = Path(__file__).resolve().parents[3] / (
             ".github/workflows/alopex-performance.yml")
         source = workflow.read_text()
-        self.assertIn("inventory:\n    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode }}", source)
+        self.assertIn("inventory:\n    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}", source)
         self.assertIn("qualification:\n    if: inputs.qualification_mode", source)
-        self.assertIn("inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode", source)
-        self.assertIn("inputs.issue_number == '712' && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode)", source)
+        self.assertIn("inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode", source)
+        self.assertIn("inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode)", source)
+        self.assertIn("inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode", source)
         source = source.split("  qualification:\n", 1)[1]
         positions = [source.index(token) for token in (
             "Bound checkout before source acquisition", "uses: actions/checkout@v4",
             "Admit this runner before candidate acquisition",
-            "Retrieve exact candidate assets", "Qualify on this runner")]
+            "Retrieve exact candidate assets", "Qualify on this runner",
+            "Capture selected CLI wire against offline fake socket")]
         self.assertEqual(positions, sorted(positions))
 
     def test_qualification_uses_a_default_branch_registered_workflow_path(self):
@@ -538,23 +567,62 @@ class Sequence(unittest.TestCase):
             return statuses[name]
 
         for statuses, expected in (
-            ({"/sys/class/dmi/id/product_uuid": {"status": "unreadable"},
+            ({"/proc/sys/kernel/random/boot_id": {"status": "unreadable"},
               "/proc/self/mountinfo": {"status": "read", "value": "fixture"}},
-             "DMI:unreadable"),
-            ({"/sys/class/dmi/id/product_uuid": {"status": "read", "value": "fixture"},
+             "BOOT_ID:unreadable"),
+            ({"/proc/sys/kernel/random/boot_id": {"status": "missing_or_oversize"},
+              "/proc/self/mountinfo": {"status": "read", "value": "fixture"}},
+             "BOOT_ID:missing_or_oversize"),
+            ({"/proc/sys/kernel/random/boot_id": {"status": "read", "value": BOOT_ID},
               "/proc/self/mountinfo": {"status": "missing_or_oversize"}},
              "MOUNTINFO:missing_or_oversize"),
+            *[({"/proc/sys/kernel/random/boot_id": {"status": "read", "value": bad},
+                "/proc/self/mountinfo": {"status": "read", "value": "fixture"}},
+               "BOOT_ID:invalid") for bad in ("invalid", "0" * 8 + "-" + "0" * 4 + "-" +
+                "0" * 4 + "-" + "0" * 4 + "-" + "0" * 12, BOOT_ID.upper(), BOOT_ID + " \n")],
         ):
-            with self.subTest(expected=expected), \
-                 patch.object(qualification.sys, "platform", "linux"), \
-                 patch.object(qualification.platform, "machine", return_value="x86_64"), \
+            for module in QUALIFIERS:
+                with self.subTest(expected=expected, module=module.__name__), \
+                     patch.object(module.sys, "platform", "linux"), \
+                     patch.object(module.platform, "machine", return_value="x86_64"), \
+                     patch.dict(os.environ, {"RUNNER_ENVIRONMENT": "github-hosted"}), \
+                     patch.object(module, "read_text", side_effect=read), \
+                     patch.object(module, "sibling_observation", return_value={}):
+                    with self.assertRaises(module.Failure) as caught:
+                        module.admission_facts()
+                self.assertEqual((caught.exception.code, caught.exception.detail),
+                                 ("PREREQUISITE", expected))
+
+    def test_unreadable_dmi_with_stable_boot_id_reaches_docker_checks(self):
+        class ReachedDocker(Exception):
+            pass
+
+        def read(path):
+            name = str(path)
+            if name == "/sys/class/dmi/id/product_uuid":
+                raise AssertionError("DMI must not be read")
+            if name.startswith("/boot/config-"):
+                value = "CONFIG_TASK_IO_ACCOUNTING=y"
+            elif name == "/sys/kernel/security/lsm":
+                value = "apparmor"
+            elif name == "/sys/module/apparmor/parameters/enabled":
+                value = "Y"
+            elif name == "/proc/sys/kernel/random/boot_id":
+                value = BOOT_ID + "\n"
+            else:
+                value = "fixture"
+            return {"status": "read", "value": value}
+
+        for module in QUALIFIERS:
+            with self.subTest(module=module.__name__), \
+                 patch.object(module.sys, "platform", "linux"), \
+                 patch.object(module.platform, "machine", return_value="x86_64"), \
                  patch.dict(os.environ, {"RUNNER_ENVIRONMENT": "github-hosted"}), \
-                 patch.object(qualification, "read_text", side_effect=read), \
-                 patch.object(qualification, "sibling_observation", return_value={}):
-                with self.assertRaises(qualification.Failure) as caught:
-                    qualification.admission_facts()
-            self.assertEqual((caught.exception.code, caught.exception.detail),
-                             ("PREREQUISITE", expected))
+                 patch.object(module, "read_text", side_effect=read), \
+                 patch.object(module, "sibling_observation", return_value={}), \
+                 patch.object(module, "checked_command", side_effect=ReachedDocker), \
+                 self.assertRaises(ReachedDocker):
+                module.admission_facts()
 
     def test_admission_precedes_profile_and_every_envctl_operation(self):
         events = []
@@ -570,7 +638,7 @@ class Sequence(unittest.TestCase):
                 return manifest
             def facts():
                 events.append("admission")
-                raise qualification.Failure("PREREQUISITE", "DMI:unreadable")
+                raise qualification.Failure("PREREQUISITE", "BOOT_ID:unreadable")
             with patch.dict("os.environ", {"RUNNER_TEMP": str(root),
                                          "ALOPEX_804_ASSETS": str(root)}), \
                  patch.object(qualification, "verified_controller", side_effect=lambda: events.append("controller")), \
@@ -585,7 +653,7 @@ class Sequence(unittest.TestCase):
             failure = json.loads((root / "alopex-804-qualification" /
                                   "failure.private.json").read_text())
             self.assertEqual(failure["stage"], "admission_facts")
-            self.assertEqual(failure["read_status"], "DMI:unreadable")
+            self.assertEqual(failure["read_status"], "BOOT_ID:unreadable")
             self.assertIn("admission_facts", failure["traceback"])
             make_profile.assert_not_called()
             execute.assert_not_called()
