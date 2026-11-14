@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import select
 import shutil
 import socket
@@ -31,7 +32,6 @@ MAX_OUTPUT = 1_048_576
 MAX_PEER_EXECUTABLE = 268_435_456
 MAX_PROC_STAT = 4096
 SO_PEERPIDFD = getattr(socket, "SO_PEERPIDFD", 77)  # Linux UAPI asm-generic/socket.h
-SOURCE_HEAD = "69c31a7950743d130ac3f96fb1ffb795a2818528"
 SOURCE_HASHES = {
     "scripts/test-env/common.py": "a84a6951f6b1303869cc74f12a92053e691b854c2ac9b8835811bfdcf135c47f",
     "scripts/test-env/docker_backend.py": "4f16cc16e8e4d620f568b53dbb8ced965cdee2ea7476978a464d4fe4579c712e",
@@ -178,7 +178,11 @@ def source_contract() -> dict[str, str]:
 
 
 def capture(args: argparse.Namespace) -> dict:
-    if args.source_head != SOURCE_HEAD:
+    root = Path(__file__).resolve().parents[2]
+    checkout = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=root,
+                              capture_output=True, check=False, timeout=10)
+    if (checkout.returncode or not re.fullmatch(r"[0-9a-f]{40}", args.source_head) or
+            checkout.stdout.strip().decode("ascii", errors="replace") != args.source_head):
         raise PreflightError("SOURCE_MISMATCH")
     source_hashes = source_contract()
     profile = json.loads(args.profile.read_text())

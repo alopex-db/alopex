@@ -84,7 +84,7 @@ def main() -> int:
         budget = Budget(profile["storage"])
         require(budget.used() + 10_000_000 < 40_000_000_000, "CAPACITY")
         output = args.private / "s04-wire.private.json"
-        capture_args = argparse.Namespace(source_head=wire.SOURCE_HEAD,
+        capture_args = argparse.Namespace(source_head=os.environ["EXPECTED_CONTROLLER_SHA"],
                                           profile=args.private / "profile.json", cli=args.cli,
                                           output=output, run_id=run_id, token=token,
                                           image=image, input_volume=inputs, work_volume=work,

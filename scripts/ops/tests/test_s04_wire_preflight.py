@@ -1,4 +1,5 @@
 """Offline bounds and cleanup checks. Never calls a Docker daemon."""
+import argparse
 import errno
 from contextlib import ExitStack
 import hashlib
@@ -9,6 +10,7 @@ from pathlib import Path
 import signal
 import socket
 import stat
+import subprocess
 import struct
 import sys
 import tempfile
@@ -85,7 +87,27 @@ class Parser(unittest.TestCase):
 
 
 class PrivacyAndCleanup(unittest.TestCase):
-    def test_controller_sources_match_pinned_head(self):
+    def test_capture_requires_actual_checkout_head(self):
+        args = argparse.Namespace(source_head="a" * 40)
+        with mock.patch.object(preflight.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, stdout=("b" * 40 + "\n").encode(), stderr=b"")), \
+             self.assertRaisesRegex(preflight.PreflightError, "SOURCE_MISMATCH"):
+            preflight.capture(args)
+        with mock.patch.object(preflight.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 1, stdout=b"", stderr=b"missing checkout")), \
+             self.assertRaisesRegex(preflight.PreflightError, "SOURCE_MISMATCH"):
+            preflight.capture(args)
+        with mock.patch.object(preflight.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, stdout=("a" * 40 + "\n").encode(), stderr=b"")), \
+             self.assertRaisesRegex(preflight.PreflightError, "SOURCE_MISMATCH"):
+            preflight.capture(argparse.Namespace(source_head="A" * 40))
+        with mock.patch.object(preflight.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, stdout=("a" * 40 + "\n").encode(), stderr=b"")), \
+             mock.patch.object(preflight, "source_contract", side_effect=RuntimeError("matched")), \
+             self.assertRaisesRegex(RuntimeError, "matched"):
+            preflight.capture(args)
+
+    def test_controller_sources_match_pinned_hashes(self):
         hashes = preflight.source_contract()
         self.assertEqual(hashes, preflight.SOURCE_HASHES)
 
