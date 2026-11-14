@@ -98,7 +98,8 @@ class HostMonitorTests(unittest.TestCase):
                 def inspect(self, item):
                     if not self.present:
                         return None
-                    return {"id": "container-id", "running": self.running,
+                    return {"kind": item["kind"], "name": item["name"],
+                            "id": "container-id", "running": self.running,
                             "labels": {"org.alopex.test-env.owner": "envctl",
                                        "org.alopex.test-env.run": "synthetic",
                                        "org.alopex.test-env.token":
