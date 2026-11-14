@@ -50,6 +50,8 @@ jobs:
           python3 -B -m unittest discover -s scripts/ops/tests \
             -p test_s04_wire_preflight.py \
             -k test_real_unix_peer_pidfd_tracks_exit_without_docker -v
+      - name: Verify offline S04 socket inventory on Linux
+        run: python3 -B -m unittest discover -s scripts/ops/tests -p test_s04_socket_inventory.py -v
       - name: Classify production and release-process changes
         id: classify
         shell: bash

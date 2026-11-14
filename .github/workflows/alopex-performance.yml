@@ -32,6 +32,11 @@ on:
         required: false
         type: boolean
         default: false
+      s04_socket_inventory_mode:
+        description: Offline selected socket metadata inventory for #684
+        required: false
+        type: boolean
+        default: false
       s04_capture_mode:
         description: Run #804 qualification then capture selected CLI against an offline fake socket
         required: false
@@ -51,8 +56,117 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  s04_socket_inventory:
+    if: ${{ inputs.s04_socket_inventory_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Gate exact source and host allocation before checkout
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess, sys
+          try:
+              e = os.environ
+              assert e.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+              assert e.get('ISSUE_NUMBER') == '684'
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_CONTROLLER_SHA', ''))
+              assert e['EXPECTED_CONTROLLER_SHA'] == e['GITHUB_SHA']
+              # A selected local daemon must be identifiable before checkout.
+              # Unknown flags/configuration stop the inventory; no Docker API is queried.
+              daemons = []
+              for entry in pathlib.Path('/proc').iterdir():
+                  if not entry.name.isdecimal():
+                      continue
+                  try:
+                      comm = (entry / 'comm').read_text().strip()
+                  except FileNotFoundError:
+                      continue
+                  assert comm
+                  if comm != 'dockerd':
+                      continue
+                  try:
+                      raw = (entry / 'cmdline').read_bytes()
+                  except FileNotFoundError:
+                      continue
+                  assert len(raw) <= 65536
+                  args = [os.fsdecode(part) for part in raw.split(b'\0') if part]
+                  assert args and pathlib.Path(args[0]).name == 'dockerd'
+                  daemons.append(args)
+              assert len(daemons) == 1
+              args = daemons[0][1:]
+              assert not any(arg.startswith('--rootless') or arg.startswith('--config-file') or
+                             arg == '-g' or arg.startswith('-g=') for arg in args)
+              roots_in_args = [arg.split('=', 1)[1] for arg in args if arg.startswith('--data-root=')]
+              for index, arg in enumerate(args):
+                  if arg == '--data-root':
+                      assert index + 1 < len(args)
+                      roots_in_args.append(args[index + 1])
+              assert len(roots_in_args) <= 1
+              setting = pathlib.Path('/etc/docker/daemon.json')
+              configured_root = None
+              if setting.exists():
+                  assert not setting.is_symlink() and setting.stat().st_size <= 65536
+                  configured_root = json.loads(setting.read_text()).get('data-root')
+              if configured_root is not None and roots_in_args:
+                  assert configured_root == roots_in_args[0]
+              daemon = pathlib.Path(roots_in_args[0] if roots_in_args else
+                                    configured_root or '/var/lib/docker')
+              assert daemon.is_absolute() and daemon.resolve(strict=True) == daemon
+              roots = [pathlib.Path(e['GITHUB_WORKSPACE']).parent, pathlib.Path.home(),
+                       pathlib.Path(e['RUNNER_TEMP']), daemon, pathlib.Path('/tmp'), pathlib.Path('/var/tmp')]
+              roots = [p for p in roots if p.exists()]
+              assert all(p.is_absolute() and p.is_dir() and not p.is_symlink() for p in roots)
+              roots = [p for p in roots if not any(p != q and p.is_relative_to(q) for q in roots)]
+              total = 0
+              for root in roots:
+                  prefix = ['/usr/bin/sudo', '-n'] if root == daemon else []
+                  run = subprocess.run(prefix + ['/usr/bin/du', '-sk' if root == daemon else '-skL',
+                                                 '--', str(root)],
+                                       stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+                  parts = run.stdout.decode().strip().split('\t')
+                  assert run.returncode == 0 and not run.stderr and len(parts) == 2
+                  assert parts[0].isdecimal() and parts[1] == str(root)
+                  total += int(parts[0]) * 1024
+                  fs = os.statvfs(root)
+                  assert fs.f_bavail * fs.f_frsize > 1_000_000_000
+              assert total + 1_000_000_000 < 40_000_000_000
+              print('{"case":"S04_SOCKET_STORAGE","outcome":"passed"}')
+          except BaseException:
+              print('{"case":"S04_SOCKET_STORAGE","outcome":"failed"}')
+              sys.exit(1)
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_controller_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Collect selected socket metadata without connection
+        id: collect
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: python3 -B scripts/ops/s04_socket_inventory.py
+      - name: Seal private socket inventory
+        if: always() && steps.collect.outcome != 'skipped'
+        env:
+          COLLECT_OUTCOME: ${{ steps.collect.outcome }}
+        run: python3 -B scripts/ops/s04_socket_inventory_seal.py
+      - name: Upload encrypted socket inventory
+        if: always() && steps.collect.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: s04-socket-metadata-inventory
+          path: |
+            native-s04-socket-inventory-export/private-evidence.cms
+            native-s04-socket-inventory-export/public.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
   inventory:
-    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
+    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -73,7 +187,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   qualification:
-    if: inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode))
+    if: inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode))
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -339,7 +453,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   wal_cost_682:
-    if: inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode
+    if: inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
@@ -536,7 +650,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   s04_inspect:
-    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode }}
+    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
