@@ -91,11 +91,10 @@ def seal(private, certificate, output):
     tar = openssl = None
     try:
         used_before = budget.used()
-        remaining = (LIMIT - max(raw_bytes, 0, used_before - baseline) - SEAL_RESERVE
-                     if baseline is not None else
-                     min(LIMIT - raw_bytes - SEAL_RESERVE,
-                         profile["storage"]["stop_bytes"] -
-                         profile["storage"]["reserve_bytes"] - used_before - SEAL_RESERVE))
+        growth = max(raw_bytes, 0, used_before - baseline) if baseline is not None else raw_bytes
+        headroom = (profile["storage"]["stop_bytes"] -
+                    profile["storage"]["reserve_bytes"] - used_before)
+        remaining = min(LIMIT - growth, headroom) - SEAL_RESERVE
         require(0 < remaining <= LIMIT - SEAL_RESERVE, "CAPACITY")
         tar = subprocess.Popen(["tar", "-C", str(run), "-czf", "-", *files],
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,

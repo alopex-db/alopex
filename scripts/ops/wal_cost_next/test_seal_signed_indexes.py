@@ -138,6 +138,43 @@ class SealRetryTests(unittest.TestCase):
             self.assertFalse((root / "export").exists())
             self.assertFalse(list(root.glob("export.pending-*")))
 
+    def test_sealer_reserves_host_stop_headroom_with_capture_receipt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            private = root / "private"
+            run = private / "runs" / "run-trace-resolve"
+            run.mkdir(parents=True)
+            stop = 40_000_000_000
+            reserve = 1_000_000_000
+            used = stop - reserve - 1_000_000
+            for path, value in ((private / "profile.json", {
+                "run_id": "run", "storage": {"reserve_bytes": reserve,
+                                          "stop_bytes": stop}}),
+                                (run / "run.json", {"phase": "stopped"}),
+                                (run / "failure.json", {"error_code": "COMMAND"}),
+                                (run / "capture-budget.private.json", {
+                                    "capture_limit_bytes": seal_module.LIMIT,
+                                    "allocated_before_bytes": used - 100})):
+                path.write_text(json.dumps(value))
+                path.chmod(0o600)
+            certificate = root / "cert.pem"
+            certificate.write_text("test certificate")
+
+            class NearStopBudget:
+                def __init__(self, storage):
+                    pass
+
+                def used(self):
+                    return used
+
+            with patch.object(seal_module, "Budget", NearStopBudget), \
+                 patch.object(seal_module.subprocess, "Popen") as popen:
+                with self.assertRaises(Failure) as raised:
+                    seal_module.seal(private, certificate, root / "export")
+            self.assertEqual(raised.exception.code, "CAPACITY")
+            popen.assert_not_called()
+            self.assertFalse((root / "export").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
