@@ -50,6 +50,7 @@ import socket
 import struct
 import threading
 import time
+import uuid
 import weakref
 from http import client as _http_client
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
@@ -586,10 +587,17 @@ class _HttpTransport:
         payload: Optional[Mapping[str, Any]] = None,
         *,
         timeout: Optional[float] = None,
+        _trace_id: Optional[str] = None,
     ) -> Tuple[int, str]:
         effective = self._timeout if timeout is None else float(timeout)
         body = None if payload is None else json.dumps(payload).encode("utf-8")
         headers = dict(self._headers)
+        if _trace_id is not None:
+            # Override only this request, even if the configured key used other case.
+            for key in list(headers):
+                if key.lower() == "x-correlation-id":
+                    del headers[key]
+            headers["x-correlation-id"] = "diag-" + _trace_id
         if body is not None:
             headers["Content-Type"] = "application/json"
         headers.setdefault("Accept", "application/json")
@@ -866,6 +874,8 @@ class RemoteDatabase:
         keep_alive: Reuse one connection across calls.
         idle_reconnect_seconds: Reconnect before sending when the connection has
             been idle at least this long. ``None`` disables the check.
+        sql_timing_sink: Optional private callback for stage durations. It receives
+            only numeric counters, never SQL, rows, URL or paths.
 
     The constructor opens no socket, so building a client never blocks and never
     touches the network.
@@ -885,6 +895,7 @@ class RemoteDatabase:
         retries: int = 0,
         keep_alive: bool = True,
         idle_reconnect_seconds: Optional[float] = DEFAULT_IDLE_RECONNECT_SECONDS,
+        sql_timing_sink: Optional[Any] = None,
     ) -> None:
         # `isinstance(True, int)` is True, so a flag passed by mistake used to be
         # accepted as a 1-second deadline. `retries` already excludes bool below.
@@ -911,6 +922,7 @@ class RemoteDatabase:
             idle_reconnect_seconds=idle_reconnect_seconds,
         )
         self._closed = False
+        self._sql_timing_sink = sql_timing_sink
         self._last_routing_diagnostics: List[Any] = []
         # Weak, so an abandoned transaction is still collectable and its own
         # finalizer still runs; close() only needs the ones still alive (D21).
@@ -1050,29 +1062,47 @@ class RemoteDatabase:
         timeout: Optional[float],
     ) -> SqlResult:
         self._ensure_open()
+        sink = self._sql_timing_sink
+        timing = {} if sink is not None else None
+        started = time.perf_counter_ns() if timing is not None else 0
         # The embedded binder is the single source of truth for `?` (D2).
         bound = _bind_sql_params(sql, params)
         if not bound.strip():
-            # `Database.execute_sql("")` returns None; the server answers
-            # INVALID_REQUEST ("sql must not be empty"). Blank input is decided
-            # on the client so the last chunk of a split migration file behaves
-            # the same on both surfaces (D23). Binding runs first, so a bad
-            # parameter list still raises before the short circuit.
+            # Blank SQL preserves the existing no-request/no-result behavior.
             return None
-        body = self._request_json(
-            "POST",
-            self._sql_path,
-            {"sql": bound, "session_id": session_id, "streaming": False},
-            context="sql",
-            timeout=timeout,
-        )
+        if timing is not None:
+            timing["bind_ns"] = time.perf_counter_ns() - started
+            trace_id = str(uuid.uuid4())
+            timing["trace_id"] = trace_id
+        request = {"sql": bound, "session_id": session_id, "streaming": False}
+        if timing is None:
+            body = self._request_json(
+                "POST", self._sql_path, request, context="sql", timeout=timeout
+            )
+        else:
+            body = self._request_json(
+                "POST", self._sql_path, request, context="sql", timeout=timeout,
+                _timing=timing,
+                _trace_id=trace_id,
+            )
         if not isinstance(body, dict):
             raise _protocol_error(f"sql response is not an object: {str(body)[:200]!r}")
         diagnostics = body.get("routing_diagnostics")
         self._last_routing_diagnostics = (
             list(diagnostics) if isinstance(diagnostics, list) else []
         )
-        return _result_from_body(body)
+        row_started = time.perf_counter_ns() if timing is not None else 0
+        result = _result_from_body(body)
+        if timing is not None:
+            timing["rows_ns"] = time.perf_counter_ns() - row_started
+            timing["total_ns"] = time.perf_counter_ns() - started
+            timing["residual_ns"] = timing["total_ns"] - sum(
+                timing[key] for key in ("bind_ns", "transport_ns", "parse_ns", "rows_ns")
+            )
+            timing["schema"] = "alopex.sql-client-timing/v1"
+            timing["result_rows"] = len(result) if isinstance(result, list) else 0
+            sink(timing)
+        return result
 
     def _session_action(self, session_id: str, action: str) -> None:
         self._ensure_open()
@@ -1120,11 +1150,26 @@ class RemoteDatabase:
         *,
         context: str,
         timeout: Optional[float] = None,
+        _timing: Optional[Dict[str, Any]] = None,
+        _trace_id: Optional[str] = None,
     ) -> Any:
-        status, text = self._transport.request(method, path, payload, timeout=timeout)
+        transport_started = time.perf_counter_ns() if _timing is not None else 0
+        if _trace_id is None:
+            status, text = self._transport.request(method, path, payload, timeout=timeout)
+        else:
+            status, text = self._transport.request(
+                method, path, payload, timeout=timeout, _trace_id=_trace_id
+            )
+        if _timing is not None:
+            _timing["transport_ns"] = time.perf_counter_ns() - transport_started
+            _timing["response_chars"] = len(text)
         if status != 200:
             _raise_for_error(status, text)
-        return _parse_json(text, context=context)
+        parse_started = time.perf_counter_ns() if _timing is not None else 0
+        parsed = _parse_json(text, context=context)
+        if _timing is not None:
+            _timing["parse_ns"] = time.perf_counter_ns() - parse_started
+        return parsed
 
     # -- explicit refusals (D7 / D8 / D9) ------------------------------------
 

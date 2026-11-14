@@ -755,6 +755,20 @@ class Privacy(Fixture):
         self.assertEqual(stderr.getvalue(), "")
         self.assertNotIn("synthetic", stdout.getvalue())
 
+    def test_measurement_failure_site_contains_only_trusted_source_location(self):
+        import envctl
+        missing = self.root / "synthetic-private-missing"
+        try:
+            allocated_bytes([missing])
+        except Failure as error:
+            site = envctl.fixed_error_site(error)
+        else:
+            self.fail("missing inventory root was accepted")
+        self.assertEqual(site["module"], "capacity.py")
+        self.assertEqual(site["function"], "_allocated_bytes_once")
+        self.assertIsInstance(site["line"], int)
+        self.assertNotIn(str(missing), str(site))
+
     def test_host_lock_prevents_two_profiles_from_building(self):
         with host_lock(self.root / "lock"):
             with self.assertRaises(Failure):

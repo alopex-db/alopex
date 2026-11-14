@@ -53,7 +53,7 @@ class SameJobOfflineTests(unittest.TestCase):
             "scripts/ops/same_job_four_case.py", "native-sql-four-case-export/")]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("timeout-minutes: 360", source)
-        self.assertIn("inputs.issue_number == '712' && inputs.sql_four_case_mode", source)
+        self.assertIn("inputs.issue_number == '712' && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode)", source)
 
     def test_evidence_archive_reserves_both_copies_before_writing(self):
         with tempfile.TemporaryDirectory() as directory:

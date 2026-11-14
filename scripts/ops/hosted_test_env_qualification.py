@@ -40,7 +40,7 @@ HARNESS = "5c3d068b9ce4d60fbc1608924882df13b0a27568"
 ASSETS_DIGEST = "36e16e155e96982f094482ae53615789ae7eab4fcf7ef0d0c77cf282d464cb6e"
 LOCK_DIGEST = "37d2499475142c5f5341296c3ce90e5a2d7b4d95a803375ee56dacf7932b50f7"
 POLICY_DIGEST = "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74"
-CONTROLLER_DIGEST = "a9404b03306d8eb81d2cee301e4336b2c0a47ee5c8c96eaf2da5da7972f79209"
+CONTROLLER_DIGEST = "6253a941e1428612c8531e0906f1ce3e005d401b944d2fb02a87b835e8e84887"
 EXPECTED_DOCKER_VERSION = "28.0.4"
 DOCKER_BINARY = Path("/usr/bin/docker")
 PLANNED = {"fetch": 1_000_000_000, "build": 3_000_000_000,
@@ -385,8 +385,11 @@ def admission_facts():
     sibling = sibling_observation()
     dmi = read_text(Path("/sys/class/dmi/id/product_uuid"))
     mountinfo = read_text(Path("/proc/self/mountinfo"))
-    require(dmi.get("status") == "read" and mountinfo.get("status") == "read",
-            "PREREQUISITE")
+    for source, result in (("DMI", dmi), ("MOUNTINFO", mountinfo)):
+        status = result.get("status")
+        if status != "read":
+            safe_status = status if status in ("unreadable", "missing_or_oversize") else "unexpected"
+            raise Failure("PREREQUISITE", f"{source}:{safe_status}")
     context = checked_command(["docker", "context", "show"])
     inspection = json.loads(checked_command(["docker", "context", "inspect", context]))[0]
     endpoint = inspection["Endpoints"]["docker"]["Host"]
@@ -653,8 +656,13 @@ def main(argv=None):
     except BaseException as error:
         code = error.code if isinstance(error, Failure) else "INTERNAL"
         public["error_code"] = code
+        read_status = error.detail if isinstance(error, Failure) and error.detail in {
+            "DMI:unreadable", "DMI:missing_or_oversize", "DMI:unexpected",
+            "MOUNTINFO:unreadable", "MOUNTINFO:missing_or_oversize", "MOUNTINFO:unexpected"
+        } else None
         atomic_json(private / "failure.private.json", {"error_code": code,
                                                         "detail": repr(error),
+                                                        "read_status": read_status,
                                                         "stage": PRIVATE_STAGE,
                                                         "traceback": "".join(
                                                             traceback.format_exception(error))[:8192]})

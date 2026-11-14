@@ -45,6 +45,7 @@ hex = "0.4"
 md-5 = "0.10"
 sha2 = "0.10"
 uuid.workspace = true
+tracing.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 alopex-core.workspace = true
 parquet = { workspace = true, features = ["experimental"] }
@@ -71,6 +72,7 @@ serde_json.workspace = true
 sha2 = "0.10"
 
 [dev-dependencies]
+tracing-subscriber.workspace = true
 alopex-core = { workspace = true, features = ["test-utils"] }
 proptest = "1.4"
 criterion = "0.5"

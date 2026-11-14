@@ -35,7 +35,7 @@ SOURCE_HEAD = "69c31a7950743d130ac3f96fb1ffb795a2818528"
 SOURCE_HASHES = {
     "scripts/test-env/common.py": "a84a6951f6b1303869cc74f12a92053e691b854c2ac9b8835811bfdcf135c47f",
     "scripts/test-env/docker_backend.py": "4f16cc16e8e4d620f568b53dbb8ced965cdee2ea7476978a464d4fe4579c712e",
-    "scripts/ops/hosted_test_env_qualification.py": "8862f67b4a0f94743eadd6bbe103eb468b85bc935d2a3d7b38f38d8686767817",
+    "scripts/ops/hosted_test_env_qualification.py": "414c66e32040c4674d60dc9b5f26d21adf904ae4c88ed85a01094216ea2f756c",
 }
 
 

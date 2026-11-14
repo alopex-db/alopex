@@ -17,6 +17,16 @@ on:
         required: false
         type: boolean
         default: false
+      wal_cost_mode:
+        description: Continue same-job #804 qualification into pinned #682 WAL cost
+        required: false
+        type: boolean
+        default: false
+      sql_diagnostic_mode:
+        description: Run separate paired #712 SQL stage diagnostic after same-job 1951 qualification
+        required: false
+        type: boolean
+        default: false
       s04_inspect_mode:
         description: Read-only selected Docker inspector for #684; no #804 assets or create
         required: false
@@ -42,7 +52,7 @@ concurrency:
 
 jobs:
   inventory:
-    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
+    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -63,7 +73,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   qualification:
-    if: inputs.qualification_mode && !inputs.s04_inspect_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && inputs.sql_four_case_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode))
+    if: inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode))
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -215,12 +225,14 @@ jobs:
         with:
           fetch-depth: 1
       - name: Admit this runner before candidate acquisition
+        if: ${{ !inputs.sql_diagnostic_mode }}
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --admission-only
       - name: Retrieve exact candidate assets
+        if: ${{ !inputs.sql_diagnostic_mode }}
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -228,11 +240,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --acquire-assets
       - name: Qualify on this runner
+        if: ${{ !inputs.sql_diagnostic_mode }}
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --execute
+      - name: Admit runner for exact 1951 diagnostic qualification
+        if: inputs.sql_diagnostic_mode
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+        run: python3 -B scripts/ops/hosted_test_env_qualification_1951.py --admission-only
+      - name: Retrieve exact 1951 diagnostic assets
+        if: inputs.sql_diagnostic_mode
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/ops/hosted_test_env_qualification_1951.py --acquire-assets
+      - name: Qualify 1951 on this runner
+        if: inputs.sql_diagnostic_mode
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+        run: python3 -B scripts/ops/hosted_test_env_qualification_1951.py --execute
       - name: Preserve encrypted qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -287,8 +322,221 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+      - name: Run paired 12-cell SQL stage diagnostic
+        if: inputs.sql_diagnostic_mode
+        id: diagnostic
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 -B scripts/ops/diagnostic_entrypoint.py
+      - name: Preserve encrypted diagnostic evidence
+        if: always() && !cancelled() && inputs.sql_diagnostic_mode && steps.diagnostic.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-sql-stage-diagnostic
+          path: ${{ runner.temp }}/alopex-712-diagnostic/export/evidence.cms
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+  wal_cost_682:
+    if: inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Bound checkout before source acquisition
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, stat, subprocess, sys, tempfile
+          phase, error_code = 'SHA', 'IDENTITY'
+          try:
+              expected = os.environ['EXPECTED_CONTROLLER_SHA']
+              assert re.fullmatch(r'[a-f0-9]{40}', expected) and expected == os.environ['GITHUB_SHA']
+              phase, error_code = 'ROOTS', 'MEASUREMENT'
+              workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE']).parent
+              workspace.mkdir(parents=True, exist_ok=True)
+              assert workspace.is_absolute() and not workspace.is_symlink()
+              runner_temp = pathlib.Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+              assert runner_temp.is_absolute() and runner_temp.is_dir()
+              assert not any(character in str(runner_temp) for character in ('\r', '\n', '\0'))
+              env_file = pathlib.Path(os.environ['GITHUB_ENV'])
+              assert env_file.is_absolute()
+              for key in ('TMPDIR', 'TMP', 'TEMP'):
+                  os.environ[key] = str(runner_temp)
+              lines = ''.join(f'{key}={runner_temp}\n' for key in ('TMPDIR', 'TMP', 'TEMP'))
+              fd = os.open(env_file, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+              try:
+                  info = os.fstat(fd)
+                  assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                  payload = lines.encode('utf-8')
+                  assert os.write(fd, payload) == len(payload)
+              finally:
+                  os.close(fd)
+              assert all(pathlib.Path(os.environ[key]).resolve(strict=True) == runner_temp
+                         for key in ('TMPDIR', 'TMP', 'TEMP'))
+              assert pathlib.Path(tempfile.gettempdir()).resolve(strict=True) == runner_temp
+              phase, error_code = 'BINARY', 'POLICY'
+              binaries = [pathlib.Path('/usr/bin/du'), pathlib.Path('/usr/bin/sudo'),
+                          pathlib.Path('/usr/bin/docker')]
+              for path in (pathlib.Path('/'), pathlib.Path('/usr'), pathlib.Path('/usr/bin')):
+                  info = path.lstat()
+                  assert stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
+              for binary in binaries:
+                  info = binary.lstat()
+                  assert stat.S_ISREG(info.st_mode) and info.st_uid == 0
+                  assert not info.st_mode & 0o022 and info.st_mode & 0o111
+              phase, error_code = 'DOCKER', 'PREREQUISITE'
+              def run(args):
+                  result = subprocess.run(args, stdin=subprocess.DEVNULL,
+                                          capture_output=True, text=True, timeout=10)
+                  assert result.returncode == 0 and not result.stderr
+                  return result.stdout.strip()
+              phase = 'DOCKER_CONTEXT'
+              context = run(['/usr/bin/docker', 'context', 'show'])
+              phase = 'DOCKER_INSPECT'
+              inspection = json.loads(run(['/usr/bin/docker', 'context', 'inspect', context]))[0]
+              assert inspection['Endpoints']['docker']['Host'].startswith('unix://')
+              phase = 'DOCKER_INFO'
+              docker = pathlib.Path(json.loads(run(['/usr/bin/docker', 'info', '--format',
+                                                    '{{json .}}']))['DockerRootDir'])
+              phase, error_code = 'ROOTS', 'MEASUREMENT'
+              assert docker.is_absolute() and docker.resolve(strict=True) == docker
+              home = pathlib.Path.home()
+              temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+              candidates = [('WORK', workspace), ('HOME', home), ('TEMP', temp),
+                            ('DOCKER', docker)]
+              temp_snapshot = []
+              for area, label in ((pathlib.Path('/tmp'), 'TMP'),
+                                  (pathlib.Path('/var/tmp'), 'VARTMP')):
+                  if not area.exists():
+                      continue
+                  assert area.is_dir()
+                  with os.scandir(area) as entries:
+                      for entry in entries:
+                          info = entry.stat(follow_symlinks=False)
+                          if info.st_uid == os.getuid() or 'alopex' in entry.name.lower():
+                              actual = pathlib.Path(entry.path).resolve(strict=True)
+                              candidates.append((label, actual))
+                              temp_snapshot.append((str(area), entry.name, info.st_dev,
+                                                    info.st_ino, info.st_uid, str(actual)))
+              temp_snapshot.sort()
+              categories = {}
+              for label, path in candidates:
+                  categories.setdefault(path.resolve(strict=True), label)
+              roots = list(categories)
+              assert docker in roots and all(not docker.is_relative_to(root) and
+                                             not root.is_relative_to(docker)
+                                             for root in roots if root != docker)
+              selected = [root for root in roots if not any(root != other and
+                          root.is_relative_to(other) for other in roots)]
+              phase, error_code = 'DU', 'MEASUREMENT'
+              def du_code(category, failure):
+                  assert category in {'WORK', 'HOME', 'TEMP', 'TMP', 'VARTMP', 'DOCKER'}
+                  assert failure in {'TIMEOUT', 'EXIT', 'PARSE'}
+                  return 'DU_' + category + '_' + failure
+              def allocation(root, category, privileged=False):
+                  global error_code
+                  args = (['/usr/bin/sudo', '-n'] if privileged else []) + [
+                      '/usr/bin/du', '-skL' if not privileged else '-sk', '--', str(root)]
+                  error_code = du_code(category, 'EXIT')
+                  try:
+                      result = subprocess.run(args, stdin=subprocess.DEVNULL,
+                                              capture_output=True, text=True,
+                                              timeout=60 if privileged else 10)
+                  except subprocess.TimeoutExpired:
+                      error_code = du_code(category, 'TIMEOUT')
+                      raise
+                  assert result.returncode == 0 and not result.stderr
+                  error_code = du_code(category, 'PARSE')
+                  fields = result.stdout.strip().split('\t')
+                  assert len(fields) == 2 and fields[0].isascii()
+                  assert fields[0].isdecimal() and fields[1] == str(root)
+                  return int(fields[0]) * 1024
+              aggregate = sum(allocation(root, categories[root], root == docker) for root in selected)
+              workspace_bytes = allocation(workspace, 'WORK')
+              phase, error_code = 'CAPACITY', 'CAPACITY'
+              assert aggregate + 1_000_000_000 + 7_500_000_000 < 40_000_000_000
+              assert os.statvfs(workspace).f_bavail * os.statvfs(workspace).f_frsize > 1_000_000_000
+              assert os.statvfs(docker).f_bavail * os.statvfs(docker).f_frsize > 7_500_000_000
+              phase, error_code = 'RECEIPT', 'COMMAND'
+              private = pathlib.Path(os.environ['RUNNER_TEMP']) / 'alopex-804-qualification'
+              private.mkdir(mode=0o700, exist_ok=True)
+              private.chmod(0o700)
+              receipt = private / 'checkout-preflight.private.json'
+              receipt.write_text(json.dumps({'workspace_root': str(workspace),
+                                             'allocated_bytes': workspace_bytes,
+                                             'aggregate_allocated_bytes': aggregate,
+                                             'roots': list(map(str, selected)),
+                                             'temp_snapshot': temp_snapshot,
+                                             'docker_root': str(docker),
+                                             'expected_controller_sha': expected}) + '\n')
+              receipt.chmod(0o600)
+              print('{"case":"CHECKOUT_PREFLIGHT","outcome":"passed"}')
+          except BaseException:
+              public = {'schema': 'alopex.checkout-preflight-public/v1',
+                        'case': 'CHECKOUT_PREFLIGHT', 'outcome': 'failed',
+                        'phase': phase, 'error_code': error_code}
+              try:
+                  export = pathlib.Path(os.environ.get('GITHUB_WORKSPACE', '.')) / 'native-qualification-export'
+                  export.mkdir(mode=0o700, parents=True, exist_ok=True)
+                  (export / 'public.json').write_text(json.dumps(public, sort_keys=True) + '\n')
+              except BaseException:
+                  print('{"case":"CHECKOUT_PREFLIGHT","outcome":"evidence_failed"}')
+                  sys.exit(1)
+              print(json.dumps(public, sort_keys=True))
+              sys.exit(1)
+          PY
+      - name: Stage current #804 controller in measured workspace
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          path: qualification-controller
+      - name: Stage frozen #682 comparator in measured workspace
+        uses: actions/checkout@v4
+        with:
+          ref: 490f002dfb2c7f509a2444891808d9704fe6b001
+          fetch-depth: 1
+          path: frozen-wal-controller
+      - name: Qualify and measure on the same runner
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_KIND: github-hosted
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -B qualification-controller/scripts/ops/wal_cost_next/same_job_wrapper.py \
+            --qualification-checkout "$GITHUB_WORKSPACE/qualification-controller" \
+            --frozen-checkout "$GITHUB_WORKSPACE/frozen-wal-controller" \
+            --config "$GITHUB_WORKSPACE/qualification-controller/scripts/ops/wal_cost_next/exact-a415-wal-cost-input.private.json" \
+            --config-sha256 24c31ed86f5643edfef6789b345e12d610e71d05c1c3a905d84e17c3771c055b
+      - name: Seal wrapper evidence
+        if: always()
+        run: |
+          python3 -B qualification-controller/scripts/ops/wal_cost_next/seal_wrapper.py \
+            --qualification "$GITHUB_WORKSPACE/qualification-controller" \
+            --frozen "$GITHUB_WORKSPACE/frozen-wal-controller" \
+            --private "$RUNNER_TEMP/alopex-804-qualification" \
+            --output "$GITHUB_WORKSPACE/wal-cost-wrapper-export"
+      - name: Preserve encrypted and allowlisted evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v0817-682-wal-cost-same-job
+          path: |
+            native-qualification-export/public.json
+            qualification-controller/native-qualification-export/public.json
+            qualification-controller/native-qualification-export/private-evidence.cms
+            frozen-wal-controller/wal-cost-export/result.json
+            frozen-wal-controller/wal-cost-export/private-evidence.cms
+            wal-cost-wrapper-export/public.json
+            wal-cost-wrapper-export/private-evidence.cms
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
   s04_inspect:
-    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.s04_capture_mode }}
+    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

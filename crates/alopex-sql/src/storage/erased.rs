@@ -1,4 +1,5 @@
 use alopex_core::async_runtime::{BoxFuture, BoxStream, MaybeSend};
+use uuid::Uuid;
 
 use crate::executor::{ExecutionResult, Result, Row};
 use crate::planner::PlannedStatement;
@@ -9,6 +10,14 @@ pub trait ErasedAsyncSqlTransaction: MaybeSend + 'static {
     fn execute<'a>(&'a mut self, sql: &'a str) -> BoxFuture<'a, Result<ExecutionResult>>;
     fn execute_multi<'a>(&'a mut self, sql: &'a str)
     -> BoxFuture<'a, Result<Vec<ExecutionResult>>>;
+    /// Executes SQL while attaching an optional private diagnostic trace ID.
+    fn execute_multi_with_trace<'a>(
+        &'a mut self,
+        sql: &'a str,
+        _trace_id: Option<Uuid>,
+    ) -> BoxFuture<'a, Result<Vec<ExecutionResult>>> {
+        self.execute_multi(sql)
+    }
     fn query<'a>(&'a self, sql: &'a str) -> BoxStream<'a, Result<Row>>;
     fn plan_for_routing<'a>(&'a self, sql: &'a str)
     -> BoxFuture<'a, Result<Vec<PlannedStatement>>>;
@@ -30,6 +39,14 @@ where
         sql: &'a str,
     ) -> BoxFuture<'a, Result<Vec<ExecutionResult>>> {
         self.async_execute_multi(sql)
+    }
+
+    fn execute_multi_with_trace<'a>(
+        &'a mut self,
+        sql: &'a str,
+        trace_id: Option<Uuid>,
+    ) -> BoxFuture<'a, Result<Vec<ExecutionResult>>> {
+        self.async_execute_multi_with_trace(sql, trace_id)
     }
 
     fn query<'a>(&'a self, sql: &'a str) -> BoxStream<'a, Result<Row>> {
