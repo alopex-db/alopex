@@ -5,7 +5,7 @@
     "asset_run_head": "39657522a2712f8019880826d28e82567d040b70",
     "asset_run_id": 43410575331,
     "assets_digest": "22902a189b740de5f6a650fa63e16d4e3816f84a7f75f63bd0107002ba0f0916",
-    "controller_digest": "5e38f02759669b26ffb6216765d1398930c9d8a733dae3ff259d19a404f309e3",
+    "controller_digest": "6427057ba05cf70d6d088f8f6c8e4ac20103fcc7dd4baf737453cbd63a1b49c8",
     "harness_commit": "5c3d068b9ce4d60fbc1608924882df13b0a27568",
     "image_lock_sha256": "37d2499475142c5f5341296c3ce90e5a2d7b4d95a803375ee56dacf7932b50f7",
     "operator_sha256": {
@@ -18,7 +18,7 @@
       "diagnostic_supervisor.py": "83ce49aeecacb1eef4c44b3ade6f4683583fff7391c9898702343e38a4f8524a",
       "diagnostic_worker.py": "06b0bc10d4f6b1755c0ea0b1958e77bb764493b54f4a5cc3a20b1bfe01573dab",
       "evidence.py": "86d5e1bc4679a38313ee3b79de5a9a57d8ab6d7f524168ecd91e04734b006938",
-      "hosted_test_env_qualification_1951.py": "6f54fb29f039e6f8d80a1df737d34a2fd66c0908c1ae2e3e372e471eafd67ac9",
+      "hosted_test_env_qualification_1951.py": "122b1dc0f8c6f1016deda35b1a95ea56a4153416ee758c505e81cf3372cd3da4",
       "live_wrapper.py": "6d0b163fe8bf415112cf2860a2d445de1cf62aa6466026ff6663b3d898170f23",
       "orchestrate.py": "67b9861eb3d9d6ec41e22cc74856b225479661e6fc7fe5452f9ada6c39ea49f7",
       "same_job_1951.py": "2a30448088986616a5d813b7c7f971d4e6af25e3f96570fa82d3dba7b6ce0866"

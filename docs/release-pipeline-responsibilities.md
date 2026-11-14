@@ -44,6 +44,7 @@ job's owner.
 | `alopex-cli.yml:cli-success` | Development CI | status-only owner join |
 | `alopex-performance.yml:inventory` | Extended Verification | encrypted read-only host inventory, without qualification |
 | `alopex-performance.yml:qualification` | Extended Verification | exact-SHA same-runner native acceptance and, for #712 mode, the pinned four-case server/client SQL matrix with separate encrypted evidence |
+| `alopex-performance.yml:wal_cost_682` | Extended Verification | exact-SHA same-runner native acceptance followed by frozen four-cell WAL cost comparison and encrypted evidence |
 | `alopex-py-release.yml:linux` | RC Qualification | qualified Linux wheels |
 | `alopex-py-release.yml:macos` | RC Qualification | qualified macOS wheels |
 | `alopex-py-release.yml:windows` | RC Qualification | qualified Windows wheels |

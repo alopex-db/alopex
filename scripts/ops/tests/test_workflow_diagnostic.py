@@ -62,7 +62,7 @@ class WorkflowDiagnosticTests(unittest.TestCase):
         self.assertNotIn("diagnostic-failure.private.json", workflow)
         self.assertNotIn("diagnostic-failure.private.json", str(lock))
         self.assertEqual(pin["controller_digest"],
-                         "5e38f02759669b26ffb6216765d1398930c9d8a733dae3ff259d19a404f309e3")
+                         "6427057ba05cf70d6d088f8f6c8e4ac20103fcc7dd4baf737453cbd63a1b49c8")
         self.assertEqual(pin["source_commit"],
                          "894843360824e324c80b7a078bb3a1e63240e9bc")
 
