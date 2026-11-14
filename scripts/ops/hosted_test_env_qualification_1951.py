@@ -17,6 +17,7 @@ import sys
 import tarfile
 import tempfile
 import traceback
+import uuid
 import zipfile
 
 HERE = Path(__file__).resolve().parent
@@ -392,13 +393,21 @@ def admission_facts():
             lsm.get("status") == "read" and "apparmor" in lsm["value"].split(",") and
             apparmor.get("status") == "read" and apparmor["value"].strip() == "Y", "PREREQUISITE")
     sibling = sibling_observation()
-    dmi = read_text(Path("/sys/class/dmi/id/product_uuid"))
+    boot_id = read_text(Path("/proc/sys/kernel/random/boot_id"))
     mountinfo = read_text(Path("/proc/self/mountinfo"))
-    for source, result in (("DMI", dmi), ("MOUNTINFO", mountinfo)):
+    for source, result in (("BOOT_ID", boot_id), ("MOUNTINFO", mountinfo)):
         status = result.get("status")
         if status != "read":
             safe_status = status if status in ("unreadable", "missing_or_oversize") else "unexpected"
             raise Failure("PREREQUISITE", f"{source}:{safe_status}")
+    try:
+        boot_value = boot_id.get("value").removesuffix("\n")
+        parsed_boot_id = uuid.UUID(boot_value)
+        valid_boot_id = str(parsed_boot_id) == boot_value and parsed_boot_id.int != 0
+    except (TypeError, ValueError, AttributeError):
+        valid_boot_id = False
+    if not valid_boot_id:
+        raise Failure("PREREQUISITE", "BOOT_ID:invalid")
     context = checked_command(["docker", "context", "show"])
     inspection = json.loads(checked_command(["docker", "context", "inspect", context]))[0]
     endpoint = inspection["Endpoints"]["docker"]["Host"]
@@ -451,7 +460,7 @@ def admission_facts():
     return {"context": context, "docker_info": docker_info, "storage": storage,
             "baseline_bytes": baseline, "cpus": cpu_set[:2], "sibling": sibling,
             "kernel": kernel, "lsm": lsm, "apparmor": apparmor,
-            "dmi": dmi, "mountinfo": mountinfo, "root_metadata": root_metadata,
+            "boot_id": boot_id, "mountinfo": mountinfo, "root_metadata": root_metadata,
             "temp_snapshot": temp_snapshot}
 
 
@@ -487,7 +496,7 @@ def same_runner(previous, current):
     require(current["context"] == previous["context"] and
             current["docker_info"]["DockerRootDir"] ==
             previous["docker_info"]["DockerRootDir"] and
-            current["dmi"] == previous["dmi"] and
+            current["boot_id"] == previous["boot_id"] and
             current["kernel"] == previous["kernel"] and
             current["baseline_bytes"] <= previous["baseline_bytes"] + 1_000_000_000,
             "IDENTITY")
@@ -662,7 +671,8 @@ def main(argv=None):
         code = error.code if isinstance(error, Failure) else "INTERNAL"
         public["error_code"] = code
         read_status = error.detail if isinstance(error, Failure) and error.detail in {
-            "DMI:unreadable", "DMI:missing_or_oversize", "DMI:unexpected",
+            "BOOT_ID:unreadable", "BOOT_ID:missing_or_oversize", "BOOT_ID:unexpected",
+            "BOOT_ID:invalid",
             "MOUNTINFO:unreadable", "MOUNTINFO:missing_or_oversize", "MOUNTINFO:unexpected"
         } else None
         atomic_json(private / "failure.private.json", {"error_code": code,
