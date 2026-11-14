@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use alopex_cluster::{AuthenticatedSubject, TableLifecycleEffect};
 use alopex_core::async_runtime::{BoxFuture, BoxStream};
@@ -247,17 +247,34 @@ impl TxnHandle {
     pub(crate) fn execute_multi_with_operation<'a>(
         &'a self,
         sql: &'a str,
+        operation: &'a tokio::sync::OwnedMutexGuard<()>,
+    ) -> BoxFuture<'a, alopex_sql::executor::Result<Vec<ExecutionResult>>> {
+        self.execute_multi_with_operation_and_trace(sql, operation, None)
+    }
+
+    pub(crate) fn execute_multi_with_operation_and_trace<'a>(
+        &'a self,
+        sql: &'a str,
         _operation: &'a tokio::sync::OwnedMutexGuard<()>,
+        trace_id: Option<Uuid>,
     ) -> BoxFuture<'a, alopex_sql::executor::Result<Vec<ExecutionResult>>> {
         Box::pin(async move {
+            let lock_started = trace_id.map(|_| Instant::now());
             let mut guard = self.inner.txn.lock().await;
+            if let Some(started) = lock_started {
+                crate::http::sql::log_sql_inner_timing(
+                    trace_id,
+                    "session_txn_wait",
+                    started.elapsed(),
+                );
+            }
             let txn = guard
                 .as_mut()
                 .ok_or_else(|| ExecutorError::InvalidOperation {
                     operation: "execute_multi".into(),
                     reason: "transaction is closed".into(),
                 })?;
-            txn.execute_multi(sql).await
+            txn.execute_multi_with_trace(sql, trace_id).await
         })
     }
 

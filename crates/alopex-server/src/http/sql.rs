@@ -2,6 +2,7 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use alopex_cluster::{
@@ -29,6 +30,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use uuid::Uuid;
 
 use crate::error::{Result, ServerError};
 use crate::http::{error_response, json_response, RequestContext};
@@ -174,6 +176,131 @@ enum TableLifecycleCandidate {
     },
 }
 
+// This diagnostic is disabled unless the dedicated private lane opts in.
+// A parsed UUID cannot carry SQL, row values, a URL or a machine path into logs.
+fn sql_timing_id(correlation_id: &str) -> Option<Uuid> {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let enabled = *ENABLED
+        .get_or_init(|| matches!(std::env::var("ALOPEX_SQL_TIMING"), Ok(value) if value == "1"));
+    sql_timing_id_when(enabled, correlation_id)
+}
+
+fn sql_timing_id_when(enabled: bool, correlation_id: &str) -> Option<Uuid> {
+    enabled
+        .then(|| {
+            correlation_id
+                .strip_prefix("diag-")
+                .and_then(|id| Uuid::parse_str(id).ok())
+        })
+        .flatten()
+}
+
+#[cfg(test)]
+mod sql_timing_tests {
+    use super::{log_sql_inner_timing, log_sql_timing, sql_timing_id_when};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+
+    struct EventCounter(Arc<AtomicUsize>);
+
+    impl<S: Subscriber> Layer<S> for EventCounter {
+        fn on_event(&self, _event: &Event<'_>, _ctx: Context<'_, S>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct TargetCounter {
+        outer: Arc<AtomicUsize>,
+        inner: Arc<AtomicUsize>,
+    }
+
+    impl<S: Subscriber> Layer<S> for TargetCounter {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            match event.metadata().target() {
+                "alopex_sql_private_timing" => {
+                    self.outer.fetch_add(1, Ordering::SeqCst);
+                }
+                "alopex_sql_private_inner" => {
+                    self.inner.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_diagnostic_emits_no_id() {
+        assert!(sql_timing_id_when(false, "diag-550e8400-e29b-41d4-a716-446655440000").is_none());
+    }
+
+    #[test]
+    fn rejects_correlation_text_that_could_leak_private_data() {
+        assert!(sql_timing_id_when(true, "SELECT secret FROM /private/path").is_none());
+        assert!(sql_timing_id_when(true, "550e8400-e29b-41d4-a716-446655440000").is_none());
+        let id = sql_timing_id_when(true, "diag-550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(
+            id.unwrap().to_string(),
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    #[test]
+    fn diagnostic_event_emits_only_with_trace_id() {
+        let events = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(EventCounter(Arc::clone(&events)));
+        tracing::subscriber::with_default(subscriber, || {
+            log_sql_timing(None, "result_map", Duration::from_nanos(7));
+            assert_eq!(events.load(Ordering::SeqCst), 0);
+            let trace_id = sql_timing_id_when(true, "diag-550e8400-e29b-41d4-a716-446655440000");
+            log_sql_timing(trace_id, "result_map", Duration::from_nanos(7));
+        });
+        assert_eq!(events.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn inner_diagnostic_uses_separate_target() {
+        let outer = Arc::new(AtomicUsize::new(0));
+        let inner = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(TargetCounter {
+            outer: outer.clone(),
+            inner: inner.clone(),
+        });
+        tracing::subscriber::with_default(subscriber, || {
+            let trace_id = sql_timing_id_when(true, "diag-550e8400-e29b-41d4-a716-446655440000");
+            log_sql_inner_timing(None, "session_txn_wait", Duration::from_nanos(7));
+            assert_eq!(inner.load(Ordering::SeqCst), 0);
+            log_sql_inner_timing(trace_id, "session_txn_wait", Duration::from_nanos(7));
+            assert_eq!(inner.load(Ordering::SeqCst), 1);
+            assert_eq!(outer.load(Ordering::SeqCst), 0);
+            log_sql_timing(trace_id, "result_map", Duration::from_nanos(7));
+        });
+        assert_eq!(outer.load(Ordering::SeqCst), 1);
+    }
+}
+
+fn log_sql_timing(trace_id: Option<Uuid>, stage: &'static str, elapsed: Duration) {
+    if let Some(trace_id) = trace_id {
+        tracing::info!(
+            target: "alopex_sql_private_timing",
+            %trace_id,
+            stage,
+            duration_ns = elapsed.as_nanos(),
+            "sql diagnostic stage"
+        );
+    }
+}
+
+pub(crate) fn log_sql_inner_timing(trace_id: Option<Uuid>, stage: &'static str, elapsed: Duration) {
+    if let Some(trace_id) = trace_id {
+        tracing::info!(target: "alopex_sql_private_inner", %trace_id, stage,
+            duration_ns = elapsed.as_nanos(), "sql inner diagnostic stage");
+    }
+}
+
 pub async fn handle(
     Extension(state): Extension<Arc<ServerState>>,
     Extension(ctx): Extension<RequestContext>,
@@ -190,11 +317,17 @@ pub async fn handle(
         return stream_response(state, request, &ctx);
     }
 
+    let trace_id = sql_timing_id(&ctx.correlation_id);
+    let started = Instant::now();
     let result = execute_non_streaming(state.clone(), &request, &ctx).await;
-    match result {
+    log_sql_timing(trace_id, "execute_and_map", started.elapsed());
+    let response_started = Instant::now();
+    let response = match result {
         Ok(response) => json_response(response, state.config.max_response_size, &ctx),
         Err(err) => error_response(err, &ctx),
-    }
+    };
+    log_sql_timing(trace_id, "response_build", response_started.elapsed());
+    response
 }
 
 /// Reject an explicit distributed-read request when this server has no
@@ -453,7 +586,14 @@ pub(crate) async fn execute_non_streaming(
 
     state.metrics.record_query(start.elapsed(), true);
 
-    Ok(map_execution_results(exec_result.0, exec_result.1))
+    let map_started = Instant::now();
+    let response = map_execution_results(exec_result.0, exec_result.1);
+    log_sql_timing(
+        sql_timing_id(&ctx.correlation_id),
+        "result_map",
+        map_started.elapsed(),
+    );
+    Ok(response)
 }
 
 pub(crate) async fn execute_session_statements_with_routing(
@@ -467,6 +607,8 @@ pub(crate) async fn execute_session_statements_with_routing(
     Vec<RoutingDiagnostics>,
 )> {
     let deadline = tokio::time::Instant::now() + timeout;
+    let trace_id = sql_timing_id(correlation_id);
+    let operation_started = trace_id.map(|_| Instant::now());
     let handle = match wait_until_deadline(
         deadline,
         state.session_manager.get_transaction(session_id),
@@ -478,12 +620,19 @@ pub(crate) async fn execute_session_statements_with_routing(
             return Err(ServerError::Timeout("query timeout".into()));
         }
     };
+    if let Some(started) = operation_started {
+        log_sql_inner_timing(trace_id, "session_lookup_wait", started.elapsed());
+    }
+    let operation_started = trace_id.map(|_| Instant::now());
     let operation = match wait_until_deadline(deadline, handle.lock_operation()).await {
         SqlDeadline::Completed(operation) => operation,
         SqlDeadline::TimedOut { .. } => {
             return Err(ServerError::Timeout("query timeout".into()));
         }
     };
+    if let Some(started) = operation_started {
+        log_sql_inner_timing(trace_id, "session_operation_wait", started.elapsed());
+    }
     let schema_mutation = is_ddl(sql);
     let retain_catalog_reader = is_write_sql(sql) && !schema_mutation;
     let guard_kind = handle.catalog_txn_guard_kind(&operation).await;
@@ -618,7 +767,8 @@ pub(crate) async fn execute_session_statements_with_routing(
             operation => operation,
         };
         let execution_outcome = {
-            let execution = handle.execute_multi_with_operation(&sql, &operation);
+            let execution =
+                handle.execute_multi_with_operation_and_trace(&sql, &operation, trace_id);
             tokio::pin!(execution);
             match wait_for_sql_deadline(execution.as_mut(), deadline).await {
                 SqlDeadline::TimedOut { started: false } => {
@@ -746,11 +896,13 @@ async fn execute_non_session_statements_with_routing_inner(
     Vec<RoutingDiagnostics>,
 )> {
     let deadline = tokio::time::Instant::now() + timeout;
+    let trace_id = sql_timing_id(correlation_id);
     let sql = sql.to_string();
     let correlation_id = correlation_id.to_string();
     let schema_mutation = is_ddl(&sql);
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
+        let setup_started = Instant::now();
         let mut response_tx = Some(response_tx);
         let catalog_txn_operation = if schema_mutation {
             let ordering = match wait_until_deadline(
@@ -813,6 +965,8 @@ async fn execute_non_session_statements_with_routing_inner(
                 return;
             }
         };
+        log_sql_timing(trace_id, "transaction_setup", setup_started.elapsed());
+        let plan_started = Instant::now();
         let routing_plan = match wait_until_deadline(
             deadline,
             route_non_session_sql(&state, &txn, &sql, &correlation_id),
@@ -834,6 +988,7 @@ async fn execute_non_session_statements_with_routing_inner(
                 return;
             }
         };
+        log_sql_timing(trace_id, "route_plan", plan_started.elapsed());
         if let Some(diagnostic) = future_distributed_diagnostic(&routing_plan.diagnostics) {
             let err = future_distributed_error(diagnostic);
             let _ = txn.async_rollback().await;
@@ -857,8 +1012,9 @@ async fn execute_non_session_statements_with_routing_inner(
             drop(catalog_txn_operation);
             return;
         }
+        let execution_started = Instant::now();
         let execution_outcome = {
-            let execution = txn.async_execute_multi(&sql);
+            let execution = txn.async_execute_multi_with_trace(&sql, trace_id);
             tokio::pin!(execution);
             match wait_for_sql_deadline(execution.as_mut(), deadline).await {
                 SqlDeadline::TimedOut { started: false } => {
@@ -876,6 +1032,7 @@ async fn execute_non_session_statements_with_routing_inner(
                 SqlDeadline::Completed(result) => Some((result, false)),
             }
         };
+        log_sql_timing(trace_id, "execute_multi", execution_started.elapsed());
         let Some((execution_result, timed_out)) = execution_outcome else {
             let _ = txn.async_rollback().await;
             drop(catalog_txn_operation);
@@ -908,6 +1065,7 @@ async fn execute_non_session_statements_with_routing_inner(
             return;
         }
 
+        let completion_started = Instant::now();
         let completion = match execution_result {
             Ok(result) => match statement_effects_after_execution(&state, lifecycle_candidates) {
                 Ok((lifecycle_effects, catalog_rollback_effects)) => {
@@ -967,6 +1125,11 @@ async fn execute_non_session_statements_with_routing_inner(
                 }
             }
         };
+        log_sql_timing(
+            trace_id,
+            "completion_and_commit",
+            completion_started.elapsed(),
+        );
         // Completion is observable on another runtime worker as soon as we send.
         // Release both gates first so a following session upgrade cannot mistake
         // this completed DDL for a foreign writer waiting on its read guard.
@@ -1190,10 +1353,32 @@ fn route_planned_sql(
     let router = QueryRouter::new(&placement_catalog, &membership);
 
     let mut diagnostics = Vec::with_capacity(planned.len());
+    let trace_id = sql_timing_id(correlation_id);
     for (index, statement) in planned.iter().enumerate() {
         let plan_id = PlanId::new(format!("{correlation_id}:{index}"));
         let request = query_routing_request(plan_id, statement, &catalog_snapshot);
-        diagnostics.push(router.route(request));
+        let diagnostic = router.route(request);
+        if let Some(trace_id) = trace_id.filter(|_| index < 16) {
+            let route = match diagnostic.decision {
+                RoutingDecisionKind::LocalOnly => "local_only",
+                RoutingDecisionKind::FutureDistributedExecutionRequired => {
+                    "future_distributed_required"
+                }
+                RoutingDecisionKind::ScatterGatherSimulated => "scatter_gather_simulated",
+            };
+            let root = match &statement.plan {
+                LogicalPlan::Aggregate { .. } => "aggregate",
+                LogicalPlan::Sort { .. } => "sort",
+                LogicalPlan::Filter { .. } => "filter",
+                LogicalPlan::Scan { .. } => "scan",
+                LogicalPlan::Limit { .. } => "limit",
+                LogicalPlan::Project { .. } => "project",
+                _ => "other",
+            };
+            tracing::info!(target: "alopex_sql_private_inner", %trace_id,
+                statement_index = index, route, root, "sql diagnostic route");
+        }
+        diagnostics.push(diagnostic);
     }
     Ok(RoutingPlan {
         planned,
