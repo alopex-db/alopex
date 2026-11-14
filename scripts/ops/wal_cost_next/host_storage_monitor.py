@@ -147,6 +147,8 @@ class HostMonitor:
                     except subprocess.TimeoutExpired:
                         pass
                 self.check()
+                if allow_nonzero:
+                    return child.returncode
                 require(child.returncode == 0, "COMMAND")
             except BaseException:
                 kill_group(child)
@@ -179,7 +181,9 @@ class MonitoredDocker(Docker):
                                                 capture=True, allow_nonzero=True)
         if code:
             if missing and ("No such container:" in stderr or
-                            "no such volume" in stderr.lower()):
+                            "no such volume" in stderr.lower() or
+                            (args[:2] == ("image", "inspect") and
+                             "No such image:" in stderr)):
                 return None
             raise Failure("PREREQUISITE", stderr[:4096])
         return stdout.strip()

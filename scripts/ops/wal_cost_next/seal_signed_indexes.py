@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import shutil
 import stat
 import subprocess
@@ -19,6 +20,7 @@ from capacity import Budget  # noqa: E402
 from common import read_json, require  # noqa: E402
 
 LIMIT = 250_000_000
+SEAL_RESERVE = 2_000_000
 
 
 def digest(path):
@@ -38,6 +40,7 @@ def audit(root):
         if stat.S_ISREG(mode):
             size += entry.stat().st_size
             require(size <= LIMIT, "CAPACITY")
+    return size
 
 
 def seal(private, certificate, output):
@@ -59,7 +62,7 @@ def seal(private, certificate, output):
     if receipt is not None:
         require(receipt["capture_limit_bytes"] == LIMIT and
                 type(receipt["allocated_before_bytes"]) is int, "IDENTITY")
-    audit(run)
+    raw_bytes = audit(run)
     run_record = read_json(run / "run.json", private=True)
     complete = (run_record.get("phase") == "deleted" and
                 not (run / "failure.json").exists() and
@@ -75,9 +78,11 @@ def seal(private, certificate, output):
     files = (["collected", "proof", "bootstrap.private.json", "capture-budget.private.json",
               "run.json", "collection.json"] if complete else
              [name for name in ("failure.json", "pull.log", "stage.log", "container.log",
-                                "collect.log", "bootstrap.private.json",
-                                "capture-budget.private.json", "run.json")
-              if (run / name).is_file()])
+                                "collect.log", "proof.log", "bootstrap.private.json",
+                                "capture-budget.private.json", "run.json", "collection.json",
+                                "collected", "collection.pending")
+              if (run / name).is_file() or (name in ("collected", "collection.pending") and
+                                           (run / name).is_dir())])
     require(bool(files), "COLLECT")
     require(output.parent.is_dir() and not output.parent.is_symlink(), "COLLECT")
     staging = Path(tempfile.mkdtemp(prefix=output.name + ".pending-", dir=output.parent))
@@ -85,25 +90,46 @@ def seal(private, certificate, output):
     ciphertext = staging / "private-evidence.cms"
     tar = openssl = None
     try:
-        with (run / "seal.private.log").open("ab") as tar_log:
-            tar = subprocess.Popen(["tar", "-C", str(run), "-czf", "-", *files],
-                                   stdout=subprocess.PIPE, stderr=tar_log,
-                                   stdin=subprocess.DEVNULL, start_new_session=True)
-            assert tar.stdout is not None
-            openssl = subprocess.Popen(["openssl", "cms", "-encrypt", "-aes-256-cbc",
-                                        "-binary", "-outform", "DER", "-in", "/dev/stdin",
-                                        "-out", str(ciphertext), str(certificate)],
-                                       stdin=tar.stdout, stdout=subprocess.DEVNULL,
-                                       stderr=tar_log, start_new_session=True)
-            tar.stdout.close()
+        used_before = budget.used()
+        remaining = (LIMIT - max(raw_bytes, 0, used_before - baseline) - SEAL_RESERVE
+                     if baseline is not None else
+                     min(LIMIT - raw_bytes - SEAL_RESERVE,
+                         profile["storage"]["stop_bytes"] -
+                         profile["storage"]["reserve_bytes"] - used_before - SEAL_RESERVE))
+        require(0 < remaining <= LIMIT - SEAL_RESERVE, "CAPACITY")
+        tar = subprocess.Popen(["tar", "-C", str(run), "-czf", "-", *files],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               stdin=subprocess.DEVNULL, start_new_session=True)
+        assert tar.stdout is not None
+        openssl = subprocess.Popen(["openssl", "cms", "-encrypt", "-aes-256-cbc",
+                                    "-binary", "-outform", "DER", "-in", "/dev/stdin",
+                                    str(certificate)], stdin=tar.stdout,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
+        tar.stdout.close()
+        assert openssl.stdout is not None
         deadline = time.monotonic() + 300
-        while openssl.poll() is None or tar.poll() is None:
-            require(time.monotonic() < deadline, "TIMEOUT")
-            used = budget.used()
-            require((baseline is None or used - baseline <= LIMIT) and
-                    used + profile["storage"]["reserve_bytes"] <
-                    profile["storage"]["stop_bytes"], "CAPACITY")
-            time.sleep(10)
+        next_sample = time.monotonic() + 10
+        written = 0
+        with ciphertext.open("xb") as stream:
+            while True:
+                require(time.monotonic() < deadline, "TIMEOUT")
+                ready, _, _ = select.select([openssl.stdout], [], [], 1)
+                if ready:
+                    chunk = os.read(openssl.stdout.fileno(), 1024 * 1024)
+                    if not chunk:
+                        break
+                    require(written + len(chunk) <= remaining, "CAPACITY")
+                    stream.write(chunk)
+                    written += len(chunk)
+                if time.monotonic() >= next_sample:
+                    used = budget.used()
+                    require((baseline is None or used - baseline <= LIMIT) and
+                            used + profile["storage"]["reserve_bytes"] <
+                            profile["storage"]["stop_bytes"], "CAPACITY")
+                    next_sample = time.monotonic() + 10
+        tar.wait(timeout=10)
+        openssl.wait(timeout=10)
         require(tar.returncode == 0 and openssl.returncode == 0 and
                 ciphertext.is_file() and ciphertext.stat().st_size > 0, "COLLECT")
         require(baseline is None or budget.used() - baseline <= LIMIT, "CAPACITY")

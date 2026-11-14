@@ -1,11 +1,15 @@
 """Synthetic negative checks for the disposable resolver's prestart boundary."""
 import copy
 import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
-from capture_signed_indexes import inspect_resolver, BASE
+from capture_signed_indexes import (inspect_resolver, ensure_base_image,
+                                    collect_resolver_results, BASE)
 from common import Failure
+from lifecycle import Run
 
 
 class FakeDocker:
@@ -70,6 +74,82 @@ class ResolverPolicyTests(unittest.TestCase):
                                                     "seccomp={\"default\":true}"]
         with self.assertRaises(Failure):
             self.inspect(changed)
+
+
+class CaptureLifecycleTests(unittest.TestCase):
+    def test_exact_cached_digest_skips_pull_and_missing_digest_pulls_once(self):
+        expected = json.dumps([{"Os": "linux", "Architecture": "amd64",
+                                "RepoDigests": [BASE]}])
+
+        class ImageDocker:
+            prefix = ["docker", "--context", "selected"]
+
+            def __init__(self, missing):
+                self.missing = missing
+                self.calls = []
+
+            def call(self, *args, missing=False):
+                self.calls.append(args)
+                if self.missing and len(self.calls) == 1:
+                    return None
+                return expected
+
+        class Monitor:
+            def __init__(self):
+                self.commands = []
+
+            def run(self, command, **kwargs):
+                self.commands.append(command)
+
+        with tempfile.TemporaryDirectory() as temp:
+            run = type("RunRoot", (), {"root": Path(temp)})()
+            for missing, pulls in ((False, 0), (True, 1)):
+                docker, monitor = ImageDocker(missing), Monitor()
+                ensure_base_image(docker, monitor, {"limits": {"run_seconds": 900}}, run)
+                self.assertEqual(len(monitor.commands), pulls)
+                self.assertEqual(len(docker.calls), pulls + 1)
+
+    def test_failed_resolver_collects_owned_raw_apt_and_gpgv_bytes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run = Run(Path(temp), "synthetic").create({})
+            run.intent("container", "owned")
+            run.resource("container", "owned", "container-id")
+            run.transition("running")
+            run.transition("stopped")
+
+            class Docker:
+                prefix = ["docker", "--context", "selected"]
+
+                def __init__(self, valid=True):
+                    self.valid = valid
+
+                def inspect(self, item):
+                    return {"id": "container-id", "running": False,
+                            "labels": {"org.alopex.test-env.owner": "envctl",
+                                       "org.alopex.test-env.run": "synthetic",
+                                       "org.alopex.test-env.token":
+                                       run.record["ownership_token"] if self.valid else "wrong"}}
+
+            class Monitor:
+                def run(self, command, **kwargs):
+                    destination = Path(command[-1])
+                    (destination / "apt-raw.txt").write_bytes(b"failed APT raw bytes")
+                    (destination / "noble_InRelease.gpgv-stderr").write_bytes(
+                        b"failed signature raw bytes")
+
+            with self.assertRaises(Failure):
+                collect_resolver_results(run, Docker(False), Monitor(), "container-id",
+                                         {"case_seconds": 60}, 100)
+            self.assertEqual(run.record["phase"], "stopped")
+            collected = collect_resolver_results(run, Docker(), Monitor(), "container-id",
+                                                  {"case_seconds": 60}, 100)
+            run.verify_collection()
+            self.assertEqual((collected / "apt-raw.txt").read_bytes(), b"failed APT raw bytes")
+            self.assertEqual((collected / "noble_InRelease.gpgv-stderr").read_bytes(),
+                             b"failed signature raw bytes")
+            self.assertEqual(json.loads((collected / "result.json").read_text()), {
+                "capture": "failed", "resolver_exit_code": 100,
+                "container_id": "container-id"})
 
 
 if __name__ == "__main__":

@@ -56,6 +56,23 @@ class HostMonitorTests(unittest.TestCase):
                 monitor.sample()
         self.assertEqual(raised.exception.code, "CAPACITY")
 
+    def test_image_inspect_only_treats_exact_missing_error_as_cache_miss(self):
+        monitor = self.monitor()
+        docker = monitored.MonitoredDocker({"docker_context": "selected"}, monitor)
+        with patch.object(monitor, "run", return_value=(1, "", "permission denied")):
+            with self.assertRaises(Failure):
+                docker.call("image", "inspect", "pinned-digest", missing=True)
+        with patch.object(monitor, "run", return_value=(1, "", "No such image: pinned-digest")):
+            self.assertIsNone(docker.call("image", "inspect", "pinned-digest", missing=True))
+
+    def test_nonzero_resolver_exit_is_returned_for_raw_collection(self):
+        monitor = self.monitor()
+        with tempfile.TemporaryDirectory() as temp:
+            code = monitor.run([sys.executable, "-c", "raise SystemExit(17)"],
+                               timeout=2, log=Path(temp) / "resolver.log",
+                               allow_nonzero=True)
+        self.assertEqual(code, 17)
+
     def test_proof_is_cancelled_and_cleanup_can_run_after_trip(self):
         monitor = self.monitor()
         with tempfile.TemporaryDirectory() as temp, \

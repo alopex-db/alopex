@@ -112,6 +112,43 @@ def inspect_resolver(docker, identity, profile, token):
     return live
 
 
+def ensure_base_image(docker, monitor, profile, run):
+    raw = docker.call("image", "inspect", BASE, missing=True)
+    if raw is None:
+        monitor.run([*docker.prefix, "pull", "--platform", PLATFORM, BASE],
+                    timeout=profile["limits"]["run_seconds"], log=run.root / "pull.log")
+        raw = docker.call("image", "inspect", BASE)
+    image = json.loads(raw)[0]
+    require(image["Os"] == "linux" and image["Architecture"] == "amd64" and
+            BASE in image.get("RepoDigests", []), "IDENTITY")
+    return image
+
+
+def collect_resolver_results(run, docker, monitor, identity, limits, exit_code):
+    """Collect raw APT/gpgv bytes on both success and nonzero resolver exit."""
+    require(run.record["phase"] == "stopped", "STATE")
+    item = next((item for item in run.record["resources"]
+                 if item["kind"] == "container" and item["id"] == identity), None)
+    require(item is not None, "IDENTITY")
+    live = docker.inspect(item)
+    require(live is not None and live["id"] == identity and not live["running"] and
+            live["labels"].get("org.alopex.test-env.owner") == "envctl" and
+            live["labels"].get("org.alopex.test-env.run") == run.run_id and
+            live["labels"].get("org.alopex.test-env.token") ==
+            run.record["ownership_token"], "IDENTITY")
+
+    def copy(destination):
+        monitor.run([*docker.prefix, "cp", identity + ":/resolution/results/.",
+                     str(destination)], timeout=limits["case_seconds"],
+                    log=run.root / "collect.log")
+        atomic_json(destination / "result.json", {
+            "capture": "complete" if exit_code == 0 else "failed",
+            "resolver_exit_code": exit_code, "container_id": identity})
+
+    run.collect(copy)
+    return run.root / "collected"
+
+
 def capture(module, prior, private):
     profile = read_json(private / "profile.json", private=True)
     budget, _ = admissible(profile, prior, module, private)
@@ -128,11 +165,7 @@ def capture(module, prior, private):
     docker = MonitoredDocker(profile, monitor)
     try:
         monitor.start()
-        monitor.run([*docker.prefix, "pull", "--platform", PLATFORM, BASE],
-                    timeout=profile["limits"]["run_seconds"], log=run.root / "pull.log")
-        image = json.loads(docker.call("image", "inspect", BASE))[0]
-        require(image["Os"] == "linux" and image["Architecture"] == "amd64" and
-                BASE in image.get("RepoDigests", []), "IDENTITY")
+        ensure_base_image(docker, monitor, profile, run)
         capture_storage = dict(profile["storage"])
         capture_storage["planned_bytes"] = {**capture_storage["planned_bytes"],
                                              "capture_files": CAPTURE_LIMIT}
@@ -178,20 +211,15 @@ def capture(module, prior, private):
         monitor.run([*docker.prefix, "cp", str(bootstrap), identity + ":/resolution"],
                     timeout=limits["case_seconds"], log=run.root / "stage.log")
         run.transition("running")
-        monitor.run([*docker.prefix, "start", "--attach", identity],
-                    timeout=limits["run_seconds"], log=run.root / "container.log")
+        resolver_exit = monitor.run([*docker.prefix, "start", "--attach", identity],
+                                    timeout=limits["run_seconds"], log=run.root / "container.log",
+                                    allow_nonzero=True)
         state = json.loads(docker.call("container", "inspect", identity))[0]["State"]
-        require(state["ExitCode"] == 0 and not state["OOMKilled"], "COMMAND")
+        require(not state["Running"] and state["ExitCode"] == resolver_exit, "STATE")
         run.transition("stopped")
-
-        def copy(destination):
-            monitor.run([*docker.prefix, "cp", identity + ":/resolution/results/.",
-                         str(destination)], timeout=limits["case_seconds"],
-                        log=run.root / "collect.log")
-            (destination / "result.json").write_text('{"capture":"complete"}\n')
-
-        run.collect(copy)
-        collected = run.root / "collected"
+        collected = collect_resolver_results(run, docker, monitor, identity, limits,
+                                             resolver_exit)
+        require(resolver_exit == 0 and not state["OOMKilled"], "COMMAND")
         actual = sum(path.stat().st_size for path in collected.rglob("*") if path.is_file())
         require(actual <= CAPTURE_LIMIT and
                 (collected / "capture.status").read_text() == "capture-complete\n", "CAPACITY")
