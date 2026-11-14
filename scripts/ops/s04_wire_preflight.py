@@ -35,7 +35,7 @@ SO_PEERPIDFD = getattr(socket, "SO_PEERPIDFD", 77)  # Linux UAPI asm-generic/soc
 SOURCE_HASHES = {
     "scripts/test-env/common.py": "a84a6951f6b1303869cc74f12a92053e691b854c2ac9b8835811bfdcf135c47f",
     "scripts/test-env/docker_backend.py": "4f16cc16e8e4d620f568b53dbb8ced965cdee2ea7476978a464d4fe4579c712e",
-    "scripts/ops/hosted_test_env_qualification.py": "414c66e32040c4674d60dc9b5f26d21adf904ae4c88ed85a01094216ea2f756c",
+    "scripts/ops/hosted_test_env_qualification.py": "4a41875530a8a4c6efaa5b90ba1e2976619324a750c3e792621369f696fbf3af",
 }
 
 
