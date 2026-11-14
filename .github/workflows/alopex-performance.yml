@@ -498,7 +498,7 @@ jobs:
           ref: 490f002dfb2c7f509a2444891808d9704fe6b001
           fetch-depth: 1
           path: frozen-wal-controller
-      - name: Qualify and measure on the same runner
+      - name: Qualify, capture signed indexes, and measure on the same runner
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -511,6 +511,13 @@ jobs:
             --frozen-checkout "$GITHUB_WORKSPACE/frozen-wal-controller" \
             --config "$GITHUB_WORKSPACE/qualification-controller/scripts/ops/wal_cost_next/exact-a415-wal-cost-input.private.json" \
             --config-sha256 24c31ed86f5643edfef6789b345e12d610e71d05c1c3a905d84e17c3771c055b
+      - name: Seal signed Ubuntu indexes
+        if: always() && !cancelled()
+        run: |
+          python3 -B qualification-controller/scripts/ops/wal_cost_next/seal_signed_indexes.py \
+            --private "$RUNNER_TEMP/alopex-804-qualification" \
+            --certificate "$GITHUB_WORKSPACE/qualification-controller/.github/ops/native-evidence-cert.pem" \
+            --output "$GITHUB_WORKSPACE/signed-index-export"
       - name: Seal wrapper evidence
         if: always()
         run: |
@@ -530,6 +537,8 @@ jobs:
             qualification-controller/native-qualification-export/private-evidence.cms
             frozen-wal-controller/wal-cost-export/result.json
             frozen-wal-controller/wal-cost-export/private-evidence.cms
+            signed-index-export/public.json
+            signed-index-export/private-evidence.cms
             wal-cost-wrapper-export/public.json
             wal-cost-wrapper-export/private-evidence.cms
           if-no-files-found: error
