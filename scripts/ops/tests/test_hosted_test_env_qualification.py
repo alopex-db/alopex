@@ -505,7 +505,7 @@ class Sequence(unittest.TestCase):
         workflow = Path(__file__).resolve().parents[3] / (
             ".github/workflows/alopex-performance.yml")
         source = workflow.read_text()
-        self.assertIn("inventory:\n    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode }}", source)
+        self.assertIn("inventory:\n    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode }}", source)
         self.assertIn("qualification:\n    if: inputs.qualification_mode", source)
         self.assertIn("inputs.issue_number == '804' && !inputs.sql_four_case_mode", source)
         self.assertIn("inputs.issue_number == '712' && inputs.sql_four_case_mode", source)
