@@ -27,9 +27,6 @@ on:
         required: false
         type: boolean
         default: false
-        required: false
-        type: boolean
-        default: false
       expected_controller_sha:
         description: Exact controller commit for qualification mode
         required: false
