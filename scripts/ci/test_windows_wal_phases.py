@@ -128,15 +128,15 @@ class WindowsPhaseTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertIn("isolated GitHub-hosted Windows runner", error)
 
-    def test_hnsw_cow_requires_all_ten_cases_before_dirty_writes(self):
+    def test_hnsw_cow_requires_all_eleven_cases_before_dirty_writes(self):
         name = "hnsw-copy-on-write"
         calls, error = self.execute("hnsw-contracts", output_overrides={
-            name: "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 630 filtered out"
+            name: "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 630 filtered out"
         })
         self.assertIsNone(error)
         self.assertEqual(calls[-1][0], "hnsw-dirty-writes")
-        for result in ("8 passed; 0 failed; 0 ignored", "9 passed; 0 failed; 0 ignored",
-                       "9 passed; 0 failed; 1 ignored", "9 passed; 1 failed; 0 ignored"):
+        for result in ("10 passed; 0 failed; 0 ignored", "9 passed; 0 failed; 0 ignored",
+                       "10 passed; 0 failed; 1 ignored", "10 passed; 1 failed; 0 ignored"):
             with self.subTest(result=result):
                 calls, error = self.execute("hnsw-contracts", output_overrides={
                     name: f"test result: ok. {result}; 0 measured; 630 filtered out"
@@ -174,7 +174,10 @@ class WindowsPhaseTests(unittest.TestCase):
             self.assertIn("if: runner.os == 'Windows'", block)
             self.assertNotIn("continue-on-error", block)
         self.assertLess(build.index("--phase hnsw-contracts"), build.index("Clean Windows validation outputs"))
-        self.assertIn("if: always() && runner.os == 'Windows'", build.split("Clean Windows validation outputs", 1)[1])
+        cleanup = build.split("Clean Windows validation outputs", 1)[1].split("- name:", 1)[0]
+        self.assertIn("if: always() && runner.os == 'Windows'", cleanup)
+        self.assertIn("Remove-Item -Recurse -Force -ErrorAction Stop target", cleanup)
+        self.assertIn('if (Test-Path target) { throw "Windows validation target remains after cleanup" }', cleanup)
 
     def test_cosine_requires_all_named_cases_and_runtime_kernel(self):
         name = "hnsw-cosine-kernel"
