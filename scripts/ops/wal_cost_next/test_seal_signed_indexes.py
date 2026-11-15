@@ -75,7 +75,13 @@ class SealRetryTests(unittest.TestCase):
     def test_logically_oversized_raw_seals_failure_when_allocated_headroom_remains(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            private, _, certificate, budget = self.make_oversized_run(root)
+            private, run, certificate, budget = self.make_oversized_run(root)
+            (run / "failure.json").write_text(json.dumps({
+                "error_code": "CAPACITY", "capture_stage": "capture_final_capture_budget",
+                "capacity_gate": "final_capture_growth",
+                "final_budget_samples": {"final_capture": {
+                    "used_bytes": 351, "baseline_bytes": 100, "planned_bytes": 250}},
+                "collected_bytes": 200}))
             inputs = []
 
             def encrypt(*args, **kwargs):
@@ -95,11 +101,16 @@ class SealRetryTests(unittest.TestCase):
                                          "evidence/capture-budget.private.json",
                                          "evidence/seal-failure.private.json"})
                 retained = json.load(archive.extractfile("evidence/failure.json"))
-                self.assertEqual(retained["capture_stage"], "capture_files")
+                self.assertEqual(retained["capacity_gate"], "final_capture_growth")
+                self.assertEqual(retained["final_budget_samples"]["final_capture"], {
+                    "used_bytes": 351, "baseline_bytes": 100, "planned_bytes": 250})
+                self.assertEqual(retained["collected_bytes"], 200)
                 failure = json.load(archive.extractfile("evidence/seal-failure.private.json"))
                 self.assertEqual(failure["seal_error_code"], "CAPACITY")
                 self.assertEqual(failure["seal_error_stage"], "full_seal")
                 self.assertTrue(failure["full_evidence_incomplete"])
+            self.assertNotIn("final_budget_samples",
+                             (root / "export" / "public.json").read_text())
 
     def test_successful_capture_with_unsealable_raw_is_reported_failed(self):
         with tempfile.TemporaryDirectory() as temp:

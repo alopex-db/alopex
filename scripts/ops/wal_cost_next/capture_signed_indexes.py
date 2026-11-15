@@ -33,6 +33,19 @@ RESERVE = 1_000_000_000
 STOP = 40_000_000_000
 
 
+def check_final_budget(budget, gate, samples):
+    """Keep the existing budget limits and retain the failing sample privately."""
+    require(budget.initial is not None, "STATE")
+    used = budget.used()
+    samples[gate] = {"used_bytes": used, "baseline_bytes": budget.initial,
+                     "planned_bytes": budget.planned}
+    if used + budget.config["reserve_bytes"] >= budget.config["stop_bytes"]:
+        raise Failure("CAPACITY", gate + "_stop")
+    if used - budget.initial > budget.planned:
+        raise Failure("CAPACITY", gate + "_growth")
+    return used
+
+
 def admissible(profile, prior, module, private):
     """Check exact archived policy and fresh full-host budget before Docker growth."""
     require(private.resolve() == Path(os.environ["RUNNER_TEMP"]).resolve() /
@@ -159,6 +172,8 @@ def collect_resolver_results(run, docker, monitor, identity, limits, exit_code):
 
 def capture(module, prior, private):
     stage = "capture_admission"
+    final_budget_samples = {}
+    collected_bytes = None
     profile = read_json(private / "profile.json", private=True)
     budget, _ = admissible(profile, prior, module, private)
     stage = "capture_prerequisites"
@@ -239,8 +254,9 @@ def capture(module, prior, private):
         collected = collect_resolver_results(run, docker, monitor, identity, limits,
                                              resolver_exit)
         require(resolver_exit == 0 and not state["OOMKilled"], "COMMAND")
-        actual = sum(path.stat().st_size for path in collected.rglob("*") if path.is_file())
-        if actual > CAPTURE_LIMIT:
+        collected_bytes = sum(path.stat().st_size for path in collected.rglob("*")
+                              if path.is_file())
+        if collected_bytes > CAPTURE_LIMIT:
             raise Failure("CAPACITY", "capture_collected_size")
         require((collected / "capture.status").read_text() == "capture-complete\n", "COLLECT")
         stage = "capture_proof"
@@ -249,11 +265,14 @@ def capture(module, prior, private):
                      str(HERE / "capture_ubuntu_indexes.sh"), "--output",
                      str(run.root / "proof")], timeout=300, log=run.root / "proof.log")
         require((run.root / "proof" / "proof.sha256").is_file(), "COLLECT")
-        stage = "capture_final_budget"
-        capture_budget.check()
-        budget.check()
+        stage = "capture_final_capture_budget"
+        check_final_budget(capture_budget, "final_capture", final_budget_samples)
+        stage = "capture_final_host_budget"
+        check_final_budget(budget, "final_host", final_budget_samples)
+        stage = "capture_cleanup"
         run.clean(docker.inspect, docker.remove)
-        budget.check()
+        stage = "capture_post_cleanup_budget"
+        check_final_budget(budget, "post_cleanup", final_budget_samples)
         monitor.stop()
         return run.root
     except BaseException as error:
@@ -267,7 +286,12 @@ def capture(module, prior, private):
                 "capture_original_allowance", "capture_host_stop", "capture_free_space",
                 "capture_planned_budget",
                 "capture_collected_size", "host_stop", "host_growth",
-                "capture_stage_growth") else None,
+                "capture_stage_growth", "final_capture_stop",
+                "final_capture_growth", "final_host_stop",
+                "final_host_growth", "post_cleanup_stop",
+                "post_cleanup_growth") else None,
+            "final_budget_samples": final_budget_samples,
+            "collected_bytes": collected_bytes,
             "detail": repr(error)[:4096]})
         run.load()
         if run.record["phase"] == "collected":

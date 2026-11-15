@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from capture_signed_indexes import (inspect_resolver, ensure_base_image,
-                                    collect_resolver_results, BASE)
+                                    collect_resolver_results, check_final_budget, BASE)
 from common import Failure
 from lifecycle import Run
 
@@ -77,6 +77,32 @@ class ResolverPolicyTests(unittest.TestCase):
 
 
 class CaptureLifecycleTests(unittest.TestCase):
+    def test_final_budget_records_private_sample_without_changing_limits(self):
+        class Budget:
+            initial = 500
+            planned = 250
+            config = {"reserve_bytes": 100, "stop_bytes": 1000}
+
+            def __init__(self, used):
+                self.current = used
+
+            def used(self):
+                return self.current
+
+        samples = {}
+        self.assertEqual(check_final_budget(Budget(750), "final_capture", samples), 750)
+        self.assertEqual(samples["final_capture"], {
+            "used_bytes": 750, "baseline_bytes": 500, "planned_bytes": 250})
+        with self.assertRaises(Failure) as growth:
+            check_final_budget(Budget(751), "final_capture", samples)
+        self.assertEqual((growth.exception.code, growth.exception.detail),
+                         ("CAPACITY", "final_capture_growth"))
+        self.assertEqual(samples["final_capture"]["used_bytes"], 751)
+        with self.assertRaises(Failure) as stop:
+            check_final_budget(Budget(900), "final_host", samples)
+        self.assertEqual((stop.exception.code, stop.exception.detail),
+                         ("CAPACITY", "final_host_stop"))
+
     def test_exact_cached_digest_skips_pull_and_missing_digest_pulls_once(self):
         expected = json.dumps([{"Os": "linux", "Architecture": "amd64",
                                 "RepoDigests": [BASE]}])
