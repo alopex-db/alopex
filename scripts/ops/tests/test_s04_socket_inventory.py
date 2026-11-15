@@ -28,6 +28,41 @@ SEAL_SPEC.loader.exec_module(sealer)
 
 
 class SocketInventoryTests(unittest.TestCase):
+    def test_default_context_uses_fixed_local_socket_without_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(os.path.realpath(directory))
+            (home / ".docker").mkdir()
+            with patch.object(inventory, "default_endpoint", return_value=Path("/run/docker.sock")) as default:
+                for config in (None, {}, {"currentContext": "default"}):
+                    config_path = home / ".docker/config.json"
+                    if config is None:
+                        config_path.unlink(missing_ok=True)
+                    else:
+                        config_path.write_text(json.dumps(config))
+                    self.assertEqual(inventory.selected_endpoint(home, {}), Path("/run/docker.sock"))
+                self.assertEqual(default.call_count, 3)
+
+    def test_default_endpoint_accepts_only_fixed_run_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "var").mkdir()
+            (root / "run").mkdir()
+            (root / "var/run").symlink_to("../run")
+            self.assertEqual(inventory.default_endpoint(root), root / "run/docker.sock")
+            (root / "var/run").unlink()
+            (root / "var/run").mkdir()
+            self.assertEqual(inventory.default_endpoint(root), root / "var/run/docker.sock")
+            (root / "var/run").rmdir()
+            (root / "var/run").symlink_to("/other")
+            with self.assertRaisesRegex(inventory.PreflightError, "ENDPOINT_INVALID"):
+                inventory.default_endpoint(root)
+            (root / "var/run").unlink()
+            with self.assertRaisesRegex(inventory.PreflightError, "ENDPOINT_INVALID"):
+                inventory.default_endpoint(root)
+            (root / "var/run").touch()
+            with self.assertRaisesRegex(inventory.PreflightError, "ENDPOINT_INVALID"):
+                inventory.default_endpoint(root)
+
     def test_selected_context_requires_unique_absolute_unix_endpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(os.path.realpath(directory))
@@ -48,14 +83,29 @@ class SocketInventoryTests(unittest.TestCase):
                 "Name": "selected", "Endpoints": {"docker": {"Host": "unix:///run/docker.sock"}}}))
             (meta.parent / "two").mkdir()
             (meta.parent / "two/meta.json").write_text((meta / "meta.json").read_text())
-            with self.assertRaises(inventory.PreflightError):
+            with self.assertRaisesRegex(inventory.PreflightError, "CONTEXT_METADATA_CARDINALITY"):
                 inventory.selected_endpoint(home, {})
             (meta.parent / "two/meta.json").unlink()
             (meta.parent / "two").rmdir()
+            (meta / "meta.json").write_text(json.dumps({"Name": "other"}))
+            with self.assertRaisesRegex(inventory.PreflightError, "CONTEXT_METADATA_CARDINALITY"):
+                inventory.selected_endpoint(home, {})
             (meta / "meta.json").unlink()
             (meta / "meta.json").symlink_to(home / ".docker/config.json")
             with self.assertRaises(OSError):
                 inventory.selected_endpoint(home, {})
+
+    def test_malformed_context_selection_has_distinct_private_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(os.path.realpath(directory))
+            (home / ".docker").mkdir()
+            config_path = home / ".docker/config.json"
+            for config in ([], {"currentContext": None}, {"currentContext": ""},
+                           {"currentContext": 42}):
+                config_path.write_text(json.dumps(config))
+                with self.subTest(config=config), self.assertRaisesRegex(
+                        inventory.PreflightError, "CONTEXT_SELECTION_INVALID"):
+                    inventory.selected_endpoint(home, {})
 
     @unittest.skipUnless(hasattr(os, "O_PATH"), "Linux O_PATH is required")
     def test_path_metadata_rejects_symlink_and_non_socket(self):
@@ -145,14 +195,14 @@ class SocketInventoryTests(unittest.TestCase):
                     patch.object(inventory.subprocess, "run", return_value=subprocess.CompletedProcess(
                         ["git"], 0, (expected + "\n").encode())), \
                     patch.object(inventory, "selected_endpoint",
-                                 side_effect=inventory.PreflightError("CONTEXT_AMBIGUOUS")), \
+                                 side_effect=inventory.PreflightError("CONTEXT_METADATA_CARDINALITY")), \
                     patch("sys.stdout"):
                 self.assertEqual(inventory.main(), 1)
             private = work / "alopex-s04-socket-inventory"
             failure = json.loads((private / "inspector.private.json").read_text())
             self.assertEqual(failure, {"schema": "alopex.s04-socket-inventory-failure/v1",
                                        "read_only": True, "outcome": "failed",
-                                       "stage": "CONTEXT", "reason": "CONTEXT_AMBIGUOUS"})
+                                       "stage": "CONTEXT", "reason": "CONTEXT_METADATA_CARDINALITY"})
             with patch.dict(os.environ, env), patch("sys.stdout"):
                 previous = Path.cwd()
                 try:
@@ -168,8 +218,8 @@ class SocketInventoryTests(unittest.TestCase):
                              ("failed", "INSPECT_FAILED"))
             self.assertFalse(private.exists())
             ciphertext = (export / "private-evidence.cms").read_bytes()
-            self.assertNotIn(b"CONTEXT_AMBIGUOUS", ciphertext)
-            self.assertNotIn("CONTEXT_AMBIGUOUS", json.dumps(public))
+            self.assertNotIn(b"CONTEXT_METADATA_CARDINALITY", ciphertext)
+            self.assertNotIn("CONTEXT_METADATA_CARDINALITY", json.dumps(public))
             parsed = subprocess.run(["openssl", "cms", "-cmsout", "-print", "-inform", "DER",
                                      "-in", str(export / "private-evidence.cms")],
                                     capture_output=True, check=False)

@@ -19,7 +19,8 @@ LIMIT = 1_048_576
 MAX_ACL = 16_384
 DIRECTORY_FLAG = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
 REASONS = frozenset({
-    "SOURCE_MISMATCH", "CONTEXT_OVERRIDE", "CONTEXT_AMBIGUOUS", "ENDPOINT_INVALID",
+    "SOURCE_MISMATCH", "CONTEXT_OVERRIDE", "CONTEXT_SELECTION_INVALID",
+    "CONTEXT_METADATA_CARDINALITY", "ENDPOINT_INVALID",
     "PATH_INVALID", "METADATA_TYPE", "METADATA_LIMIT", "PATH_UNSUPPORTED",
     "PATH_LIMIT", "PATH_TYPE", "PATH_CHANGED", "ACL_INCOMPLETE", "PRIVATE_DIRECTORY",
     "OUTPUT_LIMIT",
@@ -80,15 +81,42 @@ def bounded_read(path: Path, limit: int = LIMIT) -> bytes:
         return bounded_read_fd(fd, limit)
 
 
+def default_endpoint(root: Path = Path("/")) -> Path:
+    """Resolve only Docker's fixed Linux default socket and its usual run alias."""
+    var_run = root / "var/run"
+    try:
+        info = var_run.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            target = os.readlink(var_run)
+        else:
+            target = None
+    except OSError:
+        raise PreflightError("ENDPOINT_INVALID") from None
+    if target is not None:
+        if target not in ("/run", "../run"):
+            raise PreflightError("ENDPOINT_INVALID")
+        return root / "run/docker.sock"
+    if not stat.S_ISDIR(info.st_mode):
+        raise PreflightError("ENDPOINT_INVALID")
+    return var_run / "docker.sock"
+
+
 def selected_endpoint(home: Path, env: dict[str, str]) -> Path:
     if any(env.get(key) for key in ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG")):
         raise PreflightError("CONTEXT_OVERRIDE")
     config_path = home / ".docker/config.json"
     meta_root = home / ".docker/contexts/meta"
-    config = json.loads(bounded_read(config_path, 65_536))
+    try:
+        config = json.loads(bounded_read(config_path, 65_536))
+    except FileNotFoundError:
+        config = {}
+    if not isinstance(config, dict):
+        raise PreflightError("CONTEXT_SELECTION_INVALID")
     name = config.get("currentContext")
-    if not isinstance(name, str) or not name or name == "default":
-        raise PreflightError("CONTEXT_AMBIGUOUS")
+    if "currentContext" not in config or name == "default":
+        return default_endpoint()
+    if not isinstance(name, str) or not name:
+        raise PreflightError("CONTEXT_SELECTION_INVALID")
     matches = []
     with pinned_path(meta_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) as meta_fd:
         for child in os.listdir(meta_fd):
@@ -104,7 +132,7 @@ def selected_endpoint(home: Path, env: dict[str, str]) -> Path:
             finally:
                 os.close(child_fd)
     if len(matches) != 1:
-        raise PreflightError("CONTEXT_AMBIGUOUS")
+        raise PreflightError("CONTEXT_METADATA_CARDINALITY")
     endpoints = matches[0].get("Endpoints")
     if not isinstance(endpoints, dict) or set(endpoints) != {"docker"}:
         raise PreflightError("ENDPOINT_INVALID")

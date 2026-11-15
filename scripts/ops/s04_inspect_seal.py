@@ -63,7 +63,8 @@ def _seal_inner(private: Path, export: Path, inspect_outcome: str,
                 raw.get("outcome") != "failed" or
                 raw.get("stage") not in {"SOURCE", "CONTEXT", "MOUNTINFO", "PATH", "WRITE"} or
                 raw.get("reason") not in {
-                    "SOURCE_MISMATCH", "CONTEXT_OVERRIDE", "CONTEXT_AMBIGUOUS",
+                    "SOURCE_MISMATCH", "CONTEXT_OVERRIDE", "CONTEXT_SELECTION_INVALID",
+                    "CONTEXT_METADATA_CARDINALITY",
                     "ENDPOINT_INVALID", "PATH_INVALID", "METADATA_TYPE", "METADATA_LIMIT",
                     "PATH_UNSUPPORTED", "PATH_LIMIT", "PATH_TYPE", "PATH_CHANGED",
                     "ACL_INCOMPLETE", "PRIVATE_DIRECTORY", "OUTPUT_LIMIT", "TIMEOUT",
