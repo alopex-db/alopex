@@ -136,10 +136,17 @@ jobs:
                   run = subprocess.run(prefix + ['/usr/bin/du', '-sk' if root == daemon else '-skL',
                                                  '--', str(root)],
                                        stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
-                  gate = 'ROOT_PARSE'
+                  gate = 'ROOT_EXIT'
+                  assert run.returncode == 0
+                  gate = 'ROOT_STDERR'
+                  assert not run.stderr
+                  gate = 'ROOT_OUTPUT_SHAPE'
                   parts = run.stdout.decode().strip().split('\t')
-                  assert run.returncode == 0 and not run.stderr and len(parts) == 2
-                  assert parts[0].isdecimal() and parts[1] == str(root)
+                  assert len(parts) == 2
+                  gate = 'ROOT_OUTPUT_COUNT'
+                  assert parts[0].isdecimal()
+                  gate = 'ROOT_OUTPUT_ROOT'
+                  assert parts[1] == str(root)
                   total += int(parts[0]) * 1024
                   gate = 'ROOT_FREE_SPACE'
                   fs = os.statvfs(root)
