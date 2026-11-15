@@ -24,6 +24,7 @@ from common import read_json, require  # noqa: E402
 LIMIT = 250_000_000
 SEAL_RESERVE = 2_000_000
 FAILURE_FILE_LIMIT = 256_000
+FAILURE_LOG_TAIL_LIMIT = 65_536
 FAILURE_PLAINTEXT_LIMIT = 1_000_000
 FAILURE_CIPHERTEXT_LIMIT = 2_000_000
 FAILURE_FILES = ("failure.json", "run.json", "capture-budget.private.json")
@@ -185,6 +186,13 @@ def _seal_failure(private, certificate, output, original):
             require(stat.S_ISREG(mode) and path.stat().st_size <= FAILURE_FILE_LIMIT,
                     "COLLECT")
             retained[name] = path.read_bytes()
+    proof_log = run / "proof.log"
+    if proof_log.exists():
+        mode = proof_log.lstat().st_mode
+        require(stat.S_ISREG(mode), "COLLECT")
+        with proof_log.open("rb") as stream:
+            stream.seek(-min(proof_log.stat().st_size, FAILURE_LOG_TAIL_LIMIT), os.SEEK_END)
+            retained["proof.log.tail"] = stream.read(FAILURE_LOG_TAIL_LIMIT)
     require("run.json" in retained, "COLLECT")
     original_code = getattr(original, "code", None)
     failure = {

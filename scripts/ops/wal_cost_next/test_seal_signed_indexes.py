@@ -113,6 +113,30 @@ class SealRetryTests(unittest.TestCase):
             self.assertEqual(result["outcome"], "failed")
             self.assertEqual(result["error_code"], "EVIDENCE_FAILURE")
 
+    def test_failure_receipt_keeps_bounded_proof_log_tail(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            private, run, certificate, budget = self.make_oversized_run(root)
+            log = run / "proof.log"
+            log.write_bytes(b"a" * seal_module.FAILURE_LOG_TAIL_LIMIT + b"proof failure")
+            inputs = []
+
+            def encrypt(*args, **kwargs):
+                inputs.append(kwargs["input"])
+                return SimpleNamespace(returncode=0, stdout=b"encrypted failure receipt")
+
+            with patch.object(seal_module, "Budget", budget), \
+                 patch.object(seal_module.subprocess, "run", side_effect=encrypt):
+                result = seal_module.seal(private, certificate, root / "export")
+            self.assertEqual(result["outcome"], "failed")
+            with tarfile.open(fileobj=io.BytesIO(inputs[0]), mode="r:gz") as archive:
+                tail = archive.extractfile("evidence/proof.log.tail").read()
+                self.assertEqual(len(tail), seal_module.FAILURE_LOG_TAIL_LIMIT)
+                self.assertTrue(tail.endswith(b"proof failure"))
+                failure = json.load(archive.extractfile("evidence/seal-failure.private.json"))
+                self.assertIn("proof.log.tail", failure["retained"])
+                self.assertIn("proof.log", failure["omitted_from_failure_receipt"])
+
     def test_failure_receipt_refuses_insufficient_host_headroom(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
