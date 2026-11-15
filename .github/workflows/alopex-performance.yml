@@ -137,7 +137,13 @@ jobs:
                                                  '--', str(root)],
                                        stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
                   gate = 'ROOT_EXIT'
-                  assert run.returncode == 0
+                  if run.returncode != 0:
+                      lines = run.stderr.decode('utf-8', errors='replace').splitlines()
+                      vanished = (run.returncode == 1 and bool(lines) and all(
+                          re.fullmatch(r'(?:/usr/bin/)?du: cannot access .+: No such file or directory',
+                                       line) is not None for line in lines))
+                      gate = 'ROOT_EXIT_VANISHED' if vanished else 'ROOT_EXIT_OTHER'
+                      raise AssertionError
                   gate = 'ROOT_STDERR'
                   assert not run.stderr
                   gate = 'ROOT_OUTPUT_SHAPE'
