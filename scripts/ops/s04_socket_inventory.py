@@ -18,6 +18,32 @@ from s04_wire_preflight import PreflightError, private_write
 LIMIT = 1_048_576
 MAX_ACL = 16_384
 DIRECTORY_FLAG = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
+REASONS = frozenset({
+    "SOURCE_MISMATCH", "CONTEXT_OVERRIDE", "CONTEXT_AMBIGUOUS", "ENDPOINT_INVALID",
+    "PATH_INVALID", "METADATA_TYPE", "METADATA_LIMIT", "PATH_UNSUPPORTED",
+    "PATH_LIMIT", "PATH_TYPE", "PATH_CHANGED", "ACL_INCOMPLETE", "PRIVATE_DIRECTORY",
+    "OUTPUT_LIMIT",
+})
+
+
+class InventoryFailure(PreflightError):
+    def __init__(self, stage: str, cause: BaseException):
+        self.stage = stage
+        reason = cause.args[0] if isinstance(cause, PreflightError) and cause.args else None
+        self.reason = reason if reason in REASONS else (
+            "TIMEOUT" if isinstance(cause, subprocess.TimeoutExpired) else
+            "METADATA_INVALID" if isinstance(cause, (ValueError, UnicodeError, TypeError, KeyError)) else
+            "OS_ERROR" if isinstance(cause, OSError) else "UNEXPECTED")
+        super().__init__(self.reason)
+
+
+def at_stage(stage: str, operation):
+    try:
+        return operation()
+    except InventoryFailure:
+        raise
+    except BaseException as error:
+        raise InventoryFailure(stage, error) from None
 
 
 @contextmanager
@@ -140,9 +166,9 @@ def collect(home: Path, env: dict[str, str]) -> dict:
                               capture_output=True, timeout=10, check=False)
     if checkout.returncode or checkout.stdout.decode().strip() != expected:
         raise PreflightError("SOURCE_MISMATCH")
-    endpoint = selected_endpoint(home, env)
-    mountinfo = bounded_read(Path("/proc/self/mountinfo"))
-    paths = inspect_path(endpoint)
+    endpoint = at_stage("CONTEXT", lambda: selected_endpoint(home, env))
+    mountinfo = at_stage("MOUNTINFO", lambda: bounded_read(Path("/proc/self/mountinfo")))
+    paths = at_stage("PATH", lambda: inspect_path(endpoint))
     return {"schema": "alopex.s04-socket-inventory/v1", "read_only": True,
             "admission": "not_assessed", "source_head": expected,
             "selected_endpoint": str(endpoint), "paths": paths,
@@ -150,13 +176,24 @@ def collect(home: Path, env: dict[str, str]) -> dict:
 
 
 def main() -> int:
+    output = None
     try:
         output = Path(os.environ["RUNNER_TEMP"]) / "alopex-s04-socket-inventory"
         output.mkdir(mode=0o700)
-        private_write(output / "inspector.private.json", collect(Path.home(), os.environ))
+        receipt = at_stage("SOURCE", lambda: collect(Path.home(), os.environ))
+        at_stage("WRITE", lambda: private_write(output / "inspector.private.json", receipt))
         print('{"case":"S04_SOCKET_INVENTORY","outcome":"collected"}')
         return 0
-    except BaseException:
+    except BaseException as error:
+        failure = error if isinstance(error, InventoryFailure) else InventoryFailure("SOURCE", error)
+        if output is not None:
+            try:
+                private_write(output / "inspector.private.json", {
+                    "schema": "alopex.s04-socket-inventory-failure/v1", "read_only": True,
+                    "outcome": "failed", "stage": failure.stage, "reason": failure.reason,
+                })
+            except BaseException:
+                pass
         print('{"case":"S04_SOCKET_INVENTORY","outcome":"failed"}')
         return 1
 

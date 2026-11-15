@@ -7,6 +7,8 @@ import pathlib
 from pathlib import Path
 import socket
 import stat
+import subprocess
+import shutil
 import tempfile
 import textwrap
 import unittest
@@ -129,6 +131,49 @@ class SocketInventoryTests(unittest.TestCase):
                                                  "ISSUE_NUMBER": "684", "GITHUB_SHA": "a" * 40,
                                                  "EXPECTED_CONTROLLER_SHA": "b" * 40})
             selected.assert_not_called()
+
+    def test_failure_receipt_is_encrypted_and_public_status_is_fixed(self):
+        if not shutil.which("openssl"):
+            self.skipTest("OpenSSL unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            expected = "a" * 40
+            env = {"RUNNER_TEMP": str(work), "EXPECTED_CONTROLLER_SHA": expected,
+                   "GITHUB_SHA": expected, "GITHUB_EVENT_NAME": "workflow_dispatch",
+                   "ISSUE_NUMBER": "684", "COLLECT_OUTCOME": "failure"}
+            with patch.dict(os.environ, env), \
+                    patch.object(inventory.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        ["git"], 0, (expected + "\n").encode())), \
+                    patch.object(inventory, "selected_endpoint",
+                                 side_effect=inventory.PreflightError("CONTEXT_AMBIGUOUS")), \
+                    patch("sys.stdout"):
+                self.assertEqual(inventory.main(), 1)
+            private = work / "alopex-s04-socket-inventory"
+            failure = json.loads((private / "inspector.private.json").read_text())
+            self.assertEqual(failure, {"schema": "alopex.s04-socket-inventory-failure/v1",
+                                       "read_only": True, "outcome": "failed",
+                                       "stage": "CONTEXT", "reason": "CONTEXT_AMBIGUOUS"})
+            with patch.dict(os.environ, env), patch("sys.stdout"):
+                previous = Path.cwd()
+                try:
+                    os.chdir(work)
+                    self.assertEqual(sealer.main(), 1)
+                finally:
+                    os.chdir(previous)
+            export = work / "native-s04-socket-inventory-export"
+            public = json.loads((export / "public.json").read_text())
+            self.assertEqual(set(public), {"schema", "case", "outcome", "error_code",
+                                           "ciphertext_sha256"})
+            self.assertEqual((public["outcome"], public["error_code"]),
+                             ("failed", "INSPECT_FAILED"))
+            self.assertFalse(private.exists())
+            ciphertext = (export / "private-evidence.cms").read_bytes()
+            self.assertNotIn(b"CONTEXT_AMBIGUOUS", ciphertext)
+            self.assertNotIn("CONTEXT_AMBIGUOUS", json.dumps(public))
+            parsed = subprocess.run(["openssl", "cms", "-cmsout", "-print", "-inform", "DER",
+                                     "-in", str(export / "private-evidence.cms")],
+                                    capture_output=True, check=False)
+            self.assertEqual(parsed.returncode, 0)
 
     def test_sealer_public_fields_are_allowlisted(self):
         with tempfile.TemporaryDirectory() as directory:

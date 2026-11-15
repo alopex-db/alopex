@@ -29,7 +29,8 @@ def owner_only(path: Path) -> bool:
             not stat.S_IMODE(info.st_mode) & 0o077)
 
 
-def _seal_inner(private: Path, export: Path, inspect_outcome: str) -> tuple[dict, int]:
+def _seal_inner(private: Path, export: Path, inspect_outcome: str,
+                *, seal_failure: bool = False) -> tuple[dict, int]:
     """Return allowlisted status and exit code; never return private exception text."""
     public = {"schema": "alopex.s04-readonly-inspect/v1", "case": "S04_INSPECT",
               "outcome": "failed", "error_code": "INCOMPLETE"}
@@ -40,7 +41,7 @@ def _seal_inner(private: Path, export: Path, inspect_outcome: str) -> tuple[dict
         if not owner_only(export):
             public["error_code"] = "EXPORT_MODE"
             return public, 1
-        if inspect_outcome != "success":
+        if inspect_outcome != "success" and not seal_failure:
             public["error_code"] = "INSPECT_FAILED"
             return public, 1
         if not owner_only(private):
@@ -55,6 +56,18 @@ def _seal_inner(private: Path, export: Path, inspect_outcome: str) -> tuple[dict
             return public, 1
         raw = json.loads(receipt.read_text())
         if not isinstance(raw, dict) or raw.get("read_only") is not True:
+            public["error_code"] = "RECEIPT_INVALID"
+            return public, 1
+        if inspect_outcome != "success" and (raw.get("schema") !=
+                "alopex.s04-socket-inventory-failure/v1" or
+                raw.get("outcome") != "failed" or
+                raw.get("stage") not in {"SOURCE", "CONTEXT", "MOUNTINFO", "PATH", "WRITE"} or
+                raw.get("reason") not in {
+                    "SOURCE_MISMATCH", "CONTEXT_OVERRIDE", "CONTEXT_AMBIGUOUS",
+                    "ENDPOINT_INVALID", "PATH_INVALID", "METADATA_TYPE", "METADATA_LIMIT",
+                    "PATH_UNSUPPORTED", "PATH_LIMIT", "PATH_TYPE", "PATH_CHANGED",
+                    "ACL_INCOMPLETE", "PRIVATE_DIRECTORY", "OUTPUT_LIMIT", "TIMEOUT",
+                    "METADATA_INVALID", "OS_ERROR", "UNEXPECTED"} or len(raw) != 5):
             public["error_code"] = "RECEIPT_INVALID"
             return public, 1
         if digest(CERT) != CERT_SHA256:
@@ -77,9 +90,12 @@ def _seal_inner(private: Path, export: Path, inspect_outcome: str) -> tuple[dict
             temporary.replace(ciphertext)
         finally:
             temporary.unlink(missing_ok=True)
-        public.update(outcome="inspected_read_only", error_code=None,
-                      ciphertext_sha256=digest(ciphertext))
-        return public, 0
+        public["ciphertext_sha256"] = digest(ciphertext)
+        if inspect_outcome == "success":
+            public.update(outcome="inspected_read_only", error_code=None)
+            return public, 0
+        public["error_code"] = "INSPECT_FAILED"
+        return public, 1
     except (OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
         public["error_code"] = "SEAL_FAILED"
         return public, 1
