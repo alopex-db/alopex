@@ -7,7 +7,8 @@ import unittest
 from unittest.mock import patch
 
 from capture_signed_indexes import (inspect_resolver, ensure_base_image,
-                                    collect_resolver_results, check_final_budget, BASE)
+                                    collect_resolver_results, check_final_budget,
+                                    finish_capture, BASE)
 from common import Failure
 from lifecycle import Run
 
@@ -77,6 +78,57 @@ class ResolverPolicyTests(unittest.TestCase):
 
 
 class CaptureLifecycleTests(unittest.TestCase):
+    def test_final_budget_counts_collected_bytes_after_owned_cleanup(self):
+        class Budget:
+            initial = 500
+            config = {"reserve_bytes": 100, "stop_bytes": 2000}
+
+            def __init__(self, planned, current):
+                self.planned = planned
+                self.current = current
+
+            def used(self):
+                return self.current
+
+        capture_budget = Budget(250, 886)
+        host_budget = Budget(1000, 886)
+        events = []
+
+        class Docker:
+            def inspect(self, item):
+                events.append("inspect")
+
+            def remove(self, item):
+                events.append("remove")
+
+        class Run:
+            def clean(self, inspect, remove):
+                events.append("clean")
+                inspect(None)
+                remove(None)
+                capture_budget.current = host_budget.current = 693
+
+        samples = {}
+        finish_capture(Run(), Docker(), capture_budget, host_budget, samples)
+        self.assertEqual(events, ["clean", "inspect", "remove"])
+        self.assertEqual(samples["final_host"]["used_bytes"], 886)
+        self.assertEqual(samples["final_capture"]["used_bytes"], 693)
+        self.assertEqual(samples["post_cleanup"]["used_bytes"], 693)
+
+        capture_budget.current = host_budget.current = 886
+
+        class IncompleteCleanup:
+            def clean(self, inspect, remove):
+                events.append("clean")
+
+        with self.assertRaises(Failure) as growth:
+            finish_capture(IncompleteCleanup(), Docker(), capture_budget,
+                           host_budget, {})
+        self.assertEqual((growth.exception.code, growth.exception.detail,
+                          growth.exception.capture_stage),
+                         ("CAPACITY", "final_capture_growth",
+                          "capture_final_capture_budget"))
+
     def test_final_budget_records_private_sample_without_changing_limits(self):
         class Budget:
             initial = 500

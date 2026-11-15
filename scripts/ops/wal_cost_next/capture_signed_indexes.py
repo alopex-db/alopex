@@ -46,6 +46,22 @@ def check_final_budget(budget, gate, samples):
     return used
 
 
+def finish_capture(run, docker, capture_budget, budget, samples):
+    """Check host headroom, remove verified owned Docker bytes, then seal budgets."""
+    stage = "capture_final_host_budget"
+    try:
+        check_final_budget(budget, "final_host", samples)
+        stage = "capture_cleanup"
+        run.clean(docker.inspect, docker.remove)
+        stage = "capture_final_capture_budget"
+        check_final_budget(capture_budget, "final_capture", samples)
+        stage = "capture_post_cleanup_budget"
+        check_final_budget(budget, "post_cleanup", samples)
+    except BaseException as error:
+        error.capture_stage = stage
+        raise
+
+
 def admissible(profile, prior, module, private):
     """Check exact archived policy and fresh full-host budget before Docker growth."""
     require(private.resolve() == Path(os.environ["RUNNER_TEMP"]).resolve() /
@@ -265,18 +281,13 @@ def capture(module, prior, private):
                      str(HERE / "capture_ubuntu_indexes.sh"), "--output",
                      str(run.root / "proof")], timeout=300, log=run.root / "proof.log")
         require((run.root / "proof" / "proof.sha256").is_file(), "COLLECT")
-        stage = "capture_final_capture_budget"
-        check_final_budget(capture_budget, "final_capture", final_budget_samples)
         stage = "capture_final_host_budget"
-        check_final_budget(budget, "final_host", final_budget_samples)
-        stage = "capture_cleanup"
-        run.clean(docker.inspect, docker.remove)
-        stage = "capture_post_cleanup_budget"
-        check_final_budget(budget, "post_cleanup", final_budget_samples)
+        finish_capture(run, docker, capture_budget, budget, final_budget_samples)
         monitor.stop()
         return run.root
     except BaseException as error:
         monitor.cleanup_mode = True
+        stage = getattr(error, "capture_stage", stage)
         error.capture_stage = stage
         atomic_json(run.root / "failure.json", {
             "error_code": getattr(error, "code", "COMMAND"),
