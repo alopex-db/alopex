@@ -19,7 +19,7 @@ import tarfile
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "test-env"))
 from capacity import Budget  # noqa: E402
-from common import read_json, require  # noqa: E402
+from common import Failure, read_json, require  # noqa: E402
 
 LIMIT = 250_000_000
 SEAL_RESERVE = 2_000_000
@@ -33,6 +33,23 @@ OMITTED_FAILURE_FILES = ("collected", "collection.pending", "proof", "pull.log",
                          "bootstrap.private.json", "collection.json")
 FAILURE_CODES = frozenset(("CAPACITY", "COLLECT", "COMMAND", "IDENTITY",
                            "MEASUREMENT", "PREREQUISITE", "STATE", "TIMEOUT"))
+CAPACITY_GATES = frozenset(("raw_capture_size", "pre_seal_growth",
+                            "seal_headroom", "ciphertext_growth",
+                            "periodic_growth", "periodic_host_stop",
+                            "final_growth"))
+CAPACITY_NUMBERS = frozenset(("raw_bytes", "used_bytes", "baseline_bytes",
+                              "written_bytes", "next_chunk_bytes", "remaining_bytes",
+                              "headroom_bytes", "reserve_bytes", "stop_bytes"))
+
+
+def capacity(condition, gate, **numbers):
+    if not condition:
+        require(gate in CAPACITY_GATES and
+                all(key in CAPACITY_NUMBERS and type(value) is int
+                    for key, value in numbers.items()), "STATE")
+        error = Failure("CAPACITY", gate)
+        error.capacity_numbers = numbers
+        raise error
 
 
 def digest(path):
@@ -51,7 +68,7 @@ def audit(root):
         require(stat.S_ISDIR(mode) or stat.S_ISREG(mode), "COLLECT")
         if stat.S_ISREG(mode):
             size += entry.stat().st_size
-            require(size <= LIMIT, "CAPACITY")
+            capacity(size <= LIMIT, "raw_capture_size", raw_bytes=size)
     return size
 
 
@@ -86,7 +103,9 @@ def _seal_full(private, certificate, output):
     budget = Budget(profile["storage"])
     baseline = receipt["allocated_before_bytes"] if receipt is not None else None
     if baseline is not None:
-        require(budget.used() - baseline <= LIMIT, "CAPACITY")
+        used = budget.used()
+        capacity(used - baseline <= LIMIT, "pre_seal_growth",
+                 used_bytes=used, baseline_bytes=baseline)
     files = (["collected", "proof", "bootstrap.private.json", "capture-budget.private.json",
               "run.json", "collection.json"] if complete else
              [name for name in ("failure.json", "pull.log", "stage.log", "container.log",
@@ -107,7 +126,10 @@ def _seal_full(private, certificate, output):
         headroom = (profile["storage"]["stop_bytes"] -
                     profile["storage"]["reserve_bytes"] - used_before)
         remaining = min(LIMIT - growth, headroom) - SEAL_RESERVE
-        require(0 < remaining <= LIMIT - SEAL_RESERVE, "CAPACITY")
+        capacity(0 < remaining <= LIMIT - SEAL_RESERVE, "seal_headroom",
+                 raw_bytes=raw_bytes, used_bytes=used_before,
+                 baseline_bytes=baseline if baseline is not None else used_before,
+                 remaining_bytes=remaining, headroom_bytes=headroom)
         tar = subprocess.Popen(["tar", "-C", str(run), "-czf", "-", *files],
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                stdin=subprocess.DEVNULL, start_new_session=True)
@@ -130,20 +152,30 @@ def _seal_full(private, certificate, output):
                     chunk = os.read(openssl.stdout.fileno(), 1024 * 1024)
                     if not chunk:
                         break
-                    require(written + len(chunk) <= remaining, "CAPACITY")
+                    capacity(written + len(chunk) <= remaining, "ciphertext_growth",
+                             written_bytes=written, next_chunk_bytes=len(chunk),
+                             remaining_bytes=remaining)
                     stream.write(chunk)
                     written += len(chunk)
                 if time.monotonic() >= next_sample:
                     used = budget.used()
-                    require((baseline is None or used - baseline <= LIMIT) and
-                            used + profile["storage"]["reserve_bytes"] <
-                            profile["storage"]["stop_bytes"], "CAPACITY")
+                    if baseline is not None:
+                        capacity(used - baseline <= LIMIT, "periodic_growth",
+                                 used_bytes=used, baseline_bytes=baseline)
+                    capacity(used + profile["storage"]["reserve_bytes"] <
+                             profile["storage"]["stop_bytes"], "periodic_host_stop",
+                             used_bytes=used,
+                             reserve_bytes=profile["storage"]["reserve_bytes"],
+                             stop_bytes=profile["storage"]["stop_bytes"])
                     next_sample = time.monotonic() + 10
         tar.wait(timeout=10)
         openssl.wait(timeout=10)
         require(tar.returncode == 0 and openssl.returncode == 0 and
                 ciphertext.is_file() and ciphertext.stat().st_size > 0, "COLLECT")
-        require(baseline is None or budget.used() - baseline <= LIMIT, "CAPACITY")
+        if baseline is not None:
+            used = budget.used()
+            capacity(used - baseline <= LIMIT, "final_growth",
+                     used_bytes=used, baseline_bytes=baseline)
         public = {"schema": "alopex.signed-index-capture/v1", "case": "SIGNED_INDEX_CAPTURE",
                   "outcome": "passed" if complete else "failed",
                   "error_code": None if complete else "CAPTURE_FAILURE",
@@ -203,6 +235,14 @@ def _seal_failure(private, certificate, output, original):
         "retained": sorted(retained),
         "omitted_from_failure_receipt": list(OMITTED_FAILURE_FILES),
     }
+    gate = getattr(original, "detail", None)
+    numbers = getattr(original, "capacity_numbers", None)
+    if original_code == "CAPACITY" and gate in CAPACITY_GATES and isinstance(numbers, dict):
+        failure["capacity_gate"] = gate
+        failure["capacity_numbers"] = {
+            key: value for key, value in numbers.items()
+            if key in CAPACITY_NUMBERS and type(value) is int
+        }
     payload = io.BytesIO()
     with tarfile.open(fileobj=payload, mode="w:gz") as archive:
         for name, data in retained.items():

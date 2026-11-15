@@ -108,9 +108,94 @@ class SealRetryTests(unittest.TestCase):
                 failure = json.load(archive.extractfile("evidence/seal-failure.private.json"))
                 self.assertEqual(failure["seal_error_code"], "CAPACITY")
                 self.assertEqual(failure["seal_error_stage"], "full_seal")
+                self.assertEqual(failure["capacity_gate"], "raw_capture_size")
+                self.assertGreater(failure["capacity_numbers"]["raw_bytes"],
+                                   seal_module.LIMIT)
+                self.assertEqual(set(failure["capacity_numbers"]), {"raw_bytes"})
                 self.assertTrue(failure["full_evidence_incomplete"])
             self.assertNotIn("final_budget_samples",
                              (root / "export" / "public.json").read_text())
+            self.assertNotIn("capacity_gate",
+                             (root / "export" / "public.json").read_text())
+
+    def test_full_seal_distinguishes_precheck_and_headroom(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            private, _, certificate, _ = self.make_oversized_run(root)
+            output = root / "export"
+
+            class CurrentBudget:
+                def __init__(self, storage):
+                    self.used_bytes = storage["used_bytes"]
+
+                def used(self):
+                    return self.used_bytes
+
+            profile = json.loads((private / "profile.json").read_text())
+            for used, stop, expected_gate in (
+                    (100 + seal_module.LIMIT + 1, 40_000_000_000, "pre_seal_growth"),
+                    (100, 100 + 1 + seal_module.SEAL_RESERVE, "seal_headroom")):
+                profile["storage"]["used_bytes"] = used
+                profile["storage"]["stop_bytes"] = stop
+                (private / "profile.json").write_text(json.dumps(profile))
+                with patch.object(seal_module, "Budget", CurrentBudget), \
+                     patch.object(seal_module, "audit", return_value=1):
+                    with self.assertRaises(Failure) as raised:
+                        seal_module._seal_full(private, certificate, output)
+                self.assertEqual(raised.exception.code, "CAPACITY")
+                self.assertEqual(raised.exception.detail, expected_gate)
+                self.assertEqual(set(raised.exception.capacity_numbers) -
+                                 seal_module.CAPACITY_NUMBERS, set())
+
+    def test_full_seal_distinguishes_periodic_and_final_gates(self):
+        for gate in ("periodic_growth", "periodic_host_stop", "final_growth"):
+            with self.subTest(gate=gate), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                private, _, certificate, _ = self.make_oversized_run(root)
+                profile = json.loads((private / "profile.json").read_text())
+                if gate == "periodic_host_stop":
+                    profile["storage"]["stop_bytes"] = 100 + 1 + \
+                        seal_module.SEAL_RESERVE + 100
+                (private / "profile.json").write_text(json.dumps(profile))
+                stop = profile["storage"]["stop_bytes"]
+                sampled = (stop - 1 if gate == "periodic_host_stop" else
+                           100 + seal_module.LIMIT + 1)
+                values = iter((100, 100, sampled))
+
+                class SampledBudget:
+                    def __init__(self, storage):
+                        pass
+
+                    def used(self):
+                        return next(values)
+
+                active_stdout = [None]
+
+                def popen(args, **kwargs):
+                    child = FakeChild(b"x" if args[0] == "openssl" else b"")
+                    if args[0] == "openssl":
+                        active_stdout[0] = child.stdout
+                    return child
+
+                ticks = iter((0, 0, 0, 11))
+
+                def clock():
+                    return next(ticks, 11) if gate != "final_growth" else 0
+
+                with patch.object(seal_module, "Budget", SampledBudget), \
+                     patch.object(seal_module, "audit", return_value=1), \
+                     patch.object(seal_module.subprocess, "Popen", side_effect=popen), \
+                     patch.object(seal_module.select, "select",
+                                  side_effect=lambda r, w, x, t: (r, [], [])), \
+                     patch.object(seal_module.os, "read",
+                                  side_effect=lambda fd, n: active_stdout[0].read(n)), \
+                     patch.object(seal_module.time, "monotonic", side_effect=clock):
+                    with self.assertRaises(Failure) as raised:
+                        seal_module._seal_full(private, certificate, root / "export")
+                self.assertEqual(raised.exception.code, "CAPACITY")
+                self.assertEqual(raised.exception.detail, gate)
+                self.assertEqual(raised.exception.capacity_numbers["used_bytes"], sampled)
+                self.assertFalse((root / "export").exists())
 
     def test_successful_capture_with_unsealable_raw_is_reported_failed(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -285,6 +370,8 @@ class SealRetryTests(unittest.TestCase):
                 with self.assertRaises(Failure) as raised:
                     seal_module._seal_full(private, certificate, root / "export")
             self.assertEqual(raised.exception.code, "CAPACITY")
+            self.assertEqual(raised.exception.detail, "ciphertext_growth")
+            self.assertEqual(raised.exception.capacity_numbers["next_chunk_bytes"], 2)
             self.assertFalse((root / "export").exists())
             self.assertFalse(list(root.glob("export.pending-*")))
 
@@ -322,6 +409,7 @@ class SealRetryTests(unittest.TestCase):
                 with self.assertRaises(Failure) as raised:
                     seal_module._seal_full(private, certificate, root / "export")
             self.assertEqual(raised.exception.code, "CAPACITY")
+            self.assertEqual(raised.exception.detail, "seal_headroom")
             popen.assert_not_called()
             self.assertFalse((root / "export").exists())
 
