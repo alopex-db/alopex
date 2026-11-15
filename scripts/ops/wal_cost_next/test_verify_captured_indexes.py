@@ -79,6 +79,25 @@ class CaptureProofTests(unittest.TestCase):
                          hashlib.sha256(self.package).hexdigest())
         self.assertEqual(len(indexes), 1)
 
+    def test_accepts_signed_zero_byte_auxiliary_index(self):
+        empty_hash = hashlib.sha256(b"").hexdigest()
+        self.irelease.write_bytes(self.inrelease.replace(
+            b"SHA256:\n",
+            f"SHA256:\n {empty_hash} 0 main/debian-installer/binary-amd64/Packages\n".encode(),
+        ))
+        self.check()
+        self.assertEqual(signed_hashes(self.irelease.read_bytes())[
+            "main/debian-installer/binary-amd64/Packages"], (0, empty_hash))
+
+    def test_rejects_negative_signed_index_size(self):
+        self.irelease.write_bytes(self.inrelease.replace(
+            b"SHA256:\n",
+            ("SHA256:\n " + "0" * 64 +
+             " -1 main/debian-installer/binary-amd64/Packages\n").encode(),
+        ))
+        with self.assertRaisesRegex(ProofError, "invalid signed hash entry"):
+            signed_hashes(self.irelease.read_bytes())
+
     def test_rejects_index_hash_mismatch(self):
         (self.capture / "packages" / self.index).write_bytes(self.package + b"tamper")
         with self.assertRaisesRegex(ProofError, "signed hash mismatch"):

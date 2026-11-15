@@ -84,7 +84,7 @@ def signed_hashes(raw: bytes) -> dict[str, tuple[int, str]]:
         if in_sha and line.strip():
             fields = line.split()
             require(len(fields) == 3 and HEX.fullmatch(fields[0]) is not None and
-                    fields[1].isdigit() and int(fields[1]) > 0 and
+                    fields[1].isdigit() and
                     fields[2] not in rows and not fields[2].startswith("/") and
                     all(part not in ("", ".", "..") for part in fields[2].split("/")),
                     "invalid signed hash entry")
