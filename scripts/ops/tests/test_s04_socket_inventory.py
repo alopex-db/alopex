@@ -1,11 +1,14 @@
 """Source focused checks for the offline selected socket inventory."""
+import ast
 import importlib.util
 import json
 import os
+import pathlib
 from pathlib import Path
 import socket
 import stat
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -164,7 +167,47 @@ class SocketInventoryTests(unittest.TestCase):
         self.assertIn("--config-file", job)
         self.assertIn("daemon.resolve(strict=True) == daemon", precheckout)
         self.assertIn("'-sk' if root == daemon else '-skL'", precheckout)
+        self.assertIn("temp_snapshot = temp_entries(temp_areas)", precheckout)
+        self.assertIn("assert temp_entries(temp_areas) == temp_snapshot", precheckout)
+        self.assertIn("('TMPDIR', 'TMP', 'TEMP')", precheckout)
+        self.assertNotIn("('tmp', pathlib.Path('/tmp'))", precheckout)
         self.assertIn("s04_socket_inventory_seal.py", job)
+
+    def test_precheckout_temp_snapshot_selects_alopex_entries_and_detects_change(self):
+        source = (ROOT / ".github/workflows/alopex-performance.yml").read_text()
+        job = source.split("  s04_socket_inventory:\n", 1)[1].split("  inventory:\n", 1)[0]
+        script = textwrap.dedent(job.split("          python3 - <<'PY'\n", 1)[1]
+                                 .split("\n          PY", 1)[0])
+        function = next(node for node in ast.walk(ast.parse(script))
+                        if isinstance(node, ast.FunctionDef) and node.name == "temp_entries")
+        module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+        scope = {"os": os, "pathlib": pathlib}
+        exec(compile(module, "s04_precheckout", "exec"), scope)
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory) / "tmp"
+            var_tmp = Path(directory) / "var_tmp"
+            tmp.mkdir()
+            var_tmp.mkdir()
+            (tmp / "unrelated").mkdir()
+            selected = tmp / "alopex-owned"
+            selected.mkdir()
+            areas = ((tmp, "tmp"), (var_tmp, "var_tmp"))
+            before = scope["temp_entries"](areas)
+            self.assertEqual(len(before), 1)
+            self.assertEqual(before[0][0:2], ("tmp", "alopex-owned"))
+            selected_file = tmp / "alopex-file"
+            selected_file.write_text("sample")
+            self.assertNotEqual(scope["temp_entries"](areas), before)
+            selected_file.unlink()
+            (tmp / "another-unrelated").mkdir()
+            self.assertEqual(scope["temp_entries"](areas), before)
+            (var_tmp / "Alopex-new").mkdir()
+            self.assertNotEqual(scope["temp_entries"](areas), before)
+            (var_tmp / "Alopex-new").rmdir()
+            selected.rmdir()
+            selected.symlink_to(tmp / "missing")
+            with self.assertRaises(FileNotFoundError):
+                scope["temp_entries"](areas)
 
 
 if __name__ == "__main__":

@@ -67,7 +67,7 @@ jobs:
           ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           python3 - <<'PY'
-          import json, os, pathlib, re, subprocess, sys
+          import json, os, pathlib, re, stat, subprocess, sys, tempfile
           gate = 'SOURCE_BINDING'
           root_id = 'none'
           try:
@@ -76,6 +76,22 @@ jobs:
               assert e.get('ISSUE_NUMBER') == '684'
               assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_CONTROLLER_SHA', ''))
               assert e['EXPECTED_CONTROLLER_SHA'] == e['GITHUB_SHA']
+              runner_temp = pathlib.Path(e['RUNNER_TEMP']).resolve(strict=True)
+              assert runner_temp == pathlib.Path(e['RUNNER_TEMP']) and runner_temp.is_dir()
+              env_file = pathlib.Path(e['GITHUB_ENV'])
+              assert env_file.is_absolute()
+              for key in ('TMPDIR', 'TMP', 'TEMP'):
+                  os.environ[key] = str(runner_temp)
+              fd = os.open(env_file, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+              try:
+                  info = os.fstat(fd)
+                  assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                  payload = ''.join(f'{key}={runner_temp}\n' for key in
+                                    ('TMPDIR', 'TMP', 'TEMP')).encode()
+                  assert os.write(fd, payload) == len(payload)
+              finally:
+                  os.close(fd)
+              assert pathlib.Path(tempfile.gettempdir()).resolve(strict=True) == runner_temp
               gate = 'DAEMON_DISCOVERY'
               # A selected local daemon must be identifiable before checkout.
               # Unknown flags/configuration stop the inventory; no Docker API is queried.
@@ -121,12 +137,33 @@ jobs:
                                     configured_root or '/var/lib/docker')
               assert daemon.is_absolute() and daemon.resolve(strict=True) == daemon
               gate = 'ROOT_SCOPE'
+              temp_areas = ((pathlib.Path('/tmp'), 'tmp'),
+                            (pathlib.Path('/var/tmp'), 'var_tmp'))
+              def temp_entries(areas):
+                  selected = []
+                  for area, label in areas:
+                      if not area.exists():
+                          continue
+                      assert area.is_dir() and not area.is_symlink()
+                      with os.scandir(area) as entries:
+                          for entry in entries:
+                              if 'alopex' not in entry.name.lower():
+                                  continue
+                              info = entry.stat(follow_symlinks=False)
+                              actual = pathlib.Path(entry.path).resolve(strict=True)
+                              assert actual.is_absolute()
+                              selected.append((label, entry.name, info.st_dev, info.st_ino,
+                                               info.st_uid, str(actual)))
+                  return sorted(selected)
+              temp_snapshot = temp_entries(temp_areas)
               roots = [('workspace_parent', pathlib.Path(e['GITHUB_WORKSPACE']).parent),
-                       ('home', pathlib.Path.home()), ('runner_temp', pathlib.Path(e['RUNNER_TEMP'])),
-                       ('daemon', daemon), ('tmp', pathlib.Path('/tmp')),
-                       ('var_tmp', pathlib.Path('/var/tmp'))]
+                       ('home', pathlib.Path.home()), ('runner_temp', runner_temp),
+                       ('daemon', daemon)]
+              roots.extend((label, pathlib.Path(actual)) for label, _, _, _, _, actual
+                           in temp_snapshot)
               roots = [(name, p) for name, p in roots if p.exists()]
-              assert all(p.is_absolute() and p.is_dir() and not p.is_symlink() for _, p in roots)
+              assert all(p.is_absolute() and (p.is_dir() or p.is_file()) and
+                         not p.is_symlink() for _, p in roots)
               roots = [(name, p) for name, p in roots
                        if not any(p != q and p.is_relative_to(q) for _, q in roots)]
               total = 0
@@ -157,8 +194,10 @@ jobs:
                   gate = 'ROOT_FREE_SPACE'
                   fs = os.statvfs(root)
                   assert fs.f_bavail * fs.f_frsize > 1_000_000_000
-              gate = 'CAPACITY'
               root_id = 'none'
+              gate = 'TEMP_SNAPSHOT'
+              assert temp_entries(temp_areas) == temp_snapshot
+              gate = 'CAPACITY'
               assert total + 1_000_000_000 < 40_000_000_000
               print('{"case":"S04_SOCKET_STORAGE","outcome":"passed"}')
           except BaseException:
