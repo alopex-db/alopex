@@ -254,7 +254,7 @@ fn windows_reopens_fenced_container_above_default_copy_budget() {
         4096,
     )
     .with_inline_bytes(1024)
-    .with_activation_bytes(4096);
+    .with_activation_bytes(256 * 1024 * 1024);
     assert_eq!(reopen_options.container_fence_bytes, DEFAULT_FENCE_BYTES);
     {
         // Only the first fence is granted a copy budget equal to the actual file.
