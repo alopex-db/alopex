@@ -36,7 +36,8 @@ pub struct LsmOverflowConfig {
     pub(super) inline_bytes: usize,
     /// Temporary bytes for the atomic WAL v2-to-v3 copy.
     pub(super) activation_bytes: u64,
-    /// Temporary bytes for the atomic container header upgrade.
+    /// Temporary bytes for the first atomic container header upgrade.
+    /// Windows retries of an already-fenced container may copy the full file.
     pub(super) container_fence_bytes: u64,
     /// Maximum charged bytes retained in the private recovery memtable.
     pub(super) replay_bytes: usize,
@@ -155,7 +156,8 @@ impl LsmOverflowConfig {
         self.activation_bytes = bytes;
         self
     }
-    /// Bound the temporary container copy used to publish the reader fence.
+    /// Bound the first temporary container copy used to publish the reader fence.
+    /// Windows retries of an already-fenced container may copy the full file.
     pub fn with_container_fence_bytes(mut self, bytes: u64) -> Self {
         self.container_fence_bytes = bytes;
         self
