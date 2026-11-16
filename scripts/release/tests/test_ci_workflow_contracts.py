@@ -224,9 +224,10 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertIn("9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f", dockerfile)
         downloader = (action / "download.sh").read_text(encoding="utf-8")
         self.assertIn("https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/", downloader)
+        self.assertIn("https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar", downloader)
         self.assertIn("https://api.github.com/repos/*/releases/assets/*", downloader)
         self.assertLess(dockerfile.index("sh /download.sh"), dockerfile.index("tar -xzvf"))
-        self.assertIn("releases/assets/184694200", workflow)
+        self.assertIn("https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar", workflow)
         self.assertIn("936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88", workflow)
         self.assertIn("bee4a54f3ee3d4afc347c3240ec2d9e93b075104", workflow)
         for argument in ("command: check bans", "arguments: --all-features --locked",
