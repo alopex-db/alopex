@@ -330,7 +330,7 @@ pub struct PyWalOverflowOptions {
 impl PyWalOverflowOptions {
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (payload_bytes, spool_bytes, directory_bytes, replay_bytes, *, key_bytes = 1048576, value_bytes = 16777216, fragment_bytes = 65536, wal_segment_bytes = 67108864, wal_segments = 8, inline_bytes = 16777216, activation_bytes = 1073741824, container_fence_bytes = 67108864))]
+    #[pyo3(signature = (payload_bytes, spool_bytes, directory_bytes, replay_bytes, *, key_bytes = 1048576, value_bytes = 16777216, fragment_bytes = 65536, wal_segment_bytes = 67108864, wal_segments = 8, inline_bytes = 16777216, activation_bytes = 1073741824, container_fence_bytes = None))]
     fn new(
         payload_bytes: u64,
         spool_bytes: u64,
@@ -343,7 +343,7 @@ impl PyWalOverflowOptions {
         wal_segments: usize,
         inline_bytes: usize,
         activation_bytes: u64,
-        container_fence_bytes: u64,
+        container_fence_bytes: Option<u64>,
     ) -> PyResult<Self> {
         use alopex_core::lsm::{
             overflow::LsmOverflowConfig,
@@ -359,8 +359,11 @@ impl PyWalOverflowOptions {
             replay_bytes,
         )
         .with_inline_bytes(inline_bytes)
-        .with_activation_bytes(activation_bytes)
-        .with_container_fence_bytes(container_fence_bytes);
+        .with_activation_bytes(activation_bytes);
+        let limits = match container_fence_bytes {
+            Some(bytes) => limits.with_container_fence_bytes(bytes),
+            None => limits,
+        };
         Ok(Self {
             limits,
             wal: WalConfig {

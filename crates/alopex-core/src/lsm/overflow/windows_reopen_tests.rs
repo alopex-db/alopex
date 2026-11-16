@@ -4,7 +4,7 @@ use super::*;
 use crate::lsm::sstable::CompressionType;
 use crate::storage::format::{FileHeader, HEADER_SIZE};
 
-const DEFAULT_FENCE_BYTES: u64 = 64 * 1024 * 1024;
+const OLD_DEFAULT_FENCE_BYTES: u64 = 64 * 1024 * 1024;
 const VALUE_BYTES: usize = 33 * 1024 * 1024;
 
 fn config() -> LsmKVConfig {
@@ -44,7 +44,7 @@ fn header(path: &Path) -> FileHeader {
 }
 
 #[test]
-fn windows_reopens_fenced_container_above_default_copy_budget() {
+fn windows_fences_and_reopens_container_above_old_default_copy_budget() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("large.alopex.d");
     let container = dir.path().join("large.alopex");
@@ -58,7 +58,7 @@ fn windows_reopens_fenced_container_above_default_copy_budget() {
         store.converge().unwrap();
     }
     let container_bytes = fs::metadata(&container).unwrap().len();
-    assert!(container_bytes > DEFAULT_FENCE_BYTES);
+    assert!(container_bytes > OLD_DEFAULT_FENCE_BYTES);
     assert_eq!(header(&container).version, FileVersion::CURRENT);
 
     let reopen_options = LsmOverflowConfig::new(
@@ -70,11 +70,10 @@ fn windows_reopens_fenced_container_above_default_copy_budget() {
     )
     .with_inline_bytes(1024)
     .with_activation_bytes(256 * 1024 * 1024);
-    assert_eq!(reopen_options.container_fence_bytes, DEFAULT_FENCE_BYTES);
+    assert_eq!(reopen_options.container_fence_bytes, None);
     {
-        // Only the first fence is granted a copy budget equal to the actual file.
-        let first_fence = reopen_options.with_container_fence_bytes(container_bytes);
-        let (store, _) = LsmKV::open_with_overflow(&data, cfg.clone(), first_fence).unwrap();
+        // The first fence derives its copy budget from the actual file.
+        let (store, _) = LsmKV::open_with_overflow(&data, cfg.clone(), reopen_options).unwrap();
         assert_eq!(value(&store, 0), Some(vec![7; VALUE_BYTES]));
         assert_eq!(value(&store, 1), Some(vec![9; VALUE_BYTES]));
     }

@@ -51,7 +51,7 @@ commands = [
     ("container-fence", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                         "--lib", "lsm::overflow::fence_tests::"]),
     ("large-container-reopen", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
-                                "--lib", "lsm::overflow::windows_reopen_tests::windows_reopens_fenced_container_above_default_copy_budget",
+                                "--lib", "lsm::overflow::windows_reopen_tests::windows_fences_and_reopens_container_above_old_default_copy_budget",
                                 "--", "--exact"]),
     ("staging-recovery", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                          "--lib", "storage::publication::staging::tests::"]),

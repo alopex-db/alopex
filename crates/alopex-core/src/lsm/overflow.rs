@@ -36,9 +36,9 @@ pub struct LsmOverflowConfig {
     pub(super) inline_bytes: usize,
     /// Temporary bytes for the atomic WAL v2-to-v3 copy.
     pub(super) activation_bytes: u64,
-    /// Temporary bytes for the first atomic container header upgrade.
-    /// Windows retries of an already-fenced container may copy the full file.
-    pub(super) container_fence_bytes: u64,
+    /// Optional temporary-copy cap for the first container header upgrade.
+    /// By default, the copy budget is the current file length, not a fixed size.
+    pub(super) container_fence_bytes: Option<u64>,
     /// Maximum charged bytes retained in the private recovery memtable.
     pub(super) replay_bytes: usize,
 }
@@ -124,9 +124,9 @@ impl OverflowState {
 
 impl LsmOverflowConfig {
     /// Set transaction, spool-directory and private replay budgets explicitly.
-    /// Defaults reserve at most 16 MiB per legacy inline record, 1 GiB for WAL
-    /// activation and 64 MiB for a container fence copy. Builders can tighten or
-    /// raise those independent bounds; open validates the resulting options.
+    /// Defaults reserve at most 16 MiB per legacy inline record and 1 GiB for
+    /// WAL activation. A container fence copies its current file length unless
+    /// the caller sets an explicit cap; open validates the resulting options.
     pub fn new(
         spool: SpoolLimits,
         operations: OperationLimits,
@@ -142,7 +142,7 @@ impl LsmOverflowConfig {
             replay_bytes,
             inline_bytes: 16 * 1024 * 1024,
             activation_bytes: 1024 * 1024 * 1024,
-            container_fence_bytes: 64 * 1024 * 1024,
+            container_fence_bytes: None,
         }
     }
 
@@ -156,10 +156,10 @@ impl LsmOverflowConfig {
         self.activation_bytes = bytes;
         self
     }
-    /// Bound the first temporary container copy used to publish the reader fence.
-    /// Windows retries of an already-fenced container may copy the full file.
+    /// Set an explicit cap on the first container copy used to publish the
+    /// reader fence. Windows retries of an already-fenced file copy its full size.
     pub fn with_container_fence_bytes(mut self, bytes: u64) -> Self {
-        self.container_fence_bytes = bytes;
+        self.container_fence_bytes = Some(bytes);
         self
     }
 
@@ -190,7 +190,15 @@ impl LsmOverflowConfig {
         publication_directories: &[PathBuf],
     ) -> Result<WalWriter> {
         if let Some(path) = container {
-            fence_container(path, data, last_lsn, self.container_fence_bytes)?;
+            let budget = match self.container_fence_bytes {
+                Some(bytes) => bytes,
+                None => match fs::metadata(path) {
+                    Ok(metadata) => metadata.len().max(4096),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => 4096,
+                    Err(error) => return Err(error.into()),
+                },
+            };
+            fence_container(path, data, last_lsn, budget)?;
         }
         fault(3)?;
         let spool = data.join(SPOOL_DIRECTORY);
