@@ -220,6 +220,58 @@ fn container_fence_survives_converge_and_container_only_rehydrate() {
     assert_eq!(value(&store, 0), None);
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_reopens_fenced_container_above_default_copy_budget() {
+    use crate::lsm::sstable::CompressionType;
+
+    const DEFAULT_FENCE_BYTES: u64 = 64 * 1024 * 1024;
+    const VALUE_BYTES: usize = 33 * 1024 * 1024;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("large.alopex.d");
+    let container = dir.path().join("large.alopex");
+    let mut cfg = config();
+    cfg.wal.segment_size = 40 * 1024 * 1024;
+    cfg.wal.max_segments = 4;
+    // Keep the fixture's physical bytes above 64 MiB on every CI feature set.
+    cfg.sstable.compression = CompressionType::None;
+    {
+        let (store, _) = LsmKV::open_with_config(&data, cfg.clone()).unwrap();
+        write(&store, &[(0, Some(vec![7; VALUE_BYTES]))]).unwrap();
+        write(&store, &[(1, Some(vec![9; VALUE_BYTES]))]).unwrap();
+        store.converge().unwrap();
+    }
+    let container_bytes = fs::metadata(&container).unwrap().len();
+    assert!(container_bytes > DEFAULT_FENCE_BYTES);
+    assert_eq!(header(&container).version, FileVersion::CURRENT);
+
+    let reopen_options = LsmOverflowConfig::new(
+        SpoolLimits::new(512, 4096, 7).unwrap(),
+        OperationLimits::new(512, 8, 64).unwrap(),
+        16384,
+        7,
+        4096,
+    )
+    .with_inline_bytes(1024)
+    .with_activation_bytes(4096);
+    assert_eq!(reopen_options.container_fence_bytes, DEFAULT_FENCE_BYTES);
+    {
+        // Only the first fence is granted a copy budget equal to the actual file.
+        let first_fence = reopen_options.with_container_fence_bytes(container_bytes);
+        let (store, _) = LsmKV::open_with_overflow(&data, cfg.clone(), first_fence).unwrap();
+        assert_eq!(value(&store, 0), Some(vec![7; VALUE_BYTES]));
+        assert_eq!(value(&store, 1), Some(vec![9; VALUE_BYTES]));
+    }
+    assert_eq!(header(&container).version, FileVersion::WAL_OVERFLOW);
+
+    // Reopening uses the product's default 64 MiB fence budget, not the larger
+    // first-fence allowance. The already-published data must remain readable.
+    let (store, _) = LsmKV::open_with_overflow(&data, cfg, reopen_options).unwrap();
+    assert_eq!(value(&store, 0), Some(vec![7; VALUE_BYTES]));
+    assert_eq!(value(&store, 1), Some(vec![9; VALUE_BYTES]));
+}
+
 #[test]
 fn fence_failures_never_activate_wal_and_retry_preserves_data() {
     for stage in [1, 2, 3, 4] {

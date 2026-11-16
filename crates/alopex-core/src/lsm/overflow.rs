@@ -318,6 +318,15 @@ fn fence_container(path: &Path, data: &Path, last_lsn: u64, budget: u64) -> Resu
     let reader = AlopexFileReader::open(FileSource::Path(path.to_path_buf()))?;
     let mut header = *reader.header();
     drop(reader);
+    // A published Windows fence still needs a full copy and write-through
+    // replacement on retry. The caller's reservation limits the first fence;
+    // it must not prevent reopening a container that is already fenced.
+    #[cfg(windows)]
+    let budget = if header.version == FileVersion::WAL_OVERFLOW {
+        budget.max(fs::metadata(path)?.len())
+    } else {
+        budget
+    };
     let temporary = path.with_extension("overflow-fence");
     let mut alternate = header;
     alternate.version = if header.version == FileVersion::WAL_OVERFLOW {
