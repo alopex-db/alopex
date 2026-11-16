@@ -1,6 +1,8 @@
 """The fallback seal can retry after an interrupted first encryption."""
 import io
 import json
+import shutil
+import subprocess
 import tarfile
 from pathlib import Path
 import sys
@@ -298,7 +300,7 @@ class SealRetryTests(unittest.TestCase):
                 nonlocal calls
                 calls += 1
                 commands.append(args)
-                if calls == 2:
+                if calls == 3:
                     raise OSError("interrupted encryption")
                 return FakeChild(b"synthetic ciphertext" if args[0] == "openssl" else b"")
 
@@ -324,8 +326,60 @@ class SealRetryTests(unittest.TestCase):
             self.assertEqual(result["outcome"], "failed")
             self.assertEqual((output / "private-evidence.cms").read_bytes(),
                              b"synthetic ciphertext")
-            self.assertIn("proof.log", commands[2])
-            self.assertIn("collected", commands[2])
+            self.assertEqual(commands[1], ["gzip", "-9"])
+            self.assertIn("proof.log", commands[3])
+            self.assertIn("collected", commands[3])
+            self.assertFalse(list(root.glob("export.pending-*")))
+
+    @unittest.skipUnless(all(shutil.which(name) for name in ("tar", "gzip", "openssl")),
+                         "tar, gzip, and openssl are required")
+    def test_full_seal_gzip9_cms_round_trip_preserves_complete_capture(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            private = root / "private"
+            run = private / "runs" / "run-trace-resolve"
+            collected = run / "collected"
+            proof = run / "proof"
+            collected.mkdir(parents=True)
+            proof.mkdir()
+            (private / "profile.json").write_text(json.dumps({
+                "run_id": "run", "storage": {"reserve_bytes": 1,
+                                              "stop_bytes": 40_000_000_000}}))
+            (run / "run.json").write_text(json.dumps({"phase": "deleted"}))
+            (run / "capture-budget.private.json").write_text(json.dumps({
+                "capture_limit_bytes": seal_module.LIMIT,
+                "allocated_before_bytes": 100}))
+            for name in (private / "profile.json", run / "run.json",
+                         run / "capture-budget.private.json"):
+                name.chmod(0o600)
+            (run / "bootstrap.private.json").write_text("bootstrap evidence")
+            (run / "collection.json").write_text("collection evidence")
+            (collected / "capture.status").write_text("capture-complete\n")
+            (collected / "index.bin").write_bytes(b"index payload" * 1000)
+            (proof / "proof.sha256").write_text("signed proof")
+            certificate = root / "cert.pem"
+            key = root / "key.pem"
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048",
+                            "-nodes", "-subj", "/CN=seal-test", "-days", "1",
+                            "-keyout", str(key), "-out", str(certificate)],
+                           check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+            with patch.object(seal_module, "Budget", FakeBudget):
+                result = seal_module._seal_full(private, certificate, root / "export")
+            self.assertEqual(result["outcome"], "passed")
+            ciphertext = root / "export" / "private-evidence.cms"
+            self.assertEqual(result["evidence_sha256"], seal_module.digest(ciphertext))
+            decrypted = subprocess.run(
+                ["openssl", "cms", "-decrypt", "-binary", "-inform", "DER",
+                 "-in", str(ciphertext), "-recip", str(certificate),
+                 "-inkey", str(key)], check=True, capture_output=True).stdout
+            self.assertTrue(decrypted.startswith(b"\x1f\x8b"))
+            with tarfile.open(fileobj=io.BytesIO(decrypted), mode="r:gz") as archive:
+                self.assertEqual(archive.extractfile("collected/index.bin").read(),
+                                 b"index payload" * 1000)
+                self.assertEqual(archive.extractfile("proof/proof.sha256").read(),
+                                 b"signed proof")
+                self.assertIn("capture-budget.private.json", archive.getnames())
             self.assertFalse(list(root.glob("export.pending-*")))
 
     def test_sealer_uses_hard_file_cap_for_ciphertext(self):

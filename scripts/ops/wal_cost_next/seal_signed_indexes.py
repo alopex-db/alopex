@@ -119,7 +119,7 @@ def _seal_full(private, certificate, output):
     staging = Path(tempfile.mkdtemp(prefix=output.name + ".pending-", dir=output.parent))
     staged_identity = (staging.stat().st_dev, staging.stat().st_ino)
     ciphertext = staging / "private-evidence.cms"
-    tar = openssl = None
+    tar = gzip = openssl = None
     try:
         used_before = budget.used()
         growth = max(raw_bytes, 0, used_before - baseline) if baseline is not None else raw_bytes
@@ -130,16 +130,21 @@ def _seal_full(private, certificate, output):
                  raw_bytes=raw_bytes, used_bytes=used_before,
                  baseline_bytes=baseline if baseline is not None else used_before,
                  remaining_bytes=remaining, headroom_bytes=headroom)
-        tar = subprocess.Popen(["tar", "-C", str(run), "-czf", "-", *files],
+        tar = subprocess.Popen(["tar", "-C", str(run), "-cf", "-", *files],
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                stdin=subprocess.DEVNULL, start_new_session=True)
         assert tar.stdout is not None
+        gzip = subprocess.Popen(["gzip", "-9"], stdin=tar.stdout,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+        tar.stdout.close()
+        assert gzip.stdout is not None
         openssl = subprocess.Popen(["openssl", "cms", "-encrypt", "-aes-256-cbc",
                                     "-binary", "-outform", "DER", "-in", "/dev/stdin",
-                                    str(certificate)], stdin=tar.stdout,
+                                    str(certificate)], stdin=gzip.stdout,
                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                    start_new_session=True)
-        tar.stdout.close()
+        gzip.stdout.close()
         assert openssl.stdout is not None
         deadline = time.monotonic() + 300
         next_sample = time.monotonic() + 10
@@ -169,8 +174,10 @@ def _seal_full(private, certificate, output):
                              stop_bytes=profile["storage"]["stop_bytes"])
                     next_sample = time.monotonic() + 10
         tar.wait(timeout=10)
+        gzip.wait(timeout=10)
         openssl.wait(timeout=10)
-        require(tar.returncode == 0 and openssl.returncode == 0 and
+        require(tar.returncode == 0 and gzip.returncode == 0 and
+                openssl.returncode == 0 and
                 ciphertext.is_file() and ciphertext.stat().st_size > 0, "COLLECT")
         if baseline is not None:
             used = budget.used()
@@ -185,7 +192,7 @@ def _seal_full(private, certificate, output):
         staging.rename(output)
         return public
     except BaseException:
-        for child in (tar, openssl):
+        for child in (tar, gzip, openssl):
             if child is not None and child.poll() is None:
                 try:
                     child.terminate()
@@ -195,6 +202,9 @@ def _seal_full(private, certificate, output):
                     child.wait(timeout=10)
         raise
     finally:
+        for child in (tar, gzip, openssl):
+            if child is not None and child.stdout is not None:
+                child.stdout.close()
         if staging.exists():
             info = staging.lstat()
             require(stat.S_ISDIR(info.st_mode) and
