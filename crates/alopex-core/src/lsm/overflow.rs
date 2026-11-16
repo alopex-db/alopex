@@ -671,6 +671,9 @@ fn fault(_stage: u8) -> Result<()> {
 #[cfg(all(test, not(windows)))]
 mod tests;
 
+#[cfg(all(test, windows))]
+mod windows_reopen_tests;
+
 #[cfg(test)]
 mod fence_tests;
 
