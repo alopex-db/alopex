@@ -161,7 +161,7 @@ class SealRetryTests(unittest.TestCase):
                 (private / "profile.json").write_text(json.dumps(profile))
                 stop = profile["storage"]["stop_bytes"]
                 sampled = (stop - 1 if gate == "periodic_host_stop" else
-                           100 + seal_module.LIMIT + 1)
+                           100 + seal_module.SEAL_LIMIT + 1)
                 values = iter((100, 100, sampled))
 
                 class SampledBudget:
@@ -249,11 +249,11 @@ class SealRetryTests(unittest.TestCase):
             self.assertFalse((root / "export").exists())
             self.assertFalse(list(root.glob("export.pending-*")))
 
-    def test_failure_receipt_refuses_exhausted_capture_allocation(self):
+    def test_failure_receipt_refuses_exhausted_seal_allocation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             private, _, certificate, budget = self.make_oversized_run(
-                root, used=100 + seal_module.LIMIT + 1)
+                root, used=100 + seal_module.SEAL_LIMIT + 1)
             with patch.object(seal_module, "Budget", budget), \
                  patch.object(seal_module.subprocess, "run", return_value=SimpleNamespace(
                      returncode=0, stdout=b"encrypted failure receipt")):
@@ -382,7 +382,7 @@ class SealRetryTests(unittest.TestCase):
                 self.assertIn("capture-budget.private.json", archive.getnames())
             self.assertFalse(list(root.glob("export.pending-*")))
 
-    def test_sealer_uses_hard_file_cap_for_ciphertext(self):
+    def test_sealer_allows_a_second_copy_but_caps_ciphertext(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             private = root / "private"
@@ -414,15 +414,25 @@ class SealRetryTests(unittest.TestCase):
                     pass
 
                 def used(self):
-                    return 100 + seal_module.LIMIT - seal_module.SEAL_RESERVE - 1
+                    return 100 + seal_module.LIMIT
 
             active_stdout = [None]
             with patch.object(seal_module, "Budget", NearCapBudget), \
+                 patch.object(seal_module, "audit", return_value=1), \
                  patch.object(seal_module.subprocess, "Popen", side_effect=popen), \
                  patch.object(seal_module.select, "select", side_effect=lambda r, w, x, t: (r, [], [])), \
                  patch.object(seal_module.os, "read", side_effect=lambda fd, n: active_stdout[0].read(n)):
-                with self.assertRaises(Failure) as raised:
-                    seal_module._seal_full(private, certificate, root / "export")
+                # The old combined 250 MB envelope would reject this two-byte
+                # ciphertext even though the raw capture stayed at its cap.
+                with patch.object(seal_module, "SEAL_LIMIT",
+                                  seal_module.LIMIT + seal_module.SEAL_RESERVE + 2):
+                    result = seal_module._seal_full(private, certificate, root / "fits")
+                self.assertEqual(result["outcome"], "failed")
+                self.assertEqual((root / "fits" / "private-evidence.cms").read_bytes(), b"xx")
+                with patch.object(seal_module, "SEAL_LIMIT",
+                                  seal_module.LIMIT + seal_module.SEAL_RESERVE + 1):
+                    with self.assertRaises(Failure) as raised:
+                        seal_module._seal_full(private, certificate, root / "export")
             self.assertEqual(raised.exception.code, "CAPACITY")
             self.assertEqual(raised.exception.detail, "ciphertext_growth")
             self.assertEqual(raised.exception.capacity_numbers["next_chunk_bytes"], 2)

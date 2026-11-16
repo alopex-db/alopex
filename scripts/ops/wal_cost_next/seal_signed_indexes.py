@@ -22,6 +22,9 @@ from capacity import Budget  # noqa: E402
 from common import Failure, read_json, require  # noqa: E402
 
 LIMIT = 250_000_000
+# The raw capture stays within LIMIT. Sealing needs a second full-size copy
+# when signed indexes compress poorly, plus bounded archive/CMS overhead.
+SEAL_LIMIT = 512_000_000
 SEAL_RESERVE = 2_000_000
 FAILURE_FILE_LIMIT = 256_000
 FAILURE_LOG_TAIL_LIMIT = 65_536
@@ -125,8 +128,8 @@ def _seal_full(private, certificate, output):
         growth = max(raw_bytes, 0, used_before - baseline) if baseline is not None else raw_bytes
         headroom = (profile["storage"]["stop_bytes"] -
                     profile["storage"]["reserve_bytes"] - used_before)
-        remaining = min(LIMIT - growth, headroom) - SEAL_RESERVE
-        capacity(0 < remaining <= LIMIT - SEAL_RESERVE, "seal_headroom",
+        remaining = min(SEAL_LIMIT - growth, headroom) - SEAL_RESERVE
+        capacity(0 < remaining <= SEAL_LIMIT - SEAL_RESERVE, "seal_headroom",
                  raw_bytes=raw_bytes, used_bytes=used_before,
                  baseline_bytes=baseline if baseline is not None else used_before,
                  remaining_bytes=remaining, headroom_bytes=headroom)
@@ -165,7 +168,7 @@ def _seal_full(private, certificate, output):
                 if time.monotonic() >= next_sample:
                     used = budget.used()
                     if baseline is not None:
-                        capacity(used - baseline <= LIMIT, "periodic_growth",
+                        capacity(used - baseline <= SEAL_LIMIT, "periodic_growth",
                                  used_bytes=used, baseline_bytes=baseline)
                     capacity(used + profile["storage"]["reserve_bytes"] <
                              profile["storage"]["stop_bytes"], "periodic_host_stop",
@@ -181,7 +184,7 @@ def _seal_full(private, certificate, output):
                 ciphertext.is_file() and ciphertext.stat().st_size > 0, "COLLECT")
         if baseline is not None:
             used = budget.used()
-            capacity(used - baseline <= LIMIT, "final_growth",
+            capacity(used - baseline <= SEAL_LIMIT, "final_growth",
                      used_bytes=used, baseline_bytes=baseline)
         public = {"schema": "alopex.signed-index-capture/v1", "case": "SIGNED_INDEX_CAPTURE",
                   "outcome": "passed" if complete else "failed",
@@ -281,7 +284,7 @@ def _seal_failure(private, certificate, output, original):
     require(baseline is None or type(baseline) is int, "IDENTITY")
     used = budget.used()
     growth = len(encrypted.stdout) + SEAL_RESERVE
-    require((baseline is None or used - baseline + growth <= LIMIT) and
+    require((baseline is None or used - baseline + growth <= SEAL_LIMIT) and
             used + profile["storage"]["reserve_bytes"] + growth <
             profile["storage"]["stop_bytes"], "CAPACITY")
     staging = Path(tempfile.mkdtemp(prefix=output.name + ".pending-", dir=output.parent))
@@ -294,7 +297,7 @@ def _seal_failure(private, certificate, output, original):
                   "evidence_sha256": digest(ciphertext)}
         (staging / "public.json").write_text(json.dumps(public, sort_keys=True) + "\n")
         used = budget.used()
-        require((baseline is None or used - baseline <= LIMIT) and
+        require((baseline is None or used - baseline <= SEAL_LIMIT) and
                 used + profile["storage"]["reserve_bytes"] <
                 profile["storage"]["stop_bytes"], "CAPACITY")
         require(not output.exists() and not output.is_symlink(), "COLLECT")
