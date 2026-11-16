@@ -77,6 +77,31 @@ def verify_frozen_checkout(repo, config, expected_sha):
             'frozen limits differ')
 
 
+def verify_product_artifacts(config):
+    """Reject missing pinned wheels before the costly same-run qualification."""
+    for subject in ('before', 'candidate'):
+        producer = config['products'][subject]
+        endpoint = 'repos/alopex-db/alopex/actions/runs/' + str(producer['run'])
+        run = subprocess.run(['gh', 'api', endpoint], stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True, timeout=30, check=True)
+        record = json.loads(run.stdout)
+        require(record['head_sha'] == producer['controller'] and
+                record['status'] == 'completed' and record['conclusion'] == 'success' and
+                record['event'] == 'workflow_dispatch' and
+                record['head_repository']['full_name'] == 'alopex-db/alopex',
+                f'producer differs: {subject}')
+        response = subprocess.run(['gh', 'api', endpoint + '/artifacts'],
+                                  stdin=subprocess.DEVNULL, capture_output=True,
+                                  text=True, timeout=30, check=True)
+        matches = [item for item in json.loads(response.stdout)['artifacts']
+                   if item['name'] == producer['artifact_name']]
+        require(len(matches) == 1 and matches[0]['id'] == producer['artifact_id'] and
+                not matches[0]['expired'] and
+                matches[0]['digest'] == producer['artifact_digest'] and
+                0 < matches[0]['size_in_bytes'] < 64_000_000,
+                f'artifact differs: {subject}')
+
+
 def verify_qualification(public, private, module, run_id, facts):
     require(public['schema'] == 'alopex.hosted-test-env-qualification/v1' and
             public['case'] == 'HOST_QUALIFICATION' and public['outcome'] == 'passed' and
@@ -164,6 +189,7 @@ def run(args):
     verify_frozen_checkout(args.frozen_checkout, config, config['sources']['scripts/ops/wal_cost_contract.py'])
     require(head(args.qualification_checkout) == os.environ['GITHUB_SHA'] ==
             os.environ['EXPECTED_CONTROLLER_SHA'], '#804 source checkout differs')
+    verify_product_artifacts(config)
     module = load_qualification_module(args.qualification_checkout)
     module.verified_controller()
     private = Path(os.environ['RUNNER_TEMP']) / 'alopex-804-qualification'
