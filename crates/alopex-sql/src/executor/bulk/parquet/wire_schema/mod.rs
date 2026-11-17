@@ -17,6 +17,9 @@ pub trait TSerializable: Sized {
 }
 
 #[cfg(test)]
+mod golden_tests;
+
+#[cfg(test)]
 mod tests {
     use super::TSerializable;
     use super::format::{FileMetaData, KeyValue, SortingColumn, Statistics};

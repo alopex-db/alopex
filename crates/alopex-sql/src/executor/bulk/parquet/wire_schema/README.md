@@ -18,6 +18,12 @@ The `generated_wire_declarations_match_upstream_57_3_2` unit test and
 `scripts/ci/test_parquet_wire_source_contract.py` enforce this comparison for
 all 66 generated serializable types. The checksum pins the declarations; it is
 not a runtime compatibility test for every type under the current Thrift crate.
+`golden_tests.rs` adds compact-protocol decode/encode cases derived from the
+upstream 57.3.2 declarations for every named struct, union variant and enum
+discriminant. Regenerate it offline with
+`python3 scripts/ci/generate_parquet_wire_goldens.py PATH_TO_UPSTREAM_FORMAT_RS`;
+the generator rejects any upstream file without the pinned checksum. The
+upstream Parquet crate and its older Thrift dependency are not test dependencies.
 
 The old codec-free `parquet-wire` dependency still required vulnerable Thrift
 0.17.0 (RUSTSEC-2026-0435). Newer Parquet releases removed these public wire
