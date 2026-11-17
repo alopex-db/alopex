@@ -1001,6 +1001,31 @@ impl PlacementCatalog {
                     PlacementLifecycleState::Tombstoned,
                 );
             }
+            TableLifecycleEffect::Renamed {
+                old_ref,
+                new_ref,
+                table_id,
+            } => {
+                let mut changed_indexes = Vec::new();
+                for (index, placement) in self.placements.iter_mut().enumerate() {
+                    if placement.table_ref == old_ref && placement.table_id == table_id {
+                        placement.table_ref = new_ref.clone();
+                        for target in &mut placement.targets {
+                            if target.table_ref == old_ref && target.table_id == table_id {
+                                target.table_ref = new_ref.clone();
+                            }
+                        }
+                        changed_indexes.push(index);
+                    } else if placement.table_ref == new_ref
+                        && placement.table_id != table_id
+                        && placement.lifecycle_state != PlacementLifecycleState::Tombstoned
+                    {
+                        placement.lifecycle_state = PlacementLifecycleState::Stale;
+                        changed_indexes.push(index);
+                    }
+                }
+                self.bump_changed_placements(changed_indexes);
+            }
             TableLifecycleEffect::SchemaChanged {
                 table_ref,
                 table_id,
@@ -1935,6 +1960,11 @@ pub enum TableLifecycleEffect {
     },
     Dropped {
         table_ref: TableRef,
+        table_id: TableId,
+    },
+    Renamed {
+        old_ref: TableRef,
+        new_ref: TableRef,
         table_id: TableId,
     },
     SchemaChanged {
@@ -3211,6 +3241,44 @@ mod tests {
             repeated.placements[0].lifecycle_state,
             PlacementLifecycleState::Tombstoned
         );
+    }
+
+    #[test]
+    fn table_rename_moves_active_placement_and_routing_targets() {
+        let old_ref = TableRef::new("default.public.users");
+        let new_ref = TableRef::new("default.public.accounts");
+        let mut catalog = PlacementCatalog::from_placements(1, vec![users_placement(7, 1)]);
+        let before = catalog
+            .active_placement_for(&old_ref, 7)
+            .unwrap()
+            .targets
+            .clone();
+        catalog.apply_table_lifecycle_effect(TableLifecycleEffect::Renamed {
+            old_ref: old_ref.clone(),
+            new_ref: new_ref.clone(),
+            table_id: 7,
+        });
+        assert!(catalog.active_placement_for(&old_ref, 7).is_none());
+        let moved = catalog.active_placement_for(&new_ref, 7).unwrap();
+        assert_eq!(moved.lifecycle_state, PlacementLifecycleState::Active);
+        assert_eq!(moved.targets.len(), before.len());
+        assert_eq!(moved.targets[0].node_id, before[0].node_id);
+        assert_eq!(moved.targets[0].table_ref, new_ref);
+        let membership = membership_with(vec![member_status(
+            "node-a",
+            NodeRole::Worker,
+            NodeState::Active,
+        )]);
+        let diagnostics = QueryRouter::new(&catalog, &membership).route(routing_request(
+            "renamed-table",
+            &[("default.public.accounts", 7)],
+            vec![read_ref(
+                "default.public.accounts",
+                QueryTableReferenceSource::LogicalPlanScan,
+            )],
+        ));
+        assert_eq!(diagnostics.targets.len(), 1);
+        assert_eq!(diagnostics.targets[0].table_ref, new_ref);
     }
 
     #[test]

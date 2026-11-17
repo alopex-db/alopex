@@ -140,23 +140,28 @@ fn assert_bad(option: &str, values: &[SqlValue]) {
         statement.bind(1, value.clone()).unwrap();
         let error = statement.execute().unwrap_err().to_string();
         assert!(error.contains(option) && error.contains("?1"), "{error}");
-        let expected = match value {
-            SqlValue::BigInt(value) => value.to_string(),
-            _ => format!("got {value:?}"),
-        };
-        assert!(error.contains(&expected), "{error}");
+        let reported = error.rsplit_once("got ").expect("error reports a type").1;
+        assert!(
+            matches!(reported, "Integer" | "BigInt" | "Text" | "Double" | "Null"),
+            "{error}"
+        );
+        match value {
+            SqlValue::Text(secret) => assert!(!error.contains(secret), "{error}"),
+            SqlValue::BigInt(number) => assert!(!error.contains(&number.to_string()), "{error}"),
+            _ => {}
+        }
     }
 }
 
 #[test]
-fn invalid_bound_ef_reports_received_value() {
+fn invalid_bound_ef_reports_type_without_value() {
     assert_bad(
         "ef_search",
         &[
             SqlValue::Integer(0),
             SqlValue::Integer(-1),
             SqlValue::BigInt(1_000_001),
-            SqlValue::Text("16".into()),
+            SqlValue::Text("private-option-value".into()),
             SqlValue::Double(16.0),
             SqlValue::Null,
         ],
@@ -164,12 +169,12 @@ fn invalid_bound_ef_reports_received_value() {
 }
 
 #[test]
-fn invalid_bound_hnsw_flag_reports_received_value() {
+fn invalid_bound_hnsw_flag_reports_type_without_value() {
     assert_bad(
         "enable_hnsw",
         &[
             SqlValue::Integer(1),
-            SqlValue::Text("true".into()),
+            SqlValue::Text("private-option-value".into()),
             SqlValue::Null,
         ],
     );

@@ -874,8 +874,12 @@ class RemoteDatabase:
         keep_alive: Reuse one connection across calls.
         idle_reconnect_seconds: Reconnect before sending when the connection has
             been idle at least this long. ``None`` disables the check.
-        sql_timing_sink: Optional private callback for stage durations. It receives
-            only numeric counters, never SQL, rows, URL or paths.
+        sql_timing_sink: Optional private callback for SQL timing diagnostics.
+            It receives numeric counters plus a UUID trace ID and a fixed schema
+            name, never SQL, rows, URL or paths. It runs only after a nonempty
+            SQL request succeeds and its response is parsed into a result; blank
+            SQL, HTTP errors, and parse failures do not invoke it. Callback
+            failures do not affect the SQL result.
 
     The constructor opens no socket, so building a client never blocks and never
     touches the network.
@@ -1101,7 +1105,12 @@ class RemoteDatabase:
             )
             timing["schema"] = "alopex.sql-client-timing/v1"
             timing["result_rows"] = len(result) if isinstance(result, list) else 0
-            sink(timing)
+            try:
+                sink(timing)
+            except Exception:
+                # An optional observer must not turn a successful SQL call into
+                # a failure, including when a non-callable was supplied.
+                pass
         return result
 
     def _session_action(self, session_id: str, action: str) -> None:

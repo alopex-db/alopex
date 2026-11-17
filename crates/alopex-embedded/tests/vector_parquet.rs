@@ -1,6 +1,9 @@
-//! Three-row VECTOR Parquet acceptance through persistent public Database APIs.
+//! VECTOR Parquet acceptance through persistent public Database APIs.
 use alopex_embedded::Database;
 use alopex_sql::{ExecutionResult, SqlValue};
+use arrow::datatypes::DataType;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use std::fs::File;
 
 fn rows(db: &Database) -> Vec<Vec<SqlValue>> {
     let ExecutionResult::Query(result) = db
@@ -104,6 +107,58 @@ fn roundtrip(storage: &str, dimension: usize) {
     assert_eq!(db.hnsw_cache_stats().entries, 1);
 }
 
+fn empty_roundtrip(storage: &str, dimension: usize) {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("empty-source.db");
+    let destination = dir.path().join("empty-destination.db");
+    let file = dir.path().join("empty-vectors.parquet");
+    let ddl = format!(
+        "CREATE TABLE vectors(id INTEGER PRIMARY KEY,e VECTOR({dimension},L2)) WITH (storage='{storage}')"
+    );
+    let db = Database::open(&source).unwrap();
+    db.execute_sql(&ddl).unwrap();
+    assert!(rows(&db).is_empty());
+    assert_eq!(
+        db.execute_sql(&format!(
+            "COPY vectors TO '{}' WITH (FORMAT PARQUET)",
+            file.display()
+        ))
+        .unwrap(),
+        ExecutionResult::RowsAffected(0)
+    );
+    drop(db);
+
+    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&file).unwrap()).unwrap();
+    assert_eq!(builder.metadata().file_metadata().num_rows(), 0);
+    let vector_field = builder.schema().field_with_name("e").unwrap();
+    assert!(matches!(vector_field.data_type(), DataType::List(_)));
+    assert_eq!(
+        vector_field.metadata().get("alopex.vector.dimension"),
+        Some(&dimension.to_string())
+    );
+    assert_eq!(
+        vector_field
+            .metadata()
+            .get("alopex.vector.metric")
+            .map(String::as_str),
+        Some("L2")
+    );
+
+    let db = Database::open(&destination).unwrap();
+    db.execute_sql(&ddl).unwrap();
+    assert_eq!(
+        db.execute_sql(&format!(
+            "COPY vectors FROM '{}' WITH (FORMAT PARQUET)",
+            file.display()
+        ))
+        .unwrap(),
+        ExecutionResult::RowsAffected(0)
+    );
+    drop(db);
+    let db = Database::open(&destination).unwrap();
+    assert!(rows(&db).is_empty());
+}
+
 #[test]
 fn row_vector3_roundtrip() {
     roundtrip("row", 3);
@@ -119,4 +174,14 @@ fn columnar_vector3_roundtrip() {
 #[test]
 fn columnar_vector384_roundtrip() {
     roundtrip("columnar", 384);
+}
+
+#[test]
+fn row_vector3_empty_roundtrip() {
+    empty_roundtrip("row", 3);
+}
+
+#[test]
+fn columnar_vector384_empty_roundtrip() {
+    empty_roundtrip("columnar", 384);
 }

@@ -6,6 +6,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1
 
 COPY deps/ /deps/
+# Test-only container-local sudo is required by #804 acceptance. This image
+# must not be published or reused as a production runtime image.
 RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
     && chmod 0755 /usr/sbin/policy-rc.d \
     && mkdir -p /etc/postgresql-common \

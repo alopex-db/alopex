@@ -903,11 +903,47 @@ fn incomplete_tail_defers_orphan_collection() {
     store.wal.write().unwrap().truncate_tail_to(13).unwrap();
     let crash = tempfile::tempdir().unwrap();
     copy_tree(dir.path(), crash.path());
-    let orphan = add_orphan(&crash.path().join(SPOOL_DIRECTORY));
+    let spool_directory = crash.path().join(SPOOL_DIRECTORY);
+    let torn_spool = fs::read_dir(&spool_directory)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let orphan = add_orphan(&spool_directory);
     let (reopened, recovery) = LsmKV::open_with_overflow(crash.path(), config(), limits()).unwrap();
     assert!(recovery.stop_reason.is_some());
     assert_eq!(value(&reopened, 0), None);
+    assert!(torn_spool.exists());
     assert!(orphan.exists());
+    // Occupy the next deterministic identity so this check exercises the
+    // collision branch regardless of the oracle's recovery watermark.
+    let occupied_lsn = reopened.ts_oracle.current_timestamp() + 1;
+    let mut transaction = [0u8; 16];
+    transaction[..8].copy_from_slice(b"ALPXLSM1");
+    transaction[8..].copy_from_slice(&occupied_lsn.to_le_bytes());
+    let transaction_hex: String = transaction
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let blocked_spool =
+        spool_directory.join(format!("{transaction_hex}-{occupied_lsn:016x}.spool"));
+    fs::write(&blocked_spool, b"occupied identity").unwrap();
+    // The first post-repair spool commit must skip that identity, preserve
+    // both crash orphans, and commit without a caller-visible retry.
+    write(&reopened, &[(1, Some(vec![2]))]).unwrap();
+    assert_eq!(reopened.ts_oracle.current_timestamp(), occupied_lsn + 1);
+    assert_eq!(value(&reopened, 1), Some(vec![2]));
+    assert!(torn_spool.exists());
+    assert!(orphan.exists());
+    assert!(blocked_spool.exists());
+    drop(reopened);
+    let (reopened, recovery) = LsmKV::open_with_overflow(crash.path(), config(), limits()).unwrap();
+    assert!(recovery.stop_reason.is_none());
+    assert_eq!(value(&reopened, 1), Some(vec![2]));
+    assert!(!torn_spool.exists());
+    assert!(!orphan.exists());
+    assert!(!blocked_spool.exists());
 }
 
 #[test]
