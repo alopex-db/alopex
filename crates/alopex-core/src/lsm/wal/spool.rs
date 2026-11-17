@@ -1,8 +1,7 @@
 //! Bounded framing for an immutable overflow spool.
 //!
 //! This low-level codec does not commit a database transaction. A sealed spool
-//! needs a separately durable WAL reference before recovery may apply it. The
-//! live LSM writer still uses WAL v2; activation and reference replay are separate.
+//! needs a separately durable WAL reference before recovery may apply it.
 
 use std::io::{self, IoSlice, Read, Seek, SeekFrom, Write};
 

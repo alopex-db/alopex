@@ -1,12 +1,12 @@
 //! Native WAL v3 references and streaming spool recovery.
 //!
-//! These are low-level primitives, not activation of overflow in `LsmKV`.
+//! These low-level primitives are used by the opt-in `LsmKV` overflow path.
 //! The caller must exclusively own the WAL and spool directory, allocate strictly
 //! increasing LSNs, and keep recovered state private until recovery succeeds.
-//! A database integration must also fence its container before activating v3.
+//! The database integration fences its container before activating v3.
 //! Windows publishes synced files using write-through moves in existing durable
-//! directories. LSM activation remains gated until its other files and directory
-//! creation use a durable publication protocol too.
+//! directories; the LSM integration also uses durable publication for its
+//! other files and directory creation.
 
 #[cfg(windows)]
 use crate::storage::publication::windows as windows_publication;
