@@ -625,16 +625,25 @@ impl LsmKV {
             return Ok(entry.lsn);
         }
         self.prepare_wal_capacity(REFERENCE_BYTES as u64)?;
-        let lsn = self.ts_oracle.next_timestamp();
-        // The database lock and strictly increasing LSN provide local uniqueness.
-        let mut transaction = [0; 16];
-        transaction[..8].copy_from_slice(b"ALPXLSM1");
-        transaction[8..].copy_from_slice(&lsn.to_le_bytes());
+        let spool_directory = self.data_dir.join(SPOOL_DIRECTORY);
+        // A torn reference can leave its sealed spool after WAL repair. Its LSN
+        // is not replayed, so the oracle may issue that number again. Keep the
+        // orphan for the next complete recovery and skip every occupied name.
+        let (lsn, identity) = loop {
+            let lsn = self.ts_oracle.next_timestamp();
+            let mut transaction = [0; 16];
+            transaction[..8].copy_from_slice(b"ALPXLSM1");
+            transaction[8..].copy_from_slice(&lsn.to_le_bytes());
+            let identity = SpoolIdentity::new(transaction, lsn)?;
+            if !disk::spool_identity_conflicts(&spool_directory, identity)? {
+                break (lsn, identity);
+            }
+        };
         let mut wal = self.wal.write().expect("lsm wal lock poisoned");
         wal.append_spool(
             &mut stream,
-            &self.data_dir.join(SPOOL_DIRECTORY),
-            SpoolIdentity::new(transaction, lsn)?,
+            &spool_directory,
+            identity,
             payload_bytes,
             options.fragment_bytes,
             options.limits()?,

@@ -183,6 +183,17 @@ requires explicit overflow options for a fenced container. Converge preserves
 both the 0.2 header and WAL v3 manifest; container-only rehydrate recreates v3.
 The manifest WAL version may not exceed its container fence. There is no downgrade.
 
+Before enabling overflow on an existing WAL v2 database, account for every
+uncheckpointed WAL record. `open_with_overflow` rejects the open with
+`legacy WAL record exceeds overflow inline budget` if any encoded legacy record
+exceeds `LsmOverflowConfig::inline_bytes` (16 MiB by default); it does not spool
+or split that historical record during activation. Open the database with its
+existing non-overflow reader and checkpoint or converge it before opting in, or
+set `with_inline_bytes` high enough for the largest remaining encoded record and
+retain that budget until those records are checkpointed. Budget the corresponding
+replay memory and WAL copy as well. Keep a recoverable backup before migration;
+a rejected opt-in open is not a substitute for a conversion plan.
+
 Small opt-in commits can use the existing v3 inline batch format. The operation
 stream must be at most 1 KiB, fit the configured inline recovery limit, and fit
 the current free ring while leaving room for one 53-byte reference. The stream
@@ -326,6 +337,15 @@ stale staging directory blocks creation and is not removed; a failed publication
 cleans only the empty staging directory created by that call. If a move became
 visible before an error, the published parent is retained and children are not
 created until retry. This does not flush arbitrary pre-existing directory entries.
+
+If a Windows retry is blocked by a pre-existing `.alopex-directory-<hash>.tmp`
+sibling, stop all database users and inspect the intended destination and that
+exact staging entry. Only when the destination is still absent and the staging
+entry is an empty directory with no active handle may an operator remove that
+single empty staging directory and retry. Do not follow a link, recursively
+delete a nonempty directory, remove an unknown staging entry, or remove an
+already published destination. Preserve ambiguous contents for investigation;
+the implementation deliberately does not claim or collect a pre-existing entry.
 
 Windows sidecar pruning retires `lsm.wal` to `lsm.wal.pruned` with a
 non-replacing write-through move before deleting metadata or SSTs. A sharing

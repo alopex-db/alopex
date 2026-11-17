@@ -903,11 +903,32 @@ fn incomplete_tail_defers_orphan_collection() {
     store.wal.write().unwrap().truncate_tail_to(13).unwrap();
     let crash = tempfile::tempdir().unwrap();
     copy_tree(dir.path(), crash.path());
-    let orphan = add_orphan(&crash.path().join(SPOOL_DIRECTORY));
+    let spool_directory = crash.path().join(SPOOL_DIRECTORY);
+    let torn_spool = fs::read_dir(&spool_directory)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let orphan = add_orphan(&spool_directory);
     let (reopened, recovery) = LsmKV::open_with_overflow(crash.path(), config(), limits()).unwrap();
     assert!(recovery.stop_reason.is_some());
     assert_eq!(value(&reopened, 0), None);
+    assert!(torn_spool.exists());
     assert!(orphan.exists());
+    // The first post-repair spool commit must skip the torn record's LSN,
+    // preserve both orphans, and commit without a caller-visible retry.
+    write(&reopened, &[(1, Some(vec![2]))]).unwrap();
+    assert_eq!(reopened.ts_oracle.current_timestamp(), 2);
+    assert_eq!(value(&reopened, 1), Some(vec![2]));
+    assert!(torn_spool.exists());
+    assert!(orphan.exists());
+    drop(reopened);
+    let (reopened, recovery) = LsmKV::open_with_overflow(crash.path(), config(), limits()).unwrap();
+    assert!(recovery.stop_reason.is_none());
+    assert_eq!(value(&reopened, 1), Some(vec![2]));
+    assert!(!torn_spool.exists());
+    assert!(!orphan.exists());
 }
 
 #[test]

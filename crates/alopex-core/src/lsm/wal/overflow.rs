@@ -127,6 +127,23 @@ fn spool_path(directory: &Path, identity: SpoolIdentity) -> PathBuf {
     directory.join(format!("{transaction}-{:016x}.spool", identity.lsn()))
 }
 
+/// A repaired torn WAL tail may leave a sealed spool (or an interrupted
+/// temporary spool) whose LSN will be issued again. The owner must skip that
+/// identity before opening a new spool; preserved crash evidence is never
+/// overwritten or removed to make room for a commit.
+pub(crate) fn spool_identity_conflicts(directory: &Path, identity: SpoolIdentity) -> Result<bool> {
+    let sealed = spool_path(directory, identity);
+    let temporary = sealed.with_extension("tmp");
+    for path in [&sealed, &temporary] {
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) fn directory_usage(directory: &Path) -> Result<u64> {
     if !fs::symlink_metadata(directory)?.file_type().is_dir() {
         return Err(invalid(
