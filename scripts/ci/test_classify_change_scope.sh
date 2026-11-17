@@ -41,3 +41,10 @@ production_sha="$(git -C "${fixture}" rev-parse HEAD)"
 [[ "$(run_classifier "${security_sha}" "${production_sha}")" == $'production=true\nsecurity=true' ]]
 [[ "$(run_classifier 0000000000000000000000000000000000000000 "${production_sha}")" == $'production=true\nsecurity=true' ]]
 [[ "$(run_classifier "${production_sha}" "${production_sha}")" == $'production=true\nsecurity=true' ]]
+
+# A move from production into an excluded process path must still run production jobs.
+mkdir -p "${fixture}/scripts/release"
+git -C "${fixture}" mv README.md scripts/release/README.md
+git -C "${fixture}" commit --quiet -m production-to-release-rename
+rename_sha="$(git -C "${fixture}" rev-parse HEAD)"
+[[ "$(run_classifier "${production_sha}" "${rename_sha}")" == $'production=true\nsecurity=true' ]]
