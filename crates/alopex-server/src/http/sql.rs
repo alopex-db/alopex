@@ -2701,8 +2701,8 @@ mod tests {
             .get_table("users")
             .unwrap()
             .table_id;
-        let old_ref = TableRef::new("default.public.users");
-        let new_ref = TableRef::new("default.public.accounts");
+        let old_ref = TableRef::new("default.default.users");
+        let new_ref = TableRef::new("default.default.accounts");
         let mut placement = PlacementMetadata::new(old_ref.clone(), table_id, 1);
         placement
             .targets
@@ -2760,10 +2760,6 @@ mod tests {
             panic!("expected one query result");
         };
         assert_eq!(rows.rows, vec![vec![alopex_sql::SqlValue::Integer(7)]]);
-        assert!(diagnostics.iter().any(|diagnostic| diagnostic
-            .targets
-            .iter()
-            .any(|target| { target.table_ref == new_ref && target.table_id == table_id })));
         let manager = state.cluster_manager.read().unwrap();
         assert!(manager
             .placement_catalog()
@@ -2775,6 +2771,13 @@ mod tests {
             .expect("renamed placement remains active");
         assert_eq!(moved.targets.len(), 1);
         assert_eq!(moved.targets[0].table_ref, new_ref);
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic
+                .targets
+                .iter()
+                .any(|target| { target.table_ref == new_ref && target.table_id == table_id })),
+            "{diagnostics:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
