@@ -14,6 +14,10 @@ The generated file is unchanged except for an Apache license header, the module
 documentation link, and replacing `crate::thrift::TSerializable` with
 `super::TSerializable`. Keep its generated formatting. When comparing with the
 upstream source, reverse those transformations and compare the checksum above.
+The `generated_wire_declarations_match_upstream_57_3_2` unit test and
+`scripts/ci/test_parquet_wire_source_contract.py` enforce this comparison for
+all 66 generated serializable types. The checksum pins the declarations; it is
+not a runtime compatibility test for every type under the current Thrift crate.
 
 The old codec-free `parquet-wire` dependency still required vulnerable Thrift
 0.17.0 (RUSTSEC-2026-0435). Newer Parquet releases removed these public wire

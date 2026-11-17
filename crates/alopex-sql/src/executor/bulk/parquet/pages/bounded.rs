@@ -590,6 +590,245 @@ impl PageReader for BoundedPages {
 }
 
 #[cfg(test)]
+mod page_reader_tests {
+    use super::*;
+    use flate2::Compression as GzipLevel;
+    use flate2::write::GzEncoder;
+    use parquet_wire::format::{
+        DataPageHeader, DataPageHeaderV2, DictionaryPageHeader, Encoding, IndexPageHeader,
+    };
+    use std::io::Write;
+    use thrift::protocol::TCompactOutputProtocol;
+
+    fn page_bytes(kind: PageType) -> Vec<u8> {
+        let compressed = GzEncoder::new(Vec::new(), GzipLevel::default())
+            .finish()
+            .unwrap();
+        let header = PageHeader {
+            type_: kind,
+            uncompressed_page_size: 0,
+            compressed_page_size: i32::try_from(compressed.len()).unwrap(),
+            crc: None,
+            data_page_header: (kind == PageType::DATA_PAGE).then(|| {
+                DataPageHeader::new(3, Encoding::PLAIN, Encoding::RLE, Encoding::RLE, None)
+            }),
+            index_page_header: (kind == PageType::INDEX_PAGE).then(IndexPageHeader::new),
+            dictionary_page_header: (kind == PageType::DICTIONARY_PAGE)
+                .then(|| DictionaryPageHeader::new(2, Encoding::PLAIN, Some(true))),
+            data_page_header_v2: (kind == PageType::DATA_PAGE_V2)
+                .then(|| DataPageHeaderV2::new(3, 0, 3, Encoding::PLAIN, 0, 0, Some(true), None)),
+        };
+        let mut bytes = Vec::new();
+        header
+            .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut bytes))
+            .unwrap();
+        bytes.extend(compressed);
+        bytes
+    }
+
+    fn fixture(kinds: &[PageType]) -> (Arc<File>, Vec<PageLocation>, u64) {
+        let mut file = tempfile::tempfile().unwrap();
+        let mut pages = Vec::new();
+        let mut offset = 0_i64;
+        for (index, kind) in kinds.iter().enumerate() {
+            let bytes = page_bytes(*kind);
+            file.write_all(&bytes).unwrap();
+            pages.push(PageLocation {
+                offset,
+                compressed_page_size: i32::try_from(bytes.len()).unwrap(),
+                first_row_index: if *kind == PageType::DICTIONARY_PAGE
+                    || *kind == PageType::INDEX_PAGE
+                {
+                    -1
+                } else {
+                    i64::try_from(index).unwrap()
+                },
+            });
+            offset += i64::try_from(bytes.len()).unwrap();
+        }
+        (Arc::new(file), pages, u64::try_from(offset).unwrap())
+    }
+
+    fn reader(file: Arc<File>, position: Position, chunk_end: u64) -> BoundedPages {
+        BoundedPages {
+            file,
+            position,
+            pending: None,
+            physical_type: Type::INT64,
+            limit: 1_048_576,
+            chunk_start: 0,
+            chunk_end,
+            compression: Compression::GZIP(Default::default()),
+            reserved_bytes: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn positioned(
+        file: Arc<File>,
+        pages: Vec<PageLocation>,
+        end: u64,
+        indexed: bool,
+    ) -> BoundedPages {
+        let position = if indexed {
+            Position::Indexed {
+                pages: pages.into(),
+                total_rows: 3,
+            }
+        } else {
+            Position::Sequential { offset: 0, end }
+        };
+        reader(file, position, end)
+    }
+
+    #[test]
+    fn page_kind_and_position_matrix_preserves_peek_and_page() {
+        for indexed in [false, true] {
+            for kind in [
+                PageType::DICTIONARY_PAGE,
+                PageType::DATA_PAGE,
+                PageType::DATA_PAGE_V2,
+                PageType::INDEX_PAGE,
+            ] {
+                let (file, pages, end) = fixture(&[kind]);
+                let mut reader = positioned(file, pages, end, indexed);
+                if kind == PageType::INDEX_PAGE {
+                    assert!(reader.peek_next_page().unwrap().is_none());
+                    assert!(reader.get_next_page().unwrap().is_none());
+                    continue;
+                }
+                let first = reader.peek_next_page().unwrap().unwrap();
+                let again = reader.peek_next_page().unwrap().unwrap();
+                assert_eq!(first.num_rows, again.num_rows);
+                assert_eq!(first.num_levels, again.num_levels);
+                assert_eq!(first.is_dict, again.is_dict);
+                assert_eq!(first.is_dict, kind == PageType::DICTIONARY_PAGE);
+                assert_eq!(
+                    first.num_rows,
+                    if indexed && !first.is_dict {
+                        Some(3)
+                    } else if kind == PageType::DATA_PAGE_V2 {
+                        Some(3)
+                    } else {
+                        None
+                    }
+                );
+                assert_eq!(
+                    first.num_levels,
+                    if indexed || first.is_dict {
+                        None
+                    } else {
+                        Some(3)
+                    }
+                );
+                let page = reader.get_next_page().unwrap().unwrap();
+                match (kind, page) {
+                    (
+                        PageType::DICTIONARY_PAGE,
+                        Page::DictionaryPage {
+                            num_values: 2,
+                            is_sorted: true,
+                            ..
+                        },
+                    )
+                    | (PageType::DATA_PAGE, Page::DataPage { num_values: 3, .. })
+                    | (
+                        PageType::DATA_PAGE_V2,
+                        Page::DataPageV2 {
+                            num_values: 3,
+                            num_rows: 3,
+                            ..
+                        },
+                    ) => {}
+                    (_, page) => panic!("wrong page kind: {page:?}"),
+                }
+                assert!(reader.peek_next_page().unwrap().is_none());
+                assert!(reader.get_next_page().unwrap().is_none());
+                reader.skip_next_page().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn skip_and_peek_advance_exactly_once_in_both_modes() {
+        for indexed in [false, true] {
+            let kinds = [
+                PageType::INDEX_PAGE,
+                PageType::DICTIONARY_PAGE,
+                PageType::DATA_PAGE,
+                PageType::DATA_PAGE_V2,
+            ];
+            let (file, mut pages, end) = fixture(&kinds);
+            pages[2].first_row_index = 0;
+            pages[3].first_row_index = 1;
+            let mut reader = positioned(file, pages, end, indexed);
+            assert!(reader.peek_next_page().unwrap().unwrap().is_dict);
+            reader.skip_next_page().unwrap();
+            let first = reader.peek_next_page().unwrap().unwrap();
+            assert!(!first.is_dict);
+            assert_eq!(first.num_rows, if indexed { Some(1) } else { None });
+            assert!(matches!(
+                reader.get_next_page().unwrap(),
+                Some(Page::DataPage { .. })
+            ));
+            let second = reader.peek_next_page().unwrap().unwrap();
+            assert_eq!(second.num_rows, Some(2).filter(|_| indexed).or(Some(3)));
+            reader.skip_next_page().unwrap();
+            assert!(reader.peek_next_page().unwrap().is_none());
+            assert!(reader.get_next_page().unwrap().is_none());
+            assert!(reader.at_record_boundary().unwrap());
+        }
+    }
+
+    #[test]
+    fn malformed_positions_fail_before_page_delivery() {
+        let (file, pages, end) = fixture(&[PageType::DATA_PAGE, PageType::DATA_PAGE_V2]);
+        let cases = [
+            Position::Sequential {
+                offset: end + 1,
+                end,
+            },
+            Position::Indexed {
+                pages: vec![PageLocation {
+                    offset: -1,
+                    ..pages[0].clone()
+                }]
+                .into(),
+                total_rows: 3,
+            },
+            Position::Indexed {
+                pages: vec![PageLocation {
+                    compressed_page_size: pages[0].compressed_page_size + 1,
+                    ..pages[0].clone()
+                }]
+                .into(),
+                total_rows: 3,
+            },
+            Position::Indexed {
+                pages: vec![
+                    PageLocation {
+                        first_row_index: 4,
+                        ..pages[0].clone()
+                    },
+                    PageLocation {
+                        first_row_index: 3,
+                        ..pages[1].clone()
+                    },
+                ]
+                .into(),
+                total_rows: 3,
+            },
+        ];
+        for position in cases {
+            let mut reader = reader(Arc::clone(&file), position, end);
+            assert!(reader.peek_next_page().is_err());
+        }
+        let mut outside = reader(file, Position::Sequential { offset: 0, end }, end);
+        outside.chunk_start = 1;
+        assert!(outside.get_next_page().is_err());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
