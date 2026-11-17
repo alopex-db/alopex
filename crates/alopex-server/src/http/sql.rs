@@ -1632,11 +1632,50 @@ fn statement_effects_after_execution(
                     )
                 };
                 let mut changed = false;
-                for (old, new) in before.iter().zip(&after) {
+                // A rename keeps the table ID. Pair the removed old name with
+                // the added new name before emitting effects, so placement
+                // consumers move targets instead of tombstoning them.
+                let renamed = before
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(old_index, old)| {
+                        let old_table = old.table.as_ref()?;
+                        if after[old_index].table.is_some() {
+                            return None;
+                        }
+                        after.iter().enumerate().find_map(|(new_index, new)| {
+                            (before[new_index].table.is_none()
+                                && new
+                                    .table
+                                    .as_ref()
+                                    .is_some_and(|table| table.table_id == old_table.table_id))
+                            .then_some((old_index, new_index))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                for (index, (old, new)) in before.iter().zip(&after).enumerate() {
                     if crate::catalog_rollback::same(old, new)? {
                         continue;
                     }
                     changed = true;
+                    if let Some((_, new_index)) =
+                        renamed.iter().find(|(old_index, _)| *old_index == index)
+                    {
+                        let old_table = old.table.as_ref().expect("rename source");
+                        let new_table = after[*new_index].table.as_ref().expect("rename target");
+                        push_lifecycle_effect(
+                            &mut lifecycle_effects,
+                            TableLifecycleEffect::Renamed {
+                                old_ref: TableRef::new(table_fqn_string(old_table)),
+                                new_ref: TableRef::new(table_fqn_string(new_table)),
+                                table_id: old_table.table_id,
+                            },
+                        );
+                        continue;
+                    }
+                    if renamed.iter().any(|(_, new_index)| *new_index == index) {
+                        continue;
+                    }
                     match (&old.table, &new.table) {
                         (Some(old), Some(new)) if old.table_id == new.table_id => {
                             push_lifecycle_effect(
@@ -2631,6 +2670,111 @@ mod tests {
         })
         .expect("server");
         (temp_dir, server.state)
+    }
+
+    #[tokio::test]
+    async fn alter_table_rename_preserves_rows_and_moves_active_placement() {
+        use alopex_cluster::{
+            ClusterId, ClusterIdentity, ClusterManager, ClusterManagerConfig, Endpoint,
+            MemberIdentity, MemberStatus, MembershipSource, MembershipView, NodeId, NodeRole,
+            NodeState, PlacementMetadata, RoutingTarget,
+        };
+
+        let (_temp_dir, state) = catalog_guard_test_server();
+        for sql in [
+            "CREATE TABLE users(id INTEGER PRIMARY KEY)",
+            "INSERT INTO users VALUES (7)",
+        ] {
+            execute_non_session_statements_with_routing(
+                state.clone(),
+                sql,
+                "rename-setup",
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        }
+        let table_id = state
+            .catalog
+            .read()
+            .unwrap()
+            .get_table("users")
+            .unwrap()
+            .table_id;
+        let old_ref = TableRef::new("default.public.users");
+        let new_ref = TableRef::new("default.public.accounts");
+        let mut placement = PlacementMetadata::new(old_ref.clone(), table_id, 1);
+        placement
+            .targets
+            .push(RoutingTarget::table("local", old_ref.clone(), table_id));
+        let identity = ClusterIdentity {
+            cluster_id: Some(ClusterId::new("cluster-a")),
+            advertised_endpoint: Some(Endpoint::new("127.0.0.1:7001")),
+            ..ClusterIdentity::new("local", NodeRole::Worker, NodeState::Active)
+        };
+        let mut membership = MembershipView::new(MembershipSource::Persisted, 1);
+        membership.members.push(MemberStatus {
+            identity: MemberIdentity {
+                node_id: NodeId::new("local"),
+                cluster_id: Some(ClusterId::new("cluster-a")),
+                advertised_endpoint: Some(Endpoint::new("127.0.0.1:7001")),
+                role: NodeRole::Worker,
+            },
+            raw_reachability_state: None,
+            derived_state: NodeState::Active,
+            transition_reason: Some("test".to_string()),
+        });
+        let mut config = ClusterManagerConfig::cluster_aware(identity);
+        config.membership_source = MembershipSource::Persisted;
+        config.initial_membership = Some(membership);
+        config.initial_placements.push(placement);
+        *state.cluster_manager.write().unwrap() = ClusterManager::new(config).unwrap();
+
+        execute_non_session_statements_with_routing(
+            state.clone(),
+            "ALTER TABLE users RENAME TO accounts",
+            "rename",
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            state
+                .catalog
+                .read()
+                .unwrap()
+                .get_table("accounts")
+                .unwrap()
+                .table_id,
+            table_id
+        );
+        let (results, diagnostics) = execute_non_session_statements_with_routing(
+            state.clone(),
+            "SELECT id FROM accounts",
+            "rename-read",
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let [alopex_sql::executor::ExecutionResult::Query(rows)] = results.as_slice() else {
+            panic!("expected one query result");
+        };
+        assert_eq!(rows.rows, vec![vec![alopex_sql::SqlValue::Integer(7)]]);
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .targets
+            .iter()
+            .any(|target| { target.table_ref == new_ref && target.table_id == table_id })));
+        let manager = state.cluster_manager.read().unwrap();
+        assert!(manager
+            .placement_catalog()
+            .active_placement_for(&old_ref, table_id)
+            .is_none());
+        let moved = manager
+            .placement_catalog()
+            .active_placement_for(&new_ref, table_id)
+            .expect("renamed placement remains active");
+        assert_eq!(moved.targets.len(), 1);
+        assert_eq!(moved.targets[0].table_ref, new_ref);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
