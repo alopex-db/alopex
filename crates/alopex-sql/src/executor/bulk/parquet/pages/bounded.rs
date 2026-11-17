@@ -704,9 +704,7 @@ mod page_reader_tests {
                 assert_eq!(first.is_dict, kind == PageType::DICTIONARY_PAGE);
                 assert_eq!(
                     first.num_rows,
-                    if indexed && !first.is_dict {
-                        Some(3)
-                    } else if kind == PageType::DATA_PAGE_V2 {
+                    if (indexed && !first.is_dict) || kind == PageType::DATA_PAGE_V2 {
                         Some(3)
                     } else {
                         None
@@ -771,7 +769,7 @@ mod page_reader_tests {
                 Some(Page::DataPage { .. })
             ));
             let second = reader.peek_next_page().unwrap().unwrap();
-            assert_eq!(second.num_rows, Some(2).filter(|_| indexed).or(Some(3)));
+            assert_eq!(second.num_rows, Some(if indexed { 2 } else { 3 }));
             reader.skip_next_page().unwrap();
             assert!(reader.peek_next_page().unwrap().is_none());
             assert!(reader.get_next_page().unwrap().is_none());
