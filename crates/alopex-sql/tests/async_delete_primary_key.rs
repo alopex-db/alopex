@@ -1,8 +1,8 @@
 #![cfg(feature = "tokio")]
 
-use alopex_core::kv::AsyncKVStore;
 use alopex_core::kv::async_adapter::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
 use alopex_core::kv::memory::MemoryKV;
+use alopex_core::kv::AsyncKVStore;
 use alopex_core::types::TxnMode;
 use alopex_sql::catalog::{Catalog, MemoryCatalog};
 use alopex_sql::storage::async_storage::{AsyncSqlTransaction, AsyncTxnBridge};
@@ -114,11 +114,9 @@ async fn async_delete_primary_key_commit_and_key_reuse() {
     );
     txn.async_commit().await.unwrap();
     let mut txn = fixture.begin().await;
-    assert!(
-        rows(&mut txn, "SELECT id,v FROM items WHERE v=20")
-            .await
-            .is_empty()
-    );
+    assert!(rows(&mut txn, "SELECT id,v FROM items WHERE v=20")
+        .await
+        .is_empty());
     txn.async_execute("INSERT INTO items VALUES (7,70)")
         .await
         .unwrap();
@@ -168,11 +166,10 @@ async fn async_delete_primary_key_foreign_key_failure_keeps_parent() {
         .unwrap();
     txn.async_commit().await.unwrap();
     let mut txn = fixture.begin().await;
-    assert!(
-        txn.async_execute("DELETE FROM items WHERE id=7")
-            .await
-            .is_err()
-    );
+    assert!(txn
+        .async_execute("DELETE FROM items WHERE id=7")
+        .await
+        .is_err());
     txn.async_commit().await.unwrap();
     let mut txn = fixture.begin().await;
     assert_eq!(
@@ -211,4 +208,107 @@ async fn async_delete_primary_key_cascade_preserves_other_children() {
         values(&[(2, 42)])
     );
     txn.async_rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn async_delete_primary_key_crosses_512_row_batch_boundary() {
+    let fixture = Fixture::new().await;
+    let mut txn = fixture.begin().await;
+    txn.async_execute("CREATE TABLE bulk(id INTEGER PRIMARY KEY,v INTEGER)")
+        .await
+        .unwrap();
+    for start in (0..513).step_by(100) {
+        let end = (start + 100).min(513);
+        let values = (start..end)
+            .map(|id| format!("({id},{id})"))
+            .collect::<Vec<_>>()
+            .join(",");
+        txn.async_execute(&format!("INSERT INTO bulk VALUES {values}"))
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        txn.async_execute("DELETE FROM bulk").await.unwrap(),
+        ExecutionResult::RowsAffected(513)
+    ));
+    assert!(rows(&mut txn, "SELECT id FROM bulk").await.is_empty());
+    txn.async_rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn async_delete_compound_and_text_primary_keys_preserves_other_rows() {
+    let fixture = Fixture::new().await;
+    let mut txn = fixture.begin().await;
+    txn.async_execute("CREATE TABLE composite(a INTEGER,b TEXT,v INTEGER,PRIMARY KEY(a,b))")
+        .await
+        .unwrap();
+    txn.async_execute("INSERT INTO composite VALUES (1,'left',10),(1,'right',20),(2,'left',30)")
+        .await
+        .unwrap();
+    txn.async_execute("CREATE TABLE text_keys(id TEXT PRIMARY KEY,v INTEGER)")
+        .await
+        .unwrap();
+    txn.async_execute("INSERT INTO text_keys VALUES ('alpha',1),('beta',2)")
+        .await
+        .unwrap();
+    assert!(matches!(
+        txn.async_execute("DELETE FROM composite WHERE a=1 AND b='left'")
+            .await
+            .unwrap(),
+        ExecutionResult::RowsAffected(1)
+    ));
+    assert!(matches!(
+        txn.async_execute("DELETE FROM text_keys WHERE id='alpha'")
+            .await
+            .unwrap(),
+        ExecutionResult::RowsAffected(1)
+    ));
+    assert_eq!(
+        rows(&mut txn, "SELECT a,b,v FROM composite ORDER BY a,b").await,
+        vec![
+            vec![
+                SqlValue::Integer(1),
+                SqlValue::Text("right".into()),
+                SqlValue::Integer(20)
+            ],
+            vec![
+                SqlValue::Integer(2),
+                SqlValue::Text("left".into()),
+                SqlValue::Integer(30)
+            ],
+        ]
+    );
+    assert_eq!(
+        rows(&mut txn, "SELECT id,v FROM text_keys").await,
+        vec![vec![SqlValue::Text("beta".into()), SqlValue::Integer(2)]]
+    );
+    txn.async_rollback().await.unwrap();
+}
+
+#[test]
+fn synchronous_executor_delete_primary_key_matches_async_result() {
+    use alopex_sql::{AlopexDialect, Executor, Parser, Planner};
+
+    let catalog = Arc::new(RwLock::new(MemoryCatalog::new()));
+    let mut executor = Executor::new(Arc::new(MemoryKV::new()), catalog.clone());
+    let mut execute = |sql: &str| {
+        let statements = Parser::parse_sql(&AlopexDialect, sql).unwrap();
+        let plan = Planner::new(&*catalog.read().unwrap())
+            .plan(&statements[0])
+            .unwrap();
+        executor.execute(plan).unwrap()
+    };
+    execute("CREATE TABLE sync_items(id TEXT PRIMARY KEY,v INTEGER)");
+    execute("INSERT INTO sync_items VALUES ('alpha',1),('beta',2)");
+    assert!(matches!(
+        execute("DELETE FROM sync_items WHERE id='alpha'"),
+        ExecutionResult::RowsAffected(1)
+    ));
+    let ExecutionResult::Query(result) = execute("SELECT id,v FROM sync_items") else {
+        panic!("expected rows");
+    };
+    assert_eq!(
+        result.rows,
+        vec![vec![SqlValue::Text("beta".into()), SqlValue::Integer(2)]]
+    );
 }
