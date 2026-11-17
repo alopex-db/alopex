@@ -183,6 +183,13 @@ requires explicit overflow options for a fenced container. Converge preserves
 both the 0.2 header and WAL v3 manifest; container-only rehydrate recreates v3.
 The manifest WAL version may not exceed its container fence. There is no downgrade.
 
+The low-level `AlopexFileReader` accepts supported 0.2.0 container headers so
+that the opt-in LSM path can inspect them. It is not an LSM database opener:
+the production non-LSM paths in this release do not open fenced containers
+through that reader, and default `LsmKV::open` applies its own opt-in check.
+Versions above `MAX_SUPPORTED`, including 0.3.0, are rejected at the format
+reader boundary.
+
 Before enabling overflow on an existing WAL v2 database, account for every
 uncheckpointed WAL record. `open_with_overflow` rejects the open with
 `legacy WAL record exceeds overflow inline budget` if any encoded legacy record
