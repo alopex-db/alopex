@@ -1,8 +1,8 @@
 #![cfg(feature = "tokio")]
 
+use alopex_core::kv::AsyncKVStore;
 use alopex_core::kv::async_adapter::{AsyncKVStoreAdapter, AsyncKVTransactionAdapter};
 use alopex_core::kv::memory::MemoryKV;
-use alopex_core::kv::AsyncKVStore;
 use alopex_core::types::TxnMode;
 use alopex_sql::catalog::{Catalog, MemoryCatalog};
 use alopex_sql::storage::async_storage::{AsyncSqlTransaction, AsyncTxnBridge};
@@ -114,9 +114,11 @@ async fn async_delete_primary_key_commit_and_key_reuse() {
     );
     txn.async_commit().await.unwrap();
     let mut txn = fixture.begin().await;
-    assert!(rows(&mut txn, "SELECT id,v FROM items WHERE v=20")
-        .await
-        .is_empty());
+    assert!(
+        rows(&mut txn, "SELECT id,v FROM items WHERE v=20")
+            .await
+            .is_empty()
+    );
     txn.async_execute("INSERT INTO items VALUES (7,70)")
         .await
         .unwrap();
@@ -166,10 +168,11 @@ async fn async_delete_primary_key_foreign_key_failure_keeps_parent() {
         .unwrap();
     txn.async_commit().await.unwrap();
     let mut txn = fixture.begin().await;
-    assert!(txn
-        .async_execute("DELETE FROM items WHERE id=7")
-        .await
-        .is_err());
+    assert!(
+        txn.async_execute("DELETE FROM items WHERE id=7")
+            .await
+            .is_err()
+    );
     txn.async_commit().await.unwrap();
     let mut txn = fixture.begin().await;
     assert_eq!(

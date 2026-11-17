@@ -919,7 +919,9 @@ fn incomplete_tail_defers_orphan_collection() {
     // The first post-repair spool commit must skip the torn record's LSN,
     // preserve both orphans, and commit without a caller-visible retry.
     write(&reopened, &[(1, Some(vec![2]))]).unwrap();
-    assert_eq!(reopened.ts_oracle.current_timestamp(), 2);
+    // The torn reference occupied LSN 2's deterministic spool identity, so
+    // the successful first commit advances past it to LSN 3.
+    assert_eq!(reopened.ts_oracle.current_timestamp(), 3);
     assert_eq!(value(&reopened, 1), Some(vec![2]));
     assert!(torn_spool.exists());
     assert!(orphan.exists());
