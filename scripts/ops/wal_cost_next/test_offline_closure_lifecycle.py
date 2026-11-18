@@ -6,10 +6,13 @@ import sys
 import tempfile
 from pathlib import Path
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from offline_closure_lifecycle import create_arguments, inspect_offline_container
+from offline_closure_lifecycle import (create_arguments, inspect_offline_container,
+                                       run_candidate_lifecycle, captured_inputs)
+from candidate_closure import SCHEMA
+from lifecycle import Run
 from resolve_builder_lock import BASE, LockError
 
 IDENTITY = "a" * 64
@@ -28,7 +31,8 @@ class OfflineLifecycleTests(unittest.TestCase):
                         "execution_mode": "native", "docker_context": "selected",
                         "cpu": {"server": [1], "client": [2]},
                         "limits": {"memory_bytes": 1_610_612_736,
-                                   "swap_bytes": 0, "pids": 256},
+                                   "swap_bytes": 0, "pids": 256,
+                                   "run_seconds": 900},
                         "security": {"lsm_kind": "apparmor",
                                      "lsm_profile": "docker-default",
                                      "seccomp_profile": str(policy),
@@ -146,6 +150,146 @@ class OfflineLifecycleTests(unittest.TestCase):
         self.assertEqual(inspect_offline_container(
             self.docker, IDENTITY, selected, RUN_ID, TOKEN, running=True)["Id"],
             IDENTITY)
+
+
+class OwnedLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        OfflineLifecycleTests.setUp(self)
+        self.profile["private_output"] = str(Path(self.temp.name) / "runs")
+        self.profile["storage"] = {"reserve_bytes": 1_000_000_000,
+                                   "stop_bytes": 40_000_000_000}
+        self.docker.profile = self.profile
+        self.live["State"]["Running"] = False
+        self.live["Config"]["Labels"]["org.alopex.test-env.token"] = None
+        self.removed = False
+        self.started = False
+        self.stopped = False
+        self.monitor = Mock(cleanup_mode=False)
+        self.budget = Mock()
+        self.budget.used.return_value = 23_000_000_000
+
+    def call(self, kind, action, *rest):
+        if kind == "image" and action == "inspect":
+            return json.dumps([self.image])
+        if kind == "create":
+            self.live["Id"] = IDENTITY
+            labels = [part for part in (kind, action, *rest)
+                      if isinstance(part, str) and
+                      part.startswith("org.alopex.test-env.token=")]
+            self.live["Config"]["Labels"]["org.alopex.test-env.token"] = \
+                labels[0].split("=", 1)[1]
+            return IDENTITY
+        if kind == "start":
+            self.live["State"]["Running"] = True
+            self.started = True
+            return IDENTITY
+        if kind == "container" and action == "inspect":
+            return json.dumps([self.live])
+        raise AssertionError("unexpected Docker call")
+
+    def owned_inspect(self, item):
+        if self.removed:
+            return None
+        return {"kind": "container", "name": item["name"], "id": IDENTITY,
+                "labels": self.live["Config"]["Labels"],
+                "running": self.live["State"]["Running"]}
+
+    def owned_stop(self, identity):
+        self.assertEqual(identity, IDENTITY)
+        self.live["State"]["Running"] = False
+        self.stopped = True
+
+    def owned_remove(self, item):
+        self.assertFalse(self.live["State"]["Running"])
+        self.removed = True
+
+    def execute(self, candidate=None, failure=None):
+        self.docker.prerequisites.return_value = None
+        self.docker.inspect.side_effect = self.owned_inspect
+        self.docker.stop.side_effect = self.owned_stop
+        self.docker.remove.side_effect = self.owned_remove
+        self.docker.call.side_effect = self.call
+        result = candidate or {"schema": SCHEMA, "approval": "unapproved",
+                               "formal_lock": False}
+        behavior = failure if failure is not None else result
+        with patch("offline_closure_lifecycle.captured_inputs",
+                   return_value=({}, {}, "a" * 64, {}, "", "b" * 64)), \
+             patch("offline_closure_lifecycle.candidate_closure",
+                   side_effect=behavior if isinstance(behavior, BaseException) else None,
+                   return_value=None if isinstance(behavior, BaseException) else behavior):
+            return run_candidate_lifecycle(
+                self.profile, {"baseline_bytes": 22_000_000_000},
+                Path(self.temp.name), None, {"outcome": "passed"},
+                admission=lambda *_: (self.budget, None),
+                monitor_factory=lambda *_: self.monitor,
+                docker_factory=lambda *_: self.docker)
+
+    def test_success_stops_collects_and_removes_owned_container(self):
+        result = self.execute()
+        self.assertEqual(result["schema"], SCHEMA)
+        self.assertTrue(self.started and self.stopped and self.removed)
+        self.monitor.start.assert_called_once()
+        self.monitor.stop.assert_called_once()
+        run = Path(self.profile["private_output"]) / RUN_ID
+        self.assertEqual(json.loads((run / "run.json").read_text())["phase"], "deleted")
+        self.assertEqual(json.loads((run / "collected/result.json").read_text())["status"],
+                         "candidate")
+
+    def test_parser_failure_still_cleans_and_preserves_failure(self):
+        with self.assertRaisesRegex(LockError, "closure rejected"):
+            self.execute(failure=LockError("closure rejected"))
+        self.assertTrue(self.stopped and self.removed)
+        run = Path(self.profile["private_output"]) / RUN_ID
+        self.assertEqual(json.loads((run / "run.json").read_text())["phase"], "deleted")
+        self.assertEqual(json.loads((run / "collected/result.json").read_text())["status"],
+                         "failed")
+
+    def test_owner_drift_blocks_removal_and_retains_cleanup_error(self):
+        original = self.owned_inspect
+        def drift(item):
+            result = original(item)
+            result["labels"] = {**result["labels"],
+                                "org.alopex.test-env.token": "wrong"}
+            return result
+        self.owned_inspect = drift
+        with self.assertRaisesRegex(LockError, "offline cleanup failed"):
+            self.execute()
+        self.assertFalse(self.removed)
+        run = Path(self.profile["private_output"]) / RUN_ID
+        self.assertTrue((run / "cleanup-error.private.json").exists())
+
+    def test_capture_inputs_stay_inside_verified_collection(self):
+        capture_id = self.profile["run_id"] + "-trace-resolve"
+        run = Run(self.profile["private_output"], capture_id).create({})
+        run.transition("stopped")
+        def collect(staging):
+            (staging / "result.json").write_text("{}\n")
+            (staging / "apt-uris.txt").write_text("test\n")
+            (staging / "packages").mkdir()
+            (staging / "packages" / "index").write_bytes(b"Package: test\n")
+        run.collect(collect)
+        run.clean(lambda _: None, lambda _: None)
+        proof = run.root / "proof"
+        proof.mkdir(mode=0o700)
+        (proof / "base.json").write_text("{}\n")
+        auth = {"indexes": [{"name": "index-1"}],
+                "resolver_sha256": "b" * 64, "signature_verified": True}
+        (proof / "authentication.json").write_text(json.dumps(auth) + "\n")
+        proof_hash = hashlib.sha256(json.dumps(
+            auth, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        (proof / "proof.sha256").write_text(proof_hash + "\n")
+        index_path = run.root / "collected" / "packages" / "index"
+        (proof / "indexes.json").write_text(json.dumps({
+            "index-1": str(index_path)}) + "\n")
+        self.assertEqual(captured_inputs(self.profile)[3],
+                         {"index-1": b"Package: test\n"})
+        (proof / "indexes.json").write_text(json.dumps({
+            "index-1": str(proof / "base.json")}) + "\n")
+        with self.assertRaisesRegex(LockError, "signed index path"):
+            captured_inputs(self.profile)
+        (proof / "proof.sha256").write_text("0" * 64 + "\n")
+        with self.assertRaisesRegex(LockError, "signed proof digest"):
+            captured_inputs(self.profile)
 
 
 if __name__ == "__main__":
