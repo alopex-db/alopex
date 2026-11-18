@@ -409,3 +409,70 @@ def run_owned_pair(config, output, *, source, assets_digest, job_id, start,
         signal.signal(signal.SIGALRM, previous_handler)
         os.umask(previous_umask)
     return report
+
+
+def run_collected_pair(config, run, proof, receipt):
+    """Verify one *deleted* owned container run and its complete pair evidence.
+
+    The caller must first attest #804, execute and collect via its pinned
+    Docker/Run adapter, and invoke ``Run.clean``. This does not accept a host
+    process or URL handoff. The report's PID and loopback URL are meaningful
+    only inside the container namespaces recorded by the pinned entrypoint.
+    """
+    from .stage_pair import validate_stage_binding
+
+    root = Path(run.root)
+    collected = root / "collected"
+    # The in-container output is copied to the run collection. The staging
+    # boundary is checked here without creating a host-side pair directory.
+    validate_stage_binding(config, collected, proof, receipt)
+    require(run.record.get("phase") == "deleted" and
+            not (root / "cleanup-errors.json").exists() and
+            run.record.get("identities") == {
+                "image_digest": proof["image_digest"],
+                "assets_digest": config["assets_digest"],
+                "source": config["source"],
+                "job_id": config["same_job_id"]}, "CLEANUP")
+    run.verify_collection()
+    report = _json_file(collected / "result.json", RESULT_BYTES)
+    require(type(report) is dict and set(report) == {
+                "schema", "status", "config", "image_digest", "profile_sha256",
+                "server", "client", "resource_manifest_sha256", "cleanup"} and
+            report["schema"] == "alopex.sql-four-case-container-pair/v1" and
+            report["status"] == "passed" and report["config"] == config and
+            report["image_digest"] == proof["image_digest"] and
+            report["profile_sha256"] == proof["profile_sha256"], "PAIR_FAILED")
+    server, client = report["server"], report["client"]
+    require(type(server) is dict and type(client) is dict and
+            set(server) == {"pid", "start_ticks", "url", "pid_namespace", "net_namespace"} and
+            set(client) == {"pid", "start_ticks", "pid_namespace", "net_namespace"} and
+            all(type(item.get(key)) is int and item[key] > 0
+                for item in (server, client) for key in ("pid", "start_ticks")) and
+            server["pid"] != client["pid"] and
+            type(server["url"]) is str and
+            server["url"].startswith("http://127.0.0.1:") and
+            all(type(item.get(key)) is str and item[key].startswith(prefix) and
+                item[key].endswith("]")
+                for item in (server, client)
+                for key, prefix in (("pid_namespace", "pid:["),
+                                    ("net_namespace", "net:["))) and
+            server["pid_namespace"] == client["pid_namespace"] and
+            server["net_namespace"] == client["net_namespace"] and
+            report["cleanup"] == {"server_reaped": True,
+                                  "worker_reaped": True,
+                                  "process_groups_empty": True} and
+            _hex(report["resource_manifest_sha256"], 64), "PAIR_IDENTITY")
+    identity = {"pid": server["pid"], "start_ticks": server["start_ticks"]}
+    require(digest(_private_file(collected / "resources.json", RESULT_BYTES)) ==
+            report["resource_manifest_sha256"], "RESOURCE_IDENTITY")
+    _verify_subject({"ALOPEX_PERF_SUBJECT_MANIFEST": str(collected / "subject.json"),
+                     "ALOPEX_PERF_SUBJECT_SHA256": digest(_private_file(
+                         collected / "subject.json", RESULT_BYTES)),
+                     "ALOPEX_PERF_SQL_RESOURCE_MANIFEST": str(collected / "resources.json"),
+                     "ALOPEX_PERF_SERVER_URL": server["url"]},
+                    config, identity, server["url"])
+    verified = verify_output(config, collected, identity,
+                             report["resource_manifest_sha256"])
+    return {"status": "passed", "server": identity,
+            "server_timing": verified["server_timing"],
+            "collection_verified": True, "owned_resources_cleaned": True}
