@@ -498,7 +498,7 @@ jobs:
           ref: 490f002dfb2c7f509a2444891808d9704fe6b001
           fetch-depth: 1
           path: frozen-wal-controller
-      - name: Qualify, capture signed indexes, and measure on the same runner
+      - name: Qualify, capture signed indexes, measure WAL, and check candidate closure
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}

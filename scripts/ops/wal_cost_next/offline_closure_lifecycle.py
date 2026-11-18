@@ -27,6 +27,15 @@ KEEPER = ["-c", "sleep 900"]
 OWNER = "org.alopex.test-env.owner=envctl"
 OFFLINE_GROWTH_LIMIT = 64_000_000
 CANDIDATE_BYTES_LIMIT = 2_000_000
+CLOSURE_MISMATCH_REASONS = frozenset(("download budget", "installed-size budget"))
+
+
+def closure_mismatch(error: BaseException) -> bool:
+    """Only package closure failures may be diagnostic rather than guard failures."""
+    return (type(error) is LockError and
+            (str(error) in CLOSURE_MISMATCH_REASONS or
+             str(error).startswith(("unsatisfied Depends: ",
+                                    "unsatisfied Pre-Depends: "))))
 
 
 def verify_context(docker, profile: dict) -> None:
@@ -242,6 +251,7 @@ def run_candidate_lifecycle(profile: dict, prior: dict, private: Path, module,
     identity = None
     primary = None
     candidate = None
+    mismatch = False
     cleanup_error = None
     try:
         monitor.start()
@@ -277,8 +287,12 @@ def run_candidate_lifecycle(profile: dict, prior: dict, private: Path, module,
         signal.signal(signal.SIGALRM, timeout)
         try:
             signal.setitimer(signal.ITIMER_REAL, profile["limits"]["run_seconds"])
-            candidate = candidate_closure(base, auth, proof_hash, indexes,
-                                          apt_uris, resolver_sha, comparator.compare)
+            try:
+                candidate = candidate_closure(base, auth, proof_hash, indexes,
+                                              apt_uris, resolver_sha, comparator.compare)
+            except LockError as error:
+                mismatch = closure_mismatch(error)
+                raise
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, prior_handler)
@@ -339,8 +353,10 @@ def run_candidate_lifecycle(profile: dict, prior: dict, private: Path, module,
                 "status": "candidate" if primary is None and cleanup_error is None and
                 run.record["phase"] == "deleted" else "failed",
                 "proof_sha256": proof_hash,
-                "error_code": None if primary is None and cleanup_error is None else
-                getattr(primary or cleanup_error, "code", "COMMAND")})
+                "error_code": (None if primary is None and cleanup_error is None else
+                               "CLOSURE_MISMATCH" if mismatch and cleanup_error is None and
+                               primary is not None and monitor.failure is None else
+                               getattr(primary or cleanup_error, "code", "COMMAND"))})
     if cleanup_error is not None:
         raise LockError("offline cleanup failed") from cleanup_error
     if primary is not None:

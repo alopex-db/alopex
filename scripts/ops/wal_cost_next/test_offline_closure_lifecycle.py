@@ -262,6 +262,21 @@ class OwnedLifecycleTests(unittest.TestCase):
         self.assertEqual(json.loads((run / "final-result.private.json").read_text())["status"],
                          "failed")
 
+    def test_only_package_closure_failure_is_diagnostic(self):
+        with self.assertRaisesRegex(LockError, "unsatisfied Depends"):
+            self.execute(failure=LockError("unsatisfied Depends: libx"))
+        run = Path(self.profile["private_output"]) / RUN_ID
+        final = json.loads((run / "final-result.private.json").read_text())
+        self.assertEqual(final["error_code"], "CLOSURE_MISMATCH")
+        self.assertEqual(json.loads((run / "run.json").read_text())["phase"], "deleted")
+
+    def test_proof_error_is_not_diagnostic(self):
+        with self.assertRaisesRegex(LockError, "candidate proof digest"):
+            self.execute(failure=LockError("candidate proof digest"))
+        run = Path(self.profile["private_output"]) / RUN_ID
+        final = json.loads((run / "final-result.private.json").read_text())
+        self.assertNotEqual(final["error_code"], "CLOSURE_MISMATCH")
+
     def test_owner_drift_blocks_removal_and_retains_cleanup_error(self):
         original = self.owned_inspect
         def drift(item):
