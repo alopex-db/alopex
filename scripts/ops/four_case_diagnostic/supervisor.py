@@ -300,7 +300,7 @@ def verify_output(config, output, identity, resource_digest):
     events = log_parser.parse_server_timing(output / "server.log", config["case"],
                                             config["trial"], clients["on"], clients["off"])
     return {"cells": cells, "clients": clients, "server_timing": events,
-            "server": identity}
+            "server": identity, "client_identity": client_identity}
 
 
 def run_owned_pair(config, output, *, source, assets_digest, job_id, start,
@@ -464,6 +464,8 @@ def run_collected_pair(config, run, proof, receipt):
                     config, identity, server["url"])
     verified = verify_output(config, collected, identity,
                              report["resource_manifest_sha256"])
+    require(verified["client_identity"] ==
+            (client["pid"], client["start_ticks"]), "CLIENT_IDENTITY")
     return {"status": "passed", "server": identity,
             "server_timing": verified["server_timing"],
             "collection_verified": True, "owned_resources_cleaned": True}

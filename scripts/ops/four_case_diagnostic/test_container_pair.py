@@ -66,7 +66,8 @@ class ContainerPairTests(unittest.TestCase):
         path.chmod(0o600)
 
     def test_collected_run_requires_verified_evidence_and_clean_owner(self):
-        with patch.object(supervisor, "verify_output", return_value={"server_timing": []}) as output:
+        with patch.object(supervisor, "verify_output", return_value={
+                "server_timing": [], "client_identity": (202, 302)}) as output:
             observed = supervisor.run_collected_pair(
                 self.config, self.run, self.proof, self.receipt)
         self.assertTrue(self.run.verified)
@@ -93,14 +94,22 @@ class ContainerPairTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "PAIR_FAILED"):
             supervisor.run_collected_pair(self.config, self.run, self.proof, self.receipt)
 
+    def test_collected_client_must_match_raw_observation(self):
+        with patch.object(supervisor, "verify_output", return_value={
+                "server_timing": [], "client_identity": (999, 302)}):
+            with self.assertRaisesRegex(ValueError, "CLIENT_IDENTITY"):
+                supervisor.run_collected_pair(
+                    self.config, self.run, self.proof, self.receipt)
+
     def test_entrypoint_rejects_external_or_changed_namespace(self):
         changed = dict(self.client, net_namespace="net:[9999]")
         with self.assertRaisesRegex(ValueError, "PAIR_IDENTITY"):
             inside.validate_process_pair(self.server, changed, self.url)
         with self.assertRaisesRegex(ValueError, "PAIR_IDENTITY"):
             inside.validate_process_pair(self.server, self.client, "http://0.0.0.0:8080")
-        with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
-            inside.main()
+        with patch.object(inside.sys, "platform", "darwin"):
+            with self.assertRaisesRegex(ValueError, "POLICY"):
+                inside.main()
 
     def test_collected_report_rejects_malformed_url_and_namespace(self):
         for url in ("http://127.0.0.1:0", "http://127.0.0.1:65536",

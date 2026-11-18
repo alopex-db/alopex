@@ -1,7 +1,10 @@
-"""Offline boundary tests for the unimplemented owned container handoff."""
+"""Offline source-pinned staging checks; no container is started."""
+import hashlib
+import json
 import tempfile
 from pathlib import Path
 import unittest
+from unittest.mock import Mock
 
 from . import stage_pair
 from .test_qualification import fixture, JOB
@@ -51,6 +54,46 @@ class StagePairTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "^PAIR_STAGE$"):
             stage_pair.validate_stage_binding(
                 self.config, self.output, self.proof, self.receipt)
+
+    def test_extra_bundle_requires_exact_named_sources(self):
+        root = Path(self.temp.name)
+        package_root = root / "package"
+        docs_root, product_root = root / "docs", root / "product"
+        package = {}
+        for name in ("__init__", "adapter", "log_parser", "operation", "oracle",
+                     "runner", "worker", "supervisor", "container_pair_entrypoint"):
+            path = package_root / "four_case_diagnostic" / f"{name}.py"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"# {name}\n")
+            package[f"four_case_diagnostic/{name}.py"] = hashlib.sha256(
+                path.read_bytes()).hexdigest()
+        for harness in (docs_root, product_root):
+            path = harness / "scripts/performance/subject_identity.py"
+            path.parent.mkdir(parents=True)
+            path.write_text("# pinned harness\n")
+        harness_digest = hashlib.sha256(
+            (docs_root / "scripts/performance/subject_identity.py").read_bytes()).hexdigest()
+        manifest = {"package_root": str(package_root), "package_files": package,
+                    "docs_harness_root": str(docs_root),
+                    "product_harness_root": str(product_root),
+                    "docs_files": {"subject_identity.py": harness_digest},
+                    "product_files": {"subject_identity.py": harness_digest}}
+        bundle = root / "bundle"
+        files = stage_pair._extra_bundle(
+            manifest, self.config, self.proof, {"platform": "linux/amd64"},
+            bundle, Mock())
+        self.assertEqual(len(files), 11)
+        self.assertEqual(json.loads((bundle / "stage.json").read_text())["files"], files)
+        (package_root / "four_case_diagnostic/worker.py").write_text("# changed\n")
+        with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
+            stage_pair._extra_bundle(
+                manifest, self.config, self.proof, {"platform": "linux/amd64"},
+                root / "changed", Mock())
+        manifest["docs_files"] = {"../escape.py": harness_digest}
+        with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
+            stage_pair._extra_bundle(
+                manifest, self.config, self.proof, {"platform": "linux/amd64"},
+                root / "escape", Mock())
 
 
 if __name__ == "__main__":
