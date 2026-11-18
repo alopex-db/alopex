@@ -414,8 +414,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Enforce dependency duplication policy
-        # Preserve the upstream container and arguments; verify fixed asset bytes.
-        uses: ./.github/actions/cargo-deny
+        # Execute reviewed controller bytes, not the PR checkout's local action.
+        uses: alopex-db/alopex/.github/actions/cargo-deny@de1b61a97b34fafc254f7764deeab9622aaa22dd
         with:
           command: check bans
           arguments: --all-features --locked

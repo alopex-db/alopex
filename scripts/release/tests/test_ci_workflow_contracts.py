@@ -215,7 +215,11 @@ class CiWorkflowContractTests(unittest.TestCase):
 
     def test_ci_tools_preserve_versions_and_verify_public_asset_bytes(self) -> None:
         workflow = self.workflow("ci.yml")
-        self.assertIn("uses: ./.github/actions/cargo-deny", workflow)
+        self.assertIn(
+            "uses: alopex-db/alopex/.github/actions/cargo-deny@"
+            "de1b61a97b34fafc254f7764deeab9622aaa22dd", workflow
+        )
+        self.assertNotIn("uses: ./.github/actions/cargo-deny", workflow)
         action = REPOSITORY_ROOT / ".github/actions/cargo-deny"
         dockerfile = (action / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("rust:1.85.0-alpine3.20@sha256:f0cef6c65992995b1c7816cb667de95799852e3fbed9d06f95855cbc512a0fd0", dockerfile)
