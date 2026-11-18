@@ -47,7 +47,8 @@ class SealRetryTests(unittest.TestCase):
         run.mkdir(parents=True)
         storage = {"reserve_bytes": 1, "stop_bytes": 40_000_000_000}
         for path, value in ((private / "profile.json", {"run_id": "run", "storage": storage}),
-                            (run / "run.json", {"phase": "deleted"}),
+                            (run / "run.json", {"run_id": "run-trace-resolve",
+                                                "phase": "deleted"}),
                             (run / "capture-budget.private.json", {
                                 "capture_limit_bytes": seal_module.LIMIT,
                                 "allocated_before_bytes": 100})):
@@ -282,7 +283,8 @@ class SealRetryTests(unittest.TestCase):
             for path, value in ((private / "profile.json", {
                 "run_id": "run", "storage": {"reserve_bytes": 1,
                                               "stop_bytes": 40_000_000_000}}),
-                                (run / "run.json", {"phase": "stopped"}),
+                                (run / "run.json", {"run_id": "run-trace-resolve",
+                                                    "phase": "stopped"}),
                                 (run / "failure.json", {"error_code": "COMMAND"})):
                 path.write_text(json.dumps(value))
                 path.chmod(0o600)
@@ -345,7 +347,8 @@ class SealRetryTests(unittest.TestCase):
             (private / "profile.json").write_text(json.dumps({
                 "run_id": "run", "storage": {"reserve_bytes": 1,
                                               "stop_bytes": 40_000_000_000}}))
-            (run / "run.json").write_text(json.dumps({"phase": "deleted"}))
+            (run / "run.json").write_text(json.dumps({
+                "run_id": "run-trace-resolve", "phase": "deleted"}))
             (run / "capture-budget.private.json").write_text(json.dumps({
                 "capture_limit_bytes": seal_module.LIMIT,
                 "allocated_before_bytes": 100}))
@@ -353,10 +356,18 @@ class SealRetryTests(unittest.TestCase):
                          run / "capture-budget.private.json"):
                 name.chmod(0o600)
             (run / "bootstrap.private.json").write_text("bootstrap evidence")
-            (run / "collection.json").write_text("collection evidence")
             (collected / "capture.status").write_text("capture-complete\n")
             (collected / "index.bin").write_bytes(b"index payload" * 1000)
-            (proof / "proof.sha256").write_text("signed proof")
+            manifest = {name: seal_module.digest(collected / name)
+                        for name in ("capture.status", "index.bin")}
+            (run / "collection.json").write_text(json.dumps(manifest))
+            (run / "collection.json").chmod(0o600)
+            authentication = {"signature_verified": True, "indexes": []}
+            (proof / "authentication.json").write_text(json.dumps(authentication))
+            canonical = json.dumps(authentication, sort_keys=True,
+                                   separators=(",", ":")).encode()
+            proof_hash = seal_module.hashlib.sha256(canonical).hexdigest()
+            (proof / "proof.sha256").write_text(proof_hash)
             certificate = root / "cert.pem"
             key = root / "key.pem"
             subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048",
@@ -367,6 +378,8 @@ class SealRetryTests(unittest.TestCase):
             with patch.object(seal_module, "Budget", FakeBudget):
                 result = seal_module._seal_full(private, certificate, root / "export")
             self.assertEqual(result["outcome"], "passed")
+            self.assertEqual(result["capture_run_id"], "run-trace-resolve")
+            self.assertEqual(result["proof_sha256"], proof_hash)
             ciphertext = root / "export" / "private-evidence.cms"
             self.assertEqual(result["evidence_sha256"], seal_module.digest(ciphertext))
             decrypted = subprocess.run(
@@ -378,9 +391,22 @@ class SealRetryTests(unittest.TestCase):
                 self.assertEqual(archive.extractfile("collected/index.bin").read(),
                                  b"index payload" * 1000)
                 self.assertEqual(archive.extractfile("proof/proof.sha256").read(),
-                                 b"signed proof")
+                                 proof_hash.encode())
                 self.assertIn("capture-budget.private.json", archive.getnames())
             self.assertFalse(list(root.glob("export.pending-*")))
+            with patch.object(seal_module, "Budget", FakeBudget):
+                self.assertEqual(seal_module._seal_full(
+                    private, certificate, root / "export"), result)
+            (proof / "proof.sha256").write_text("0" * 64)
+            with self.assertRaises(Failure):
+                seal_module._seal_full(private, certificate, root / "export")
+            (proof / "proof.sha256").write_text(proof_hash)
+            public_path = root / "export" / "public.json"
+            wrong = json.loads(public_path.read_text())
+            wrong["capture_run_id"] = "other-run"
+            public_path.write_text(json.dumps(wrong))
+            with self.assertRaises(Failure):
+                seal_module._seal_full(private, certificate, root / "export")
 
     def test_sealer_allows_a_second_copy_but_caps_ciphertext(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -391,7 +417,8 @@ class SealRetryTests(unittest.TestCase):
             for path, value in ((private / "profile.json", {
                 "run_id": "run", "storage": {"reserve_bytes": 1,
                                               "stop_bytes": 40_000_000_000}}),
-                                (run / "run.json", {"phase": "stopped"}),
+                                (run / "run.json", {"run_id": "run-trace-resolve",
+                                                    "phase": "stopped"}),
                                 (run / "failure.json", {"error_code": "COMMAND"}),
                                 (run / "capture-budget.private.json", {
                                     "capture_limit_bytes": seal_module.LIMIT,
@@ -451,7 +478,8 @@ class SealRetryTests(unittest.TestCase):
             for path, value in ((private / "profile.json", {
                 "run_id": "run", "storage": {"reserve_bytes": reserve,
                                           "stop_bytes": stop}}),
-                                (run / "run.json", {"phase": "stopped"}),
+                                (run / "run.json", {"run_id": "run-trace-resolve",
+                                                    "phase": "stopped"}),
                                 (run / "failure.json", {"error_code": "COMMAND"}),
                                 (run / "capture-budget.private.json", {
                                     "capture_limit_bytes": seal_module.LIMIT,

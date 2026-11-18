@@ -129,6 +129,10 @@ def captured_inputs(profile: dict) -> tuple[dict, dict, str, dict[str, bytes], s
     if run.record["phase"] != "deleted":
         raise LockError("signed capture not deleted")
     run.verify_collection()
+    if (run.record["identities"].get("base") != BASE or
+            (run.root / "collected" / "capture.status").read_text() !=
+            "capture-complete\n"):
+        raise LockError("signed capture identity")
     proof = run.root / "proof"
     if (not proof.is_dir() or proof.is_symlink() or
             proof.stat().st_uid != os.getuid() or proof.stat().st_mode & 0o077):
@@ -153,7 +157,26 @@ def captured_inputs(profile: dict) -> tuple[dict, dict, str, dict[str, bytes], s
         indexes[name] = path.read_bytes()
     apt_uris = (run.root / "collected" / "apt-uris.txt").read_text()
     resolver_sha = auth["resolver_sha256"]
+    if run.record["identities"].get("resolver_sha256") != resolver_sha:
+        raise LockError("signed resolver identity")
     return base, auth, proof_hash, indexes, apt_uris, resolver_sha
+
+
+def verify_sealed_receipt(profile: dict, receipt: dict, proof_hash: str) -> None:
+    """Bind the supplied receipt to this run's current sealed CMS and proof."""
+    output = Path(os.environ["GITHUB_WORKSPACE"]) / "signed-index-export"
+    public = read_json(output / "public.json")
+    ciphertext = output / "private-evidence.cms"
+    if (public != receipt or
+            receipt.get("schema") != "alopex.signed-index-capture/v1" or
+            receipt.get("case") != "SIGNED_INDEX_CAPTURE" or
+            receipt.get("outcome") != "passed" or
+            receipt.get("error_code") is not None or
+            receipt.get("capture_run_id") != profile["run_id"] + "-trace-resolve" or
+            receipt.get("proof_sha256") != proof_hash or
+            not ciphertext.is_file() or ciphertext.is_symlink() or
+            digest(ciphertext) != receipt.get("evidence_sha256")):
+        raise LockError("signed receipt identity")
 
 
 def admit_offline(profile: dict, prior: dict, module, private: Path):
@@ -201,11 +224,11 @@ def run_candidate_lifecycle(profile: dict, prior: dict, private: Path, module,
     The caller has already qualified #804, captured indexes and sealed a passed
     signed-index receipt. No production trust pin is set or formal lock emitted.
     """
-    if (signed_receipt.get("outcome") != "passed" or
-            threading.current_thread() is not threading.main_thread()):
+    if threading.current_thread() is not threading.main_thread():
         raise LockError("offline candidate prerequisites")
     budget, _ = admission(profile, prior, module, private)
     base, auth, proof_hash, indexes, apt_uris, resolver_sha = captured_inputs(profile)
+    verify_sealed_receipt(profile, signed_receipt, proof_hash)
     used = budget.used()
     baseline = prior["baseline_bytes"]
     if (used - baseline > ORIGINAL_ALLOWANCE + EXTRA_LIMIT or
@@ -269,6 +292,8 @@ def run_candidate_lifecycle(profile: dict, prior: dict, private: Path, module,
         primary = error
     finally:
         monitor.cleanup_mode = True
+        if monitor.failure is not None and primary is None:
+            primary = monitor.failure
         if run is not None and docker is not None:
             try:
                 if identity is not None:
@@ -286,11 +311,11 @@ def run_candidate_lifecycle(profile: dict, prior: dict, private: Path, module,
                     run.transition("stopped")
                 def collect(staging):
                     result = {"schema": "alopex.trace-closure-result/v1",
-                              "status": "candidate" if primary is None else "failed",
+                              "status": "pending_monitor" if primary is None else "failed",
                               "error_code": None if primary is None else
                               getattr(primary, "code", "COMMAND")}
                     (staging / "result.json").write_text(json.dumps(result) + "\n")
-                    if candidate is not None:
+                    if candidate is not None and primary is None:
                         (staging / "candidate.private.json").write_text(
                             json.dumps(candidate, sort_keys=True) + "\n")
                 run.collect(collect)
@@ -302,10 +327,20 @@ def run_candidate_lifecycle(profile: dict, prior: dict, private: Path, module,
                     "original_error": repr(primary)[:4096]})
         try:
             monitor.stop()
+            if monitor.failure is not None and primary is None:
+                primary = monitor.failure
             if budget.used() + RESERVE >= STOP:
                 raise LockError("offline post-cleanup capacity")
         except BaseException as error:
             cleanup_error = cleanup_error or error
+        if run is not None:
+            atomic_json(run.root / "final-result.private.json", {
+                "schema": "alopex.trace-closure-final/v1",
+                "status": "candidate" if primary is None and cleanup_error is None and
+                run.record["phase"] == "deleted" else "failed",
+                "proof_sha256": proof_hash,
+                "error_code": None if primary is None and cleanup_error is None else
+                getattr(primary or cleanup_error, "code", "COMMAND")})
     if cleanup_error is not None:
         raise LockError("offline cleanup failed") from cleanup_error
     if primary is not None:
