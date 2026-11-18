@@ -18,6 +18,24 @@ RUNTIME = BASE.replace("Self::Select => false", "Self::Select => visitor(self)")
 
 
 class WriteClassifierExceptionTests(unittest.TestCase):
+    def test_promql_parser_and_lexer_are_wire_related(self):
+        for name in ("promql_parser.nim", "promql_lexer.nim"):
+            with self.subTest(name=name):
+                path = "crates/alopex-sql/nim-sql-parser/src/" + name
+                self.assertTrue(contract.wire_related(path))
+                def source(revision, source_path):
+                    if source_path == contract.CONTRACT_PATH:
+                        return "0.28.0"
+                    if source_path == contract.CONSUMER_PATH:
+                        return 'pub(crate) const REQUIRED_CONTRACT_VERSION: &str = "0.28.0";'
+                    if source_path == contract.MANIFEST_TOOL_PATH:
+                        return 'REQUIRED_CONTRACT_VERSION = "0.28.0"'
+                    raise AssertionError((revision, source_path))
+
+                with patch.object(contract, "git", return_value=(path + "\0").encode()), patch.object(contract, "source_at", side_effect=source):
+                    with self.assertRaisesRegex(ValueError, "without a contract version increase"):
+                        contract.check("base", "head")
+
     def test_runtime_body_only_is_accepted(self):
         self.assertTrue(contract.runtime_only_ast_change(BASE, RUNTIME))
 
