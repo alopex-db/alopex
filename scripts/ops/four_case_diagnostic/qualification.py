@@ -18,7 +18,8 @@ PIN_FIELDS = frozenset(("source_commit", "source_tree", "artifact_id",
                         "artifact_sha256", "assets_digest", "server_sha256",
                         "wheel_sha256", "controller_commit", "controller_digest",
                         "asset_run_id", "asset_run_head", "zip_sha256",
-                        "asset_zip_size_bytes",
+                        "asset_zip_size_bytes", "asset_file_digests",
+                        "common_verifier_sha256",
                         "harness_commit", "image_lock_sha256", "seccomp_sha256",
                         "operator_sha256"))
 PROOF_FIELDS = frozenset(("job_id", "qualification_public", "profile",
@@ -34,6 +35,7 @@ RECEIPT_FIELDS = frozenset(("job_id", "source_commit", "source_tree",
                             "security_profile_digest"))
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+ASSET_ROLES = frozenset(("server", "wheel", "library", "receipt", "harness"))
 
 
 def require(value, code):
@@ -86,8 +88,14 @@ def validate(lock, proof, receipt, *, job_id, expected_source_commit,
             all(_hex(pin[key], HEX64) for key in
                 ("artifact_sha256", "assets_digest", "server_sha256", "wheel_sha256",
                  "controller_digest", "zip_sha256", "image_lock_sha256",
+                 "common_verifier_sha256",
                  "seccomp_sha256")) and
-            pin["artifact_sha256"] == pin["zip_sha256"], "MISSING_PIN")
+            pin["artifact_sha256"] == pin["zip_sha256"] and
+            type(pin["asset_file_digests"]) is dict and
+            set(pin["asset_file_digests"]) == ASSET_ROLES and
+            all(_hex(value, HEX64) for value in pin["asset_file_digests"].values()) and
+            pin["asset_file_digests"]["server"] == pin["server_sha256"] and
+            pin["asset_file_digests"]["wheel"] == pin["wheel_sha256"], "MISSING_PIN")
     require(type(proof) is dict and set(proof) == PROOF_FIELDS and
             proof["job_id"] == job_id and proof["temp_snapshot_verified"] is True,
             "QUALIFICATION")

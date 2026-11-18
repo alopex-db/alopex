@@ -23,6 +23,12 @@ def fixture():
            "controller_digest": "a" * 63 + "b", "asset_run_id": 88,
            "asset_run_head": "b" * 39 + "c", "zip_sha256": "6" * 63 + "7",
            "asset_zip_size_bytes": 12345,
+           "asset_file_digests": {"server": "8" * 63 + "9",
+                                  "wheel": "9" * 63 + "a",
+                                  "library": "1" * 63 + "a",
+                                  "receipt": "2" * 63 + "b",
+                                  "harness": "3" * 63 + "c"},
+           "common_verifier_sha256": "4" * 63 + "d",
            "harness_commit": "c" * 39 + "d", "image_lock_sha256": "d" * 63 + "e",
            "seccomp_sha256": "e" * 63 + "f", "operator_sha256": OPERATORS}
     lock = {"schema": "alopex.sql-four-case-pins/v1", "pin": pin}
@@ -118,6 +124,13 @@ class QualificationContractTests(unittest.TestCase):
                 lock["pin"][path] = value
                 with self.assertRaises(ValueError):
                     checked(lock, proof, receipt)
+        for change in (lambda p: p["asset_file_digests"].pop("library"),
+                       lambda p: p["asset_file_digests"].update(library="0" * 64),
+                       lambda p: p.update(common_verifier_sha256="0" * 64)):
+            lock, proof, receipt = fixture()
+            change(lock["pin"])
+            with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
+                checked(lock, proof, receipt)
         lock, proof, receipt = fixture()
         lock["pin"]["unexpected"] = True
         with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
