@@ -40,9 +40,10 @@ REQUIRED_OPERATORS = frozenset({
     "hosted_test_env_qualification_four_case.py",
     *(f"four_case_diagnostic/{name}.py" for name in (
         "__init__", "acquire", "acquisition", "adapter", "attestor", "audit",
-        "controller",
+        "container_pair_entrypoint", "controller",
         "entrypoint", "intake", "log_parser", "operation", "oracle",
-        "producer", "qualification", "runner", "supervisor", "worker")),
+        "producer", "qualification", "runner", "stage_pair", "supervisor",
+        "worker")),
 })
 
 

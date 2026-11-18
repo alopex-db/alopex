@@ -137,10 +137,14 @@ class QualificationContractTests(unittest.TestCase):
             checked(lock, proof, receipt)
 
     def test_rejects_omitted_operator_pin(self):
-        lock, proof, receipt = fixture()
-        lock["pin"]["operator_sha256"].pop("four_case_diagnostic/entrypoint.py")
-        with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
-            checked(lock, proof, receipt)
+        for name in ("four_case_diagnostic/entrypoint.py",
+                     "four_case_diagnostic/stage_pair.py",
+                     "four_case_diagnostic/container_pair_entrypoint.py"):
+            with self.subTest(name=name):
+                lock, proof, receipt = fixture()
+                lock["pin"]["operator_sha256"].pop(name)
+                with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
+                    checked(lock, proof, receipt)
 
     def test_rejects_prior_job_and_partial_checks(self):
         for change in (lambda p: p.update(job_id="12345677"),
