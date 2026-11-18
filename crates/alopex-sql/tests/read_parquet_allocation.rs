@@ -1975,6 +1975,7 @@ fn partial_modern_page_statistics_ignore_malformed_legacy_bounds() {
     .unwrap();
     let payload_start = page_start + input.position() as usize;
     let payload_end = payload_start + header.compressed_page_size as usize;
+    assert!(payload_end <= footer_start);
     header.data_page_header.as_mut().unwrap().statistics = Some(parquet_wire::format::Statistics {
         min: Some(vec![0]),
         max: Some(vec![0]),
