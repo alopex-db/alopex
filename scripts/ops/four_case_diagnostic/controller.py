@@ -17,7 +17,8 @@ from . import adapter, entrypoint, qualification, supervisor
 SCHEMA = "alopex.sql-four-case-controller/v1"
 MANIFEST_FIELDS = frozenset(("schema", "lock_sha256",
                              "source_commit", "source_tree", "assets_digest",
-                             "fixture_sha256", "package_files"))
+                             "fixture_sha256", "package_files", "docs_files",
+                             "product_files"))
 
 
 def require(value, code):
@@ -61,10 +62,21 @@ def load_manifest(path, expected_digest):
             type(manifest["package_files"]) is dict and
             set(manifest["package_files"]) == {
                 f"four_case_diagnostic/{name}.py" for name in
-                ("__init__", "adapter", "log_parser", "operation", "oracle",
-                 "runner", "worker")} and
+                ("__init__", "adapter", "container_pair_entrypoint",
+                 "log_parser", "operation", "oracle", "runner", "supervisor",
+                 "worker")} and
             all(type(value) is str and qualification.HEX64.fullmatch(value)
-                for value in manifest["package_files"].values()), "PRIVATE_MANIFEST")
+                for value in manifest["package_files"].values()) and
+            all(type(manifest[key]) is dict and 0 < len(manifest[key]) <= 32 and
+                all(type(name) is str and name.endswith(".py") and
+                    Path(name).name == name and
+                    type(value) is str and qualification.HEX64.fullmatch(value)
+                    for name, value in manifest[key].items())
+                for key in ("docs_files", "product_files")) and
+            {"subject_identity.py", "sql_resources.py"} <=
+            set(manifest["docs_files"]) and
+            "parity_v0811_measure.py" in manifest["product_files"],
+            "PRIVATE_MANIFEST")
     return manifest
 
 
@@ -214,7 +226,9 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
                       "modes": ["on", "off"], "source": source,
                       "assets_digest": pin["assets_digest"],
                       "same_job_id": job_id,
-                      "fixture_sha256": manifest["fixture_sha256"]}
+                      "fixture_sha256": manifest["fixture_sha256"],
+                      "docs_files": manifest["docs_files"],
+                      "product_files": manifest["product_files"]}
             run = stage_pair(config, pair_output, proof, receipt)
             require(hasattr(run, "root") and type(getattr(run, "record", None)) is dict and
                     callable(getattr(run, "verify_collection", None)) and

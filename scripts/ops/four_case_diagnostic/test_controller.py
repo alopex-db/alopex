@@ -30,8 +30,12 @@ class ControllerTests(unittest.TestCase):
             "assets_digest": self.lock["pin"]["assets_digest"],
             "fixture_sha256": "a" * 64,
             "package_files": {f"four_case_diagnostic/{name}.py": "b" * 64 for name in
-                              ("__init__", "adapter", "log_parser", "operation",
-                               "oracle", "runner", "worker")}}
+                              ("__init__", "adapter", "container_pair_entrypoint",
+                               "log_parser", "operation", "oracle", "runner",
+                               "supervisor", "worker")},
+            "docs_files": {"subject_identity.py": "c" * 64,
+                           "sql_resources.py": "d" * 64},
+            "product_files": {"parity_v0811_measure.py": "e" * 64}}
         self.manifest_path = self.root / "manifest.json"
         self.output = self.root / "output"
         self.env = {"GITHUB_RUN_ID": JOB, "GITHUB_RUN_ATTEMPT": "1",
@@ -106,6 +110,10 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual([(case, trial) for case, trial, _ in staged],
                          [(case, trial) for case in adapter.CASES for trial in range(3)])
         self.assertEqual(pair.call_count, 12)
+        self.assertEqual(pair.call_args.args[0]["docs_files"],
+                         self.manifest["docs_files"])
+        self.assertEqual(pair.call_args.args[0]["product_files"],
+                         self.manifest["product_files"])
         self.assertEqual(attest.call_count, 1)
         self.assertTrue((self.output / "receipt.private.json").is_file())
         self.assertEqual(controller.verify_public_receipt(
@@ -125,6 +133,12 @@ class ControllerTests(unittest.TestCase):
         attest.assert_not_called()
         self.assertEqual(json.loads((self.output / "receipt.public.json").read_text())
                          ["status"], "failed")
+
+    def test_rejects_missing_harness_inventory(self):
+        self.manifest["docs_files"].pop("sql_resources.py")
+        digest = self.save()
+        with self.assertRaisesRegex(ValueError, "PRIVATE_MANIFEST"):
+            controller.load_manifest(self.manifest_path, digest)
 
     def test_failed_pair_never_emits_success_receipt(self):
         digest = self.save()
