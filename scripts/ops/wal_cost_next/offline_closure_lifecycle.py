@@ -16,8 +16,17 @@ KEEPER = ["-c", "sleep 900"]
 OWNER = "org.alopex.test-env.owner=envctl"
 
 
+def verify_context(docker, profile: dict) -> None:
+    """Bind both Docker operations and policy construction to this profile."""
+    context = profile.get("docker_context")
+    if (not context or docker.profile != profile or
+            docker.prefix != ["docker", "--context", context]):
+        raise LockError("offline Docker context drift")
+
+
 def create_arguments(docker, profile: dict, run_id: str, token: str) -> list[str]:
     """Build a narrower create request from the already admitted #804 profile."""
+    verify_context(docker, profile)
     if (profile.get("platform") != PLATFORM or
             profile.get("execution_mode") != "native" or
             run_id != profile.get("run_id", "") + "-trace-lock" or
@@ -30,7 +39,12 @@ def create_arguments(docker, profile: dict, run_id: str, token: str) -> list[str
         raise LockError("offline profile identity")
     limits = profile["limits"]
     cpus = sorted(set(profile["cpu"]["server"] + profile["cpu"]["client"]))
-    if not cpus or limits.get("memory_bytes") != 1_610_612_736 or limits.get("swap_bytes") != 0 or limits.get("pids") != 256:
+    if (not cpus or any(type(cpu) is not int or cpu < 0 for cpu in cpus) or
+            type(limits.get("memory_bytes")) is not int or
+            limits["memory_bytes"] <= 0 or
+            type(limits.get("swap_bytes")) is not int or
+            limits["swap_bytes"] < 0 or
+            type(limits.get("pids")) is not int or limits["pids"] <= 0):
         raise LockError("offline resource profile")
     return ["create", "--name", "alopex-test-" + run_id, "--init",
             "--pull=never", "--platform", PLATFORM, "--network=none",
@@ -39,7 +53,7 @@ def create_arguments(docker, profile: dict, run_id: str, token: str) -> list[str
             "--label", "org.alopex.test-env.run=" + run_id,
             "--label", "org.alopex.test-env.token=" + token,
             "--memory", str(limits["memory_bytes"]),
-            "--memory-swap", str(limits["memory_bytes"]),
+            "--memory-swap", str(limits["memory_bytes"] + limits["swap_bytes"]),
             "--pids-limit", str(limits["pids"]),
             "--cpuset-cpus", ",".join(map(str, cpus)),
             "--log-driver=local", "--log-opt=max-size=1m",
@@ -50,6 +64,7 @@ def create_arguments(docker, profile: dict, run_id: str, token: str) -> list[str
 def inspect_offline_container(docker, identity: str, profile: dict,
                               run_id: str, token: str, *, running: bool) -> dict:
     """Reject any authority, identity, resource, or lifecycle drift."""
+    verify_context(docker, profile)
     live = json.loads(docker.call("container", "inspect", identity))[0]
     host, config, state = live["HostConfig"], live["Config"], live["State"]
     normalized = lambda items: {item.removeprefix("CAP_").upper() for item in items or []}
@@ -69,7 +84,7 @@ def inspect_offline_container(docker, identity: str, profile: dict,
             config["User"] != OFFLINE_UID_GID or config["Image"] != BASE or
             config["Entrypoint"] != ["/bin/sh"] or config["Cmd"] != KEEPER or
             host["Memory"] != limits["memory_bytes"] or
-            host["MemorySwap"] != limits["memory_bytes"] or
+            host["MemorySwap"] != limits["memory_bytes"] + limits["swap_bytes"] or
             host["PidsLimit"] != limits["pids"] or not host["Init"] or
             host["CpusetCpus"] != ",".join(map(str, cpus)) or
             host["LogConfig"] != {"Type": "local", "Config": {

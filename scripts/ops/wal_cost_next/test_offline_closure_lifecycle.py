@@ -60,6 +60,8 @@ class OfflineLifecycleTests(unittest.TestCase):
         self.image = {"Id": IMAGE_ID, "Os": "linux", "Architecture": "amd64",
                       "RepoDigests": [BASE]}
         self.docker = Mock()
+        self.docker.profile = self.profile
+        self.docker.prefix = ["docker", "--context", "selected"]
         self.docker.policy.return_value = ["--security-opt", "seccomp=" +
                                            self.profile["security"]["seccomp_profile"],
                                            "--security-opt", "apparmor=docker-default"]
@@ -114,12 +116,36 @@ class OfflineLifecycleTests(unittest.TestCase):
             with self.subTest(field=field):
                 changed = copy.deepcopy(self.profile)
                 changed[field] = value
+                self.docker.profile = changed
                 with self.assertRaisesRegex(LockError, "offline profile identity"):
                     create_arguments(self.docker, changed, RUN_ID, TOKEN)
+                self.docker.profile = self.profile
         changed = copy.deepcopy(self.profile)
-        changed["limits"]["memory_bytes"] = 2_000_000_000
+        changed["limits"]["memory_bytes"] = 0
+        self.docker.profile = changed
         with self.assertRaisesRegex(LockError, "offline resource profile"):
             create_arguments(self.docker, changed, RUN_ID, TOKEN)
+
+    def test_rejects_different_docker_context_before_create_or_inspect(self):
+        self.docker.prefix = ["docker", "--context", "other"]
+        with self.assertRaisesRegex(LockError, "offline Docker context drift"):
+            create_arguments(self.docker, self.profile, RUN_ID, TOKEN)
+        with self.assertRaisesRegex(LockError, "offline Docker context drift"):
+            self.inspect()
+        self.docker.call.assert_not_called()
+
+    def test_uses_selected_profile_limits_without_fixed_product_values(self):
+        selected = copy.deepcopy(self.profile)
+        selected["limits"].update(memory_bytes=1_000_000_000, swap_bytes=0, pids=64)
+        self.docker.profile = selected
+        args = create_arguments(self.docker, selected, RUN_ID, TOKEN)
+        self.assertEqual(args[args.index("--memory") + 1], "1000000000")
+        self.assertEqual(args[args.index("--pids-limit") + 1], "64")
+        self.live["HostConfig"].update(Memory=1_000_000_000,
+                                       MemorySwap=1_000_000_000, PidsLimit=64)
+        self.assertEqual(inspect_offline_container(
+            self.docker, IDENTITY, selected, RUN_ID, TOKEN, running=True)["Id"],
+            IDENTITY)
 
 
 if __name__ == "__main__":
