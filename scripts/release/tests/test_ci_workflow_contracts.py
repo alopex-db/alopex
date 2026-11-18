@@ -145,7 +145,7 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("RUSTSEC-2026-0194", audit_job)
         self.assertNotIn("RUSTSEC-2026-0195", audit_job)
         tree_guard = audit_job.index(
-            "cargo tree --locked --workspace --all-features --target all"
+            "cargo tree --locked --workspace --all-features --target all --prefix none --format '{p}'"
         )
         audit_step = audit_job.index("name: Run RustSec audit")
         self.assertLess(tree_guard, audit_step)
@@ -162,6 +162,7 @@ class CiWorkflowContractTests(unittest.TestCase):
         workflow = self.workflow("trusted-security-audit.yml")
         self.assertIn("pull_request_target:", workflow)
         self.assertIn("branches: [main]", workflow)
+        self.assertIn("types: [opened, synchronize, reopened, ready_for_review, edited]", workflow)
         self.assertIn("contents: read", workflow)
         self.assertNotIn("pull-requests: write", workflow)
         self.assertIn("name: Trusted Security Audit", workflow)
@@ -174,9 +175,10 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertIn('if path != "Cargo.lock" and parts[-1] != "Cargo.toml":', workflow)
         self.assertIn('mode not in (b"100644", b"100755")', workflow)
         self.assertIn('manifest-path: audit-input/Cargo.toml', workflow)
-        self.assertIn('--config deny.toml', workflow)
+        self.assertIn('arguments: --all-features --locked --config deny.toml', workflow)
+        self.assertIn('uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25', workflow)
         self.assertIn('working-directory: audit-input', workflow)
-        self.assertIn('cargo tree --locked --workspace --all-features --target all', workflow)
+        self.assertIn("cargo tree --locked --workspace --all-features --target all --prefix none --format '{p}'", workflow)
         self.assertIn('cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0235', workflow)
         self.assertNotIn("continue-on-error", workflow)
 

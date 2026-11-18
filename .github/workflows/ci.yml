@@ -403,9 +403,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Enforce dependency duplication policy
-        # v2 currently packages cargo-deny 0.20.2. Pin the immutable commit so
+        # v2.1.1 packages cargo-deny 0.20.2. Pin the immutable commit so
         # dependency policy cannot change underneath an unrelated PR.
-        uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
         with:
           command: check bans
           arguments: --all-features --locked
@@ -419,7 +419,7 @@ jobs:
         run: |
           set -euo pipefail
           tree_file="${RUNNER_TEMP}/alopex-security-dependency-tree.txt"
-          cargo tree --locked --workspace --all-features --target all > "${tree_file}"
+          cargo tree --locked --workspace --all-features --target all --prefix none --format '{p}' > "${tree_file}"
           if grep -Eq '^rkyv v0\.7\.46([[:space:]]|$)' "${tree_file}"; then
             echo "::error::RUSTSEC-2026-0235 is reachable; remove the exception and upgrade rkyv"
             exit 1
