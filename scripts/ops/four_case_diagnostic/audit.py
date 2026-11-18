@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 import statistics
 import uuid
+import hashlib
+import json
 
 from .oracle import ORACLE_SHA256, ROLLBACK_SHA256
 
@@ -16,6 +18,8 @@ READ_STAGES = frozenset(("transaction_setup", "route_plan", "execute_multi",
 SESSION_STAGES = (READ_STAGES - {"transaction_setup"}) | {"session_setup", "session_completion"}
 SETUP = {"aggregate": 345, "ordered": 345, "select-all": 345, "insert-rollback": 3}
 POSTCHECK = {"aggregate": 0, "ordered": 0, "select-all": 0, "insert-rollback": 1}
+COUNTERS = ("user_cpu_seconds", "system_cpu_seconds", "rss_before_bytes", "rss_after_bytes",
+            "read_bytes", "write_bytes", "cancelled_write_bytes")
 
 
 def canonical_uuid(value):
@@ -42,8 +46,49 @@ def nonnegative_int(value):
     return type(value) is int and value >= 0
 
 
+def _raw_samples(raw_bytes, cell, resource_digest):
+    require(type(raw_bytes) is bytes and 0 < len(raw_bytes) <= 1_000_000 and
+            hashlib.sha256(raw_bytes).hexdigest() == cell["raw_sha256"], "raw_digest")
+    require(raw_bytes.endswith(b"\n") and len(raw_bytes.splitlines()) == 21, "raw_inventory")
+    identity = cell["pair_server"]
+    client_identity = None
+    for index, line in enumerate(raw_bytes.splitlines()):
+        require(0 < len(line) <= 50_000, "raw_bound")
+        try:
+            sample = json.loads(line)
+        except (UnicodeError, ValueError) as error:
+            raise ValueError("raw_format") from error
+        require(type(sample) is dict and set(sample) == {"sample", "seconds", "pair_ordinal", "resources"},
+                "raw_fields")
+        require(sample["sample"] == index and type(sample["seconds"]) in (int, float)
+                and math.isfinite(sample["seconds"]) and sample["seconds"] > 0 and
+                sample["seconds"] == cell["raw_seconds"][index] and
+                sample["pair_ordinal"] == cell["raw_ordinals"][index], "raw_sample_join")
+        resource = sample["resources"]
+        require(type(resource) is dict and resource.get("schema") == "alopex.sql-operation-resources/v1"
+                and resource.get("status") == "observed" and
+                resource.get("coverage") == "stable_pid_namespace_allocation" and
+                resource.get("manifest_sha256") == resource_digest, "resource_coverage")
+        client, servers = resource.get("client"), resource.get("server_processes")
+        require(type(client) is dict and type(servers) is list and len(servers) == 1 and
+                type(servers[0]) is dict, "resource_processes")
+        require({name: servers[0].get(name) for name in ("pid", "start_ticks")} == identity and
+                client.get("pid") != identity["pid"], "resource_pid")
+        observed_client = (client.get("pid"), client.get("start_ticks"))
+        if client_identity is None:
+            client_identity = observed_client
+        require(observed_client == client_identity, "resource_pid")
+        for process in (client, servers[0]):
+            require(type(process.get("pid")) is int and process["pid"] > 0 and
+                    type(process.get("start_ticks")) is int and process["start_ticks"] > 0 and
+                    all(type(process.get(name)) in (int, float) and
+                        math.isfinite(process[name]) and process[name] >= 0 for name in COUNTERS),
+                    "resource_counters")
+    return client_identity
+
+
 def audit(cells, clients, servers, *, binding, expected_binding, expected_fixtures,
-          tolerance_ns=0):
+          raw_by_cell, resource_manifests, tolerance_ns=0):
     """Accept only allowlisted records; caller verifies sealed artifact/file hashes.
 
     `cells` contains 24 verified mode summaries from twelve adjacent pairs:
@@ -97,6 +142,15 @@ def audit(cells, clients, servers, *, binding, expected_binding, expected_fixtur
                 all(type(x) is int and 0 <= x < 42 for x in cell["raw_ordinals"]), "pair_order")
         by_cell[key] = cell
     require(set(by_cell) == expected, "cell_inventory")
+    require(type(raw_by_cell) is dict and set(raw_by_cell) == expected and
+            type(resource_manifests) is dict and
+            set(resource_manifests) == {(case, trial) for case in CASES for trial in range(3)},
+            "raw_inventory")
+    for key, cell in by_cell.items():
+        digest = resource_manifests[(key[0], key[1])]
+        require(type(digest) is str and len(digest) == 64 and
+                all(char in "0123456789abcdef" for char in digest), "resource_manifest")
+        _raw_samples(raw_by_cell[key], cell, digest)
     for case in CASES:
         for trial in range(3):
             on, off = (by_cell[(case, trial, mode)] for mode in ("on", "off"))

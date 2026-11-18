@@ -50,33 +50,44 @@ INNER_BRANCHES = frozenset((
     "project", "explain", "other"))
 
 
-def audit_inner_events(events, mode, clients, servers):
+def audit_inner_events(events, mode, clients, servers, *, tolerance_ns=0):
     """Reduce private inner events to measured UUIDs; never qualify performance."""
-    if mode not in ("on", "off") or type(events) is not list or len(events) > 8_000:
+    if mode not in ("on", "off") or type(events) is not list or len(events) > 8_000 or \
+            not _integer(tolerance_ns):
         raise ValueError("INNER_BOUND")
     if mode == "off" and events:
         raise ValueError("INNER_OFF")
     if type(clients) is not list or type(servers) is not list:
         raise ValueError("INNER_JOIN")
     client_ids = set()
+    client_cases = {}
     measured_ids = set()
     for client in clients:
         if type(client) is not dict or "trace_id" not in client:
             if mode == "off":
                 continue
             raise ValueError("INNER_JOIN")
+        if mode == "off" or client.get("case") not in CASES:
+            raise ValueError("INNER_JOIN")
         trace_id = canonical_uuid(client["trace_id"])
         if trace_id in client_ids:
             raise ValueError("INNER_JOIN")
         client_ids.add(trace_id)
+        client_cases[trace_id] = client["case"]
         if client.get("phase") == "measured":
             measured_ids.add(trace_id)
     server_ids = set()
+    server_stages = {}
     for server in servers:
         if type(server) is not dict or set(server) != {"trace_id", "stage", "duration_ns"} or \
                 server["stage"] not in STAGES | SESSION_STAGES or not _integer(server["duration_ns"]):
             raise ValueError("INNER_JOIN")
-        server_ids.add(canonical_uuid(server["trace_id"]))
+        trace_id = canonical_uuid(server["trace_id"])
+        server_ids.add(trace_id)
+        stages = server_stages.setdefault(trace_id, {})
+        if server["stage"] in stages:
+            raise ValueError("INNER_JOIN")
+        stages[server["stage"]] = server["duration_ns"]
     if mode == "on" and not measured_ids.issubset(server_ids):
         raise ValueError("INNER_JOIN")
     grouped = {}
@@ -87,19 +98,29 @@ def audit_inner_events(events, mode, clients, servers):
         trace_id = canonical_uuid(event.get("trace_id"))
         if trace_id not in client_ids or trace_id not in server_ids:
             raise ValueError("INNER_JOIN")
+        case = client_cases[trace_id]
         kind = event["kind"]
         if kind == "stage":
             if set(event) != {"kind", "trace_id", "stage", "duration_ns"} or \
                     event["stage"] not in INNER_STAGES or not _integer(event["duration_ns"]) or \
                     event["duration_ns"] > 300_000_000_000:
                 raise ValueError("INNER_FORMAT")
+            if event["duration_ns"] > server_stages[trace_id].get("execute_and_map", -1) + tolerance_ns:
+                raise ValueError("INNER_TIMER")
         elif kind == "route":
             if set(event) != {"kind", "trace_id", "statement_index", "route", "root"} or \
                     type(event["statement_index"]) is not int or not 0 <= event["statement_index"] < 16 or \
                     event["route"] not in INNER_ROUTES or event["root"] not in INNER_ROOTS:
                 raise ValueError("INNER_FORMAT")
+            if event["root"] == "aggregate" and case != "aggregate":
+                raise ValueError("INNER_CASE")
+            if event["root"] in ("sort", "limit") and case != "ordered":
+                raise ValueError("INNER_CASE")
         elif set(event) != {"kind", "trace_id", "branch"} or event["branch"] not in INNER_BRANCHES:
             raise ValueError("INNER_FORMAT")
+        elif (event["branch"].startswith("aggregate") and case != "aggregate") or \
+                (event["branch"] == "ordered_limit_primary_key" and case != "ordered"):
+            raise ValueError("INNER_CASE")
         key = (trace_id, kind, tuple((name, event[name]) for name in sorted(event) if name not in ("trace_id", "kind")))
         if key in seen:
             raise ValueError("INNER_DUPLICATE")
