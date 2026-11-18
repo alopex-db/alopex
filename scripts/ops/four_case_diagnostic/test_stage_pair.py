@@ -56,9 +56,13 @@ class StagePairTests(unittest.TestCase):
                 self.config, self.output, self.proof, self.receipt)
 
     def test_extra_bundle_requires_exact_named_sources(self):
-        root = Path(self.temp.name)
-        package_root = root / "package"
-        docs_root, product_root = root / "docs", root / "product"
+        root = Path(self.temp.name).resolve()
+        repo, runner_temp = root / "repo", root / "runner-temp"
+        repo.mkdir()
+        runner_temp.mkdir()
+        package_root = repo / "scripts/ops"
+        docs_root, product_root = runner_temp / "alopex-712-docs", repo
+        docs_root.mkdir(mode=0o700)
         package = {}
         for name in ("__init__", "adapter", "log_parser", "operation", "oracle",
                      "runner", "worker", "supervisor", "container_pair_entrypoint"):
@@ -73,27 +77,37 @@ class StagePairTests(unittest.TestCase):
             path.write_text("# pinned harness\n")
         harness_digest = hashlib.sha256(
             (docs_root / "scripts/performance/subject_identity.py").read_bytes()).hexdigest()
-        manifest = {"package_root": str(package_root), "package_files": package,
-                    "docs_harness_root": str(docs_root),
-                    "product_harness_root": str(product_root),
+        manifest = {"package_files": package,
                     "docs_files": {"subject_identity.py": harness_digest},
                     "product_files": {"subject_identity.py": harness_digest}}
         bundle = root / "bundle"
         files = stage_pair._extra_bundle(
             manifest, self.config, self.proof, {"platform": "linux/amd64"},
-            bundle, Mock())
+            bundle, Mock(), repo=repo, runner_temp=runner_temp)
         self.assertEqual(len(files), 11)
         self.assertEqual(json.loads((bundle / "stage.json").read_text())["files"], files)
         (package_root / "four_case_diagnostic/worker.py").write_text("# changed\n")
         with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
             stage_pair._extra_bundle(
                 manifest, self.config, self.proof, {"platform": "linux/amd64"},
-                root / "changed", Mock())
+                root / "changed", Mock(), repo=repo, runner_temp=runner_temp)
         manifest["docs_files"] = {"../escape.py": harness_digest}
         with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
             stage_pair._extra_bundle(
                 manifest, self.config, self.proof, {"platform": "linux/amd64"},
-                root / "escape", Mock())
+                root / "escape", Mock(), repo=repo, runner_temp=runner_temp)
+        manifest["docs_files"] = {"subject_identity.py": harness_digest}
+        docs_root.rename(runner_temp / "docs-unqualified")
+        with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
+            stage_pair._extra_bundle(
+                manifest, self.config, self.proof, {"platform": "linux/amd64"},
+                root / "missing-docs", Mock(), repo=repo, runner_temp=runner_temp)
+        (runner_temp / "docs-unqualified").rename(docs_root)
+        docs_root.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
+            stage_pair._extra_bundle(
+                manifest, self.config, self.proof, {"platform": "linux/amd64"},
+                root / "open-docs", Mock(), repo=repo, runner_temp=runner_temp)
 
 
 if __name__ == "__main__":

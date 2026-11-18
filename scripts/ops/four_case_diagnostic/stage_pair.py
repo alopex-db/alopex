@@ -61,14 +61,10 @@ def validate_stage_binding(config, output, proof, receipt):
     try:
         path = Path(output)
         info = path.lstat()
-        cells = [(path / name).lstat() for name in ("on", "off")]
     except (OSError, TypeError) as error:
         raise ValueError("PAIR_STAGE") from error
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or
-            stat.S_IMODE(info.st_mode) != 0o700 or
-            not all(stat.S_ISDIR(cell.st_mode) and
-                    cell.st_uid == os.geteuid() and
-                    stat.S_IMODE(cell.st_mode) == 0o700 for cell in cells)):
+            stat.S_IMODE(info.st_mode) != 0o700):
         raise ValueError("PAIR_STAGE")
 
 
@@ -81,12 +77,23 @@ def stage_pair(config, output, proof, receipt):
 def _pinned_file(source, expected, destination, root):
     """Copy one named source file only after its bytes match the reviewed map."""
     source, destination, root = Path(source), Path(destination), Path(root)
+    try:
+        root_info = root.lstat()
+        source_info = source.lstat()
+        members = [part for part in (source, *source.parents)
+                   if part == root or part.is_relative_to(root)]
+        member_info = [part.lstat() for part in members]
+    except OSError as error:
+        raise ValueError("MISSING_PIN") from error
     if (not root.is_absolute() or root.is_symlink() or not root.is_dir() or
+            root_info.st_uid != os.geteuid() or root_info.st_mode & 0o022 or
             not source.is_relative_to(root) or
-            any(part.is_symlink() for part in (source, *source.parents)
-                if part == root or part.is_relative_to(root)) or
+            any(stat.S_ISLNK(info.st_mode) or info.st_uid != os.geteuid() or
+                info.st_mode & 0o022 for info in member_info) or
             not supervisor._hex(expected, 64) or source.is_symlink() or
-            not source.is_file() or source.stat().st_size > 2_000_000 or
+            not stat.S_ISREG(source_info.st_mode) or
+            source_info.st_uid != os.geteuid() or source_info.st_mode & 0o022 or
+            source_info.st_size > 2_000_000 or
             hashlib.sha256(source.read_bytes()).hexdigest() != expected or
             destination.exists()):
         raise ValueError("MISSING_PIN")
@@ -97,7 +104,8 @@ def _pinned_file(source, expected, destination, root):
         raise ValueError("MISSING_PIN")
 
 
-def _extra_bundle(manifest, config, proof, profile, bundle, budget):
+def _extra_bundle(manifest, config, proof, profile, bundle, budget, *, repo,
+                  runner_temp):
     """Stage only allowlisted Python/harness files under /input/four-case."""
     required = {"__init__", "adapter", "log_parser", "operation", "oracle",
                 "runner", "worker", "supervisor", "container_pair_entrypoint"}
@@ -108,8 +116,23 @@ def _extra_bundle(manifest, config, proof, profile, bundle, budget):
             type(docs) is not dict or not docs or
             type(product) is not dict or not product):
         raise ValueError("MISSING_PIN")
+    repo, runner_temp = Path(repo), Path(runner_temp)
+    package_root = repo / "scripts/ops"
+    docs_root = runner_temp / "alopex-712-docs"
+    try:
+        repo_info = repo.lstat()
+        docs_info = docs_root.lstat()
+    except OSError as error:
+        raise ValueError("MISSING_PIN") from error
+    if (not repo.is_absolute() or repo.resolve(strict=True) != repo or
+            not stat.S_ISDIR(repo_info.st_mode) or
+            repo_info.st_uid != os.geteuid() or repo_info.st_mode & 0o022 or
+            not runner_temp.is_absolute() or runner_temp.is_symlink() or
+            not stat.S_ISDIR(docs_info.st_mode) or
+            docs_info.st_uid != os.geteuid() or
+            stat.S_IMODE(docs_info.st_mode) != 0o700):
+        raise ValueError("MISSING_PIN")
     paths = {}
-    package_root = Path(manifest["package_root"])
     for name, expected in package.items():
         paths[name] = (package_root / name, expected, package_root)
     for group, inventory in (("docs", docs), ("product", product)):
@@ -118,7 +141,7 @@ def _extra_bundle(manifest, config, proof, profile, bundle, budget):
                     ".." in Path(name).parts or "\\" in name or
                     not name.endswith(".py")):
                 raise ValueError("MISSING_PIN")
-            root = Path(manifest[f"{group}_harness_root"])
+            root = docs_root if group == "docs" else repo
             paths[f"{group}/scripts/performance/{name}"] = (
                 root / "scripts/performance" / name, expected, root)
     if len(paths) != len(package) + len(docs) + len(product):
@@ -145,7 +168,7 @@ def _extra_bundle(manifest, config, proof, profile, bundle, budget):
 
 
 def run_in_container(config, pair_output, proof, receipt, *, manifest,
-                     runner_temp, operations):
+                     repo, runner_temp, operations):
     """Own one #804-policy container through stage, run, collection and deletion.
 
     All executable and harness inputs come from exact reviewed SHA maps. The
@@ -220,7 +243,8 @@ def run_in_container(config, pair_output, proof, receipt, *, manifest,
     primary = None
     try:
         bundle = run.root / "extra"
-        files = _extra_bundle(manifest, config, proof, profile, bundle, budget)
+        files = _extra_bundle(manifest, config, proof, profile, bundle, budget,
+                              repo=repo, runner_temp=runner_temp)
         inputs = docker.create_volume(run, "input")
         work = docker.create_volume(run, "work")
         envctl.stage(selected, docker, budget, run, image, inputs, work, [])
@@ -287,8 +311,8 @@ def run_in_container(config, pair_output, proof, receipt, *, manifest,
     return run
 
 
-def make_stage_pair(manifest, runner_temp, operations):
+def make_stage_pair(manifest, repo, runner_temp, operations):
     """Bind reviewed paths and #804 operations to the controller callback."""
     return lambda config, output, proof, receipt: run_in_container(
         config, output, proof, receipt, manifest=manifest,
-        runner_temp=runner_temp, operations=operations)
+        repo=repo, runner_temp=runner_temp, operations=operations)

@@ -426,6 +426,11 @@ def run_collected_pair(config, run, proof, receipt):
     # The in-container output is copied to the run collection. The staging
     # boundary is checked here without creating a host-side pair directory.
     validate_stage_binding(config, collected, proof, receipt)
+    require(all((collected / mode).is_dir() and
+                not (collected / mode).is_symlink() and
+                (collected / mode).stat().st_uid == os.geteuid() and
+                stat.S_IMODE((collected / mode).stat().st_mode) == 0o700
+                for mode in ("on", "off")), "OUTPUT_PARENT")
     require(run.record.get("phase") == "deleted" and
             not (root / "cleanup-errors.json").exists() and
             run.record.get("identities") == {
