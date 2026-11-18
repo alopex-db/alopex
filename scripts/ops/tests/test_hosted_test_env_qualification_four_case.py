@@ -1,8 +1,6 @@
 """Source binding and fail-closed four-case qualification tests; no Docker."""
 import hashlib
 import importlib.util
-import json
-import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -25,19 +23,45 @@ class FourCaseQualification(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "OPERATOR_IDENTITY"):
                 subject._base()
 
-    def test_manifest_requires_independent_sha_and_same_job(self):
+    def test_lock_digest_is_independent_of_job_id(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            manifest = root / "input.json"
-            raw = json.dumps({"schema": subject.INPUT_SCHEMA, "job_id": "123",
-                              "lock_path": str(root / "lock.json"),
-                              "lock_sha256": "a" * 64}).encode()
-            manifest.write_bytes(raw)
-            manifest.chmod(0o600)
-            with self.assertRaisesRegex(ValueError, "PRIVATE_MANIFEST"):
-                subject.load_inputs(manifest, "0" * 64)
+            root = Path(directory).resolve()
+            lock = root / subject.LOCK_RELATIVE
+            lock.parent.mkdir(mode=0o700)
+            lock.write_bytes(b"reviewed lock")
+            lock.chmod(0o600)
+            environment = {"RUNNER_TEMP": str(root), "GITHUB_ACTIONS": "true",
+                           "RUNNER_ENVIRONMENT": "github-hosted",
+                           "GITHUB_REPOSITORY": "alopex-db/alopex",
+                           "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}
+            self.assertEqual(subject.reviewed_lock_path(environment), lock)
+            with patch.object(subject.entrypoint, "load_reviewed_lock",
+                              side_effect=ValueError("MISSING_PIN")) as load:
+                with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
+                    subject.load_inputs(digest(b"reviewed lock"), environment=environment)
+            load.assert_called_once_with(lock, digest(b"reviewed lock"))
+            environment["GITHUB_RUN_ID"] = "456"
+            self.assertEqual(subject.reviewed_lock_path(environment), lock)
+            environment["GITHUB_RUN_ATTEMPT"] = "0"
             with self.assertRaisesRegex(ValueError, "SAME_JOB"):
-                subject.load_inputs(manifest, digest(raw), environment={})
+                subject.load_inputs(digest(b"reviewed lock"), environment=environment)
+            with self.assertRaisesRegex(ValueError, "SAME_JOB"):
+                subject.load_inputs(digest(b"reviewed lock"), environment={})
+
+    def test_lock_location_rejects_path_redirection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            outside = root / "outside"
+            outside.write_bytes(b"lock")
+            (root / subject.LOCK_RELATIVE).parent.mkdir(mode=0o700)
+            (root / subject.LOCK_RELATIVE).symlink_to(outside)
+            with self.assertRaisesRegex(ValueError, "PRIVATE_MANIFEST"):
+                subject.reviewed_lock_path({"RUNNER_TEMP": str(root)})
+            (root / subject.LOCK_RELATIVE).unlink()
+            (root / subject.LOCK_RELATIVE).write_bytes(b"lock")
+            (root / subject.LOCK_RELATIVE).chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "PRIVATE_MANIFEST"):
+                subject.reviewed_lock_path({"RUNNER_TEMP": str(root)})
 
     def test_acquisition_installs_v2_receipt_and_archive_at_attestor_paths(self):
         with tempfile.TemporaryDirectory() as directory:

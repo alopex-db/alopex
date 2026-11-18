@@ -12,19 +12,18 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import sys
 import traceback
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 sys.path.insert(0, str(HERE))
-from four_case_diagnostic import acquire, acquisition, controller, entrypoint, qualification  # noqa: E402
+from four_case_diagnostic import acquire, acquisition, entrypoint, qualification  # noqa: E402
 
 BASE_PATH = HERE / "hosted_test_env_qualification.py"
 BASE_SHA256 = "4a41875530a8a4c6efaa5b90ba1e2976619324a750c3e792621369f696fbf3af"
-INPUT_SCHEMA = "alopex.hosted-four-case-qualification-input/v1"
-INPUT_FIELDS = frozenset(("schema", "job_id", "lock_path", "lock_sha256"))
-CANDIDATE = Path(os.environ.get("RUNNER_TEMP", "/nonexistent")) / "alopex-804-candidate"
+LOCK_RELATIVE = Path("alopex-712-lock/lock.json")
 
 
 def _require(value, code="IDENTITY"):
@@ -46,28 +45,43 @@ def _base():
     return module
 
 
-def load_inputs(path, expected_sha256, *, environment=None, repo=REPO):
-    """Verify reviewed input bytes and every operator before admission or growth."""
+def reviewed_lock_path(environment):
+    """Derive the sole allowed lock location; no path comes from job data."""
+    raw = environment.get("RUNNER_TEMP")
+    _require(type(raw) is str and raw and Path(raw).is_absolute(), "PREREQUISITE")
+    root = Path(raw)
+    _require(root.is_dir() and not root.is_symlink() and
+             root.resolve(strict=True) == root, "PREREQUISITE")
+    directory = root / LOCK_RELATIVE.parent
+    directory_info = directory.lstat()
+    _require(stat.S_ISDIR(directory_info.st_mode) and
+             directory_info.st_uid == os.geteuid() and
+             stat.S_IMODE(directory_info.st_mode) == 0o700 and
+             directory.resolve(strict=True) == directory, "PRIVATE_MANIFEST")
+    lock_path = directory / LOCK_RELATIVE.name
+    info = lock_path.lstat()
+    _require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
+             stat.S_IMODE(info.st_mode) == 0o600 and
+             lock_path.resolve(strict=True) == lock_path and
+             lock_path.parent == directory, "PRIVATE_MANIFEST")
+    return lock_path
+
+
+def load_inputs(expected_sha256, *, environment=None, repo=REPO):
+    """Verify independently pinned lock bytes and operators before growth."""
     environment = os.environ if environment is None else environment
     _require(type(expected_sha256) is str and
              qualification.HEX64.fullmatch(expected_sha256), "MISSING_PIN")
-    try:
-        manifest = json.loads(controller._read_private(path, expected_sha256),
-                              object_pairs_hook=acquisition._unique_pairs)
-    except (OSError, ValueError, UnicodeError) as error:
-        raise ValueError("PRIVATE_MANIFEST") from error
-    _require(type(manifest) is dict and set(manifest) == INPUT_FIELDS and
-             manifest["schema"] == INPUT_SCHEMA and
-             type(manifest["job_id"]) is str and manifest["job_id"].isdecimal() and
-             type(manifest["lock_path"]) is str and
-             Path(manifest["lock_path"]).is_absolute() and
-             type(manifest["lock_sha256"]) is str and
-             qualification.HEX64.fullmatch(manifest["lock_sha256"]), "PRIVATE_MANIFEST")
     _require(environment.get("GITHUB_ACTIONS") == "true" and
              environment.get("RUNNER_ENVIRONMENT") == "github-hosted" and
-             environment.get("GITHUB_RUN_ID") == manifest["job_id"] and
+             type(environment.get("GITHUB_RUN_ID")) is str and
+             environment["GITHUB_RUN_ID"].isdecimal() and
+             int(environment["GITHUB_RUN_ID"]) > 0 and
+             type(environment.get("GITHUB_RUN_ATTEMPT")) is str and
+             environment["GITHUB_RUN_ATTEMPT"].isdecimal() and
+             int(environment["GITHUB_RUN_ATTEMPT"]) > 0 and
              environment.get("GITHUB_REPOSITORY") == "alopex-db/alopex", "SAME_JOB")
-    lock = entrypoint.load_reviewed_lock(manifest["lock_path"], manifest["lock_sha256"])
+    lock = entrypoint.load_reviewed_lock(reviewed_lock_path(environment), expected_sha256)
     pin = lock["pin"]
     _require(set(pin) == qualification.PIN_FIELDS and
              type(pin["operator_sha256"]) is dict and
@@ -173,12 +187,12 @@ def main(argv=None):
               "case": "HOST_QUALIFICATION", "outcome": "failed", "error_code": "INCOMPLETE"}
     base = None
     try:
-        lock, base = load_inputs(os.environ["ALOPEX_FOUR_CASE_INPUT_MANIFEST"],
-                                 os.environ["ALOPEX_FOUR_CASE_INPUT_SHA256"])
+        lock, base = load_inputs(os.environ["ALOPEX_FOUR_CASE_LOCK_SHA256"])
         pin = lock["pin"]
         job_id = os.environ["GITHUB_RUN_ID"]
         assets_root = Path(os.environ["ALOPEX_804_ASSETS"])
-        _require(assets_root == CANDIDATE and assets_root.is_absolute(), "IDENTITY")
+        _require(assets_root == Path(os.environ["RUNNER_TEMP"]) / "alopex-804-candidate" and
+                 assets_root.is_absolute(), "IDENTITY")
         _configure_base(base, pin)
         private = base.private_dir(Path(os.environ["RUNNER_TEMP"]) / "alopex-804-qualification")
         base.PRIVATE_STAGE = "controller_identity"
