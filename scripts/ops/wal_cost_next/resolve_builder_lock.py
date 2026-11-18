@@ -83,7 +83,9 @@ def version_satisfies(actual: str, op: str, required: str) -> bool:
     return result.returncode == 0
 
 
-def dependencies_satisfied(row: dict[str, str], versions: dict[str, str]) -> None:
+def dependencies_satisfied(row: dict[str, str], versions: dict[str, str],
+                           compare=None) -> None:
+    compare = version_satisfies if compare is None else compare
     for field in ("Pre-Depends", "Depends"):
         if not row.get(field):
             continue
@@ -95,12 +97,13 @@ def dependencies_satisfied(row: dict[str, str], versions: dict[str, str]) -> Non
                 name, op, required = match.groups()
                 actual = versions.get(name)
                 options.append(actual is not None and
-                               (op is None or version_satisfies(actual, op, required)))
+                               (op is None or compare(actual, op, required)))
             need(any(options), "unsatisfied " + field + ": " + group.strip())
 
 
-def make_lock(base: dict, authentication: dict, indexes: dict[str, bytes],
-              apt_uris: str, resolver_sha256: str) -> dict:
+def capture_precheck(base: dict, authentication: dict,
+                     resolver_sha256: str) -> tuple[dict[str, str], str]:
+    """Validate capture identity before either formal or candidate parsing."""
     need(base.get("base") == BASE and base.get("platform") == PLATFORM,
          "base/platform identity")
     base_versions = base.get("packages")
@@ -115,8 +118,37 @@ def make_lock(base: dict, authentication: dict, indexes: dict[str, bytes],
          HEX.fullmatch(resolver_sha256) is not None, "authentication evidence")
     proof_hash = digest(json.dumps(authentication, sort_keys=True,
                                    separators=(",", ":")).encode())
+    return base_versions, proof_hash
+
+
+def make_lock(base: dict, authentication: dict, indexes: dict[str, bytes],
+              apt_uris: str, resolver_sha256: str) -> dict:
+    base_versions, proof_hash = capture_precheck(base, authentication, resolver_sha256)
     need(APPROVED_PROOF_SHA256 is not None and proof_hash == APPROVED_PROOF_SHA256 and
          bool(APPROVED_SIGNERS), "unapproved signed-index proof")
+    files, installed = resolve_packages(base, authentication, indexes, apt_uris,
+                                        base_versions, APPROVED_SIGNERS)
+    return {"schema": "alopex.trace-builder-lock/v1", "platform": PLATFORM,
+            "base": BASE, "resolver_sha256": resolver_sha256,
+            "base_inventory_sha256": authentication["base_inventory_sha256"],
+            "signed_indexes": authentication["indexes"], "top_level": list(TOP),
+            "packages": sorted(files, key=lambda f: f["name"]),
+            "budgets": {"download_bytes": sum(f["size"] for f in files),
+                        "installed_size_declared_bytes": installed,
+                        "installed_layer_cap_bytes": MAX_INSTALLED,
+                        "build_tree_upper_bytes": 500_000_000,
+                        "diagnostic_peak_bytes": MAX_DIAGNOSTIC}}
+
+
+def resolve_packages(base: dict, authentication: dict, indexes: dict[str, bytes],
+                     apt_uris: str, base_versions: dict[str, str],
+                     approved_signers: frozenset[str] | None,
+                     compare=None) -> tuple[list[dict], int]:
+    """Resolve the shared signed package/URI/closure checks.
+
+    `None` signer policy is for candidate diagnostics only; callers must not
+    label that result as a formal lock.
+    """
     need(authentication.get("base_inventory_sha256") == digest(
          json.dumps(base, sort_keys=True, separators=(",", ":")).encode()), "base inventory digest")
     need(authentication.get("apt_uris_sha256") == digest(apt_uris.encode()) and
@@ -138,7 +170,8 @@ def make_lock(base: dict, authentication: dict, indexes: dict[str, bytes],
              proof.get("packages_sha256") == digest(indexes[name]) and
              HEX.fullmatch(proof.get("inrelease_sha256", "")) is not None and
              FINGERPRINT_V4.fullmatch(proof.get("signer_fingerprint", "")) is not None and
-             proof["signer_fingerprint"] in APPROVED_SIGNERS,
+             (approved_signers is None or
+              proof["signer_fingerprint"] in approved_signers),
              "signed index proof")
         records[name] = paragraphs(indexes[name].decode("utf-8"))
     need(set(records) == set(indexes), "unproven index")
@@ -191,21 +224,12 @@ def make_lock(base: dict, authentication: dict, indexes: dict[str, bytes],
     need(len(files) == authentication["apt_uri_count"], "APT URI count")
     versions = {**base_versions, **{name: row["Version"] for name, row in selected.items()}}
     for row in selected.values():
-        dependencies_satisfied(row, versions)
+        dependencies_satisfied(row, versions, compare)
     need(sum(f["size"] for f in files) <= MAX_DOWNLOAD, "download budget")
     # KiB is the signed index's Installed-Size unit; allow a separate layer-overhead gate.
     installed = sum(f["installed_size_kib"] * 1024 for f in files)
     need(installed <= MAX_INSTALLED, "installed-size budget")
-    return {"schema": "alopex.trace-builder-lock/v1", "platform": PLATFORM,
-            "base": BASE, "resolver_sha256": resolver_sha256,
-            "base_inventory_sha256": authentication["base_inventory_sha256"],
-            "signed_indexes": proofs, "top_level": list(TOP),
-            "packages": sorted(files, key=lambda f: f["name"]),
-            "budgets": {"download_bytes": sum(f["size"] for f in files),
-                        "installed_size_declared_bytes": installed,
-                        "installed_layer_cap_bytes": MAX_INSTALLED,
-                        "build_tree_upper_bytes": 500_000_000,
-                        "diagnostic_peak_bytes": MAX_DIAGNOSTIC}}
+    return files, installed
 
 
 def main() -> None:
