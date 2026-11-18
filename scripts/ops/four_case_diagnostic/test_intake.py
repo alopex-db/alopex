@@ -19,18 +19,21 @@ def encode(value):
 def fixture():
     files = {}
     resources = {}
+    cells = []
     for case in audit.CASES:
         for trial in range(3):
             key = f"{case}-{trial}"
-            resource = encode({"schema": "alopex.sql-operation-resources/v1",
-                               "status": "observed",
-                               "coverage": "stable_pid_namespace_allocation"})
+            server = {"pid": 101 + trial, "start_ticks": 201 + trial}
+            resource = encode({"schema": "alopex.sql-resource-servers/v1",
+                               "servers": {"alopex-server": server}})
             files[f"resources/{key}.json"] = resource
             resources[key] = intake.digest(resource)
             for mode in ("on", "off"):
                 files[f"raw/{key}-{mode}.ndjson"] = b"sample\n"
+                cells.append({"case": case, "trial": trial, "mode": mode,
+                              "pair_server": server})
     files.update({"resource-manifests.json": encode(resources),
-                  "cells.ndjson": b"{}\n" * 24,
+                  "cells.ndjson": b"".join(encode(cell) for cell in cells),
                   "client.ndjson": b"{}\n" * 3720,
                   "server.ndjson": b"{}\n" * 23919})
     binding = {"source": {"commit": "a" * 40, "tree": "b" * 40,
@@ -129,6 +132,44 @@ class IntakeTests(unittest.TestCase):
         self.assertEqual(kwargs["resource_manifests"][("aggregate", 0)],
                          intake.digest(files["resources/aggregate-0.json"]))
         self.assertIs(kwargs["expected_binding"], binding)
+
+    def test_rejects_resource_manifest_schema_and_server_mismatch(self):
+        for replacement in (
+                {"schema": "alopex.sql-operation-resources/v1",
+                 "status": "observed", "coverage": "stable_pid_namespace_allocation"},
+                {"schema": "alopex.sql-resource-servers/v1",
+                 "servers": {"alopex-server": {"pid": 999, "start_ticks": 201}}}):
+            files, binding = fixture()
+            name = "resources/aggregate-0.json"
+            files[name] = encode(replacement)
+            resources = json.loads(files["resource-manifests.json"])
+            resources["aggregate-0"] = intake.digest(files[name])
+            files["resource-manifests.json"] = encode(resources)
+            manifest = json.loads(files["manifest.json"])
+            for changed in (name, "resource-manifests.json"):
+                manifest["files"][changed] = {"sha256": intake.digest(files[changed]),
+                                               "size": len(files[changed])}
+            files["manifest.json"] = encode(manifest)
+            with self.assertRaisesRegex(ValueError, "resource_identity"):
+                intake._decode(intake._archive(archive(files)), binding, {})
+
+    def test_accepts_documented_second_resource_engine(self):
+        files, binding = fixture()
+        name = "resources/aggregate-0.json"
+        resource = json.loads(files[name])
+        resource["servers"]["postgresql"] = {"pid": 501, "start_ticks": 601}
+        files[name] = encode(resource)
+        resources = json.loads(files["resource-manifests.json"])
+        resources["aggregate-0"] = intake.digest(files[name])
+        files["resource-manifests.json"] = encode(resources)
+        manifest = json.loads(files["manifest.json"])
+        for changed in (name, "resource-manifests.json"):
+            manifest["files"][changed] = {"sha256": intake.digest(files[changed]),
+                                           "size": len(files[changed])}
+        files["manifest.json"] = encode(manifest)
+        with patch.object(intake.audit, "audit", return_value={"status": "verified"}):
+            self.assertEqual(intake._decode(intake._archive(archive(files)), binding, {}),
+                             {"status": "verified"})
 
     def test_rejects_file_and_binding_drift(self):
         files, binding = fixture()

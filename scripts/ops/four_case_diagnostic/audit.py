@@ -70,6 +70,7 @@ def _raw_samples(raw_bytes, cell, resource_digest):
     require(raw_bytes.endswith(b"\n") and len(raw_bytes.splitlines()) == 21, "raw_inventory")
     identity = cell["pair_server"]
     client_identity = None
+    server_tree = None
     for index, line in enumerate(raw_bytes.splitlines()):
         require(0 < len(line) <= 50_000, "raw_bound")
         sample = strict_raw_json(line)
@@ -85,21 +86,28 @@ def _raw_samples(raw_bytes, cell, resource_digest):
                 resource.get("coverage") == "stable_pid_namespace_allocation" and
                 resource.get("manifest_sha256") == resource_digest, "resource_coverage")
         client, servers = resource.get("client"), resource.get("server_processes")
-        require(type(client) is dict and type(servers) is list and len(servers) == 1 and
-                type(servers[0]) is dict, "resource_processes")
-        require({name: servers[0].get(name) for name in ("pid", "start_ticks")} == identity and
-                client.get("pid") != identity["pid"], "resource_pid")
-        observed_client = (client.get("pid"), client.get("start_ticks"))
-        if client_identity is None:
-            client_identity = observed_client
-        require(observed_client == client_identity, "resource_pid")
-        for process in (client, servers[0]):
+        require(type(client) is dict and type(servers) is list and
+                1 <= len(servers) <= 64 and all(type(server) is dict for server in servers),
+                "resource_processes")
+        for process in (client, *servers):
             require(type(process.get("pid")) is int and process["pid"] > 0 and
                     type(process.get("start_ticks")) is int and process["start_ticks"] > 0 and
                     all(type(process.get(name)) in (int, float) and
                         math.isfinite(process[name]) and process[name] >= 0 for name in COUNTERS),
                     "resource_counters")
-    return client_identity
+        observed_tree = frozenset((server["pid"], server["start_ticks"])
+                                  for server in servers)
+        require(len(observed_tree) == len(servers) and
+                len({server["pid"] for server in servers}) == len(servers) and
+                (identity["pid"], identity["start_ticks"]) in observed_tree and
+                client["pid"] not in {server["pid"] for server in servers} and
+                (server_tree is None or server_tree == observed_tree), "resource_pid")
+        server_tree = observed_tree
+        observed_client = (client.get("pid"), client.get("start_ticks"))
+        if client_identity is None:
+            client_identity = observed_client
+        require(observed_client == client_identity, "resource_pid")
+    return client_identity, server_tree
 
 
 def audit(cells, clients, servers, *, binding, expected_binding, expected_fixtures,
@@ -161,11 +169,16 @@ def audit(cells, clients, servers, *, binding, expected_binding, expected_fixtur
             type(resource_manifests) is dict and
             set(resource_manifests) == {(case, trial) for case in CASES for trial in range(3)},
             "raw_inventory")
+    pair_trees = {}
     for key, cell in by_cell.items():
         digest = resource_manifests[(key[0], key[1])]
         require(type(digest) is str and len(digest) == 64 and
                 all(char in "0123456789abcdef" for char in digest), "resource_manifest")
-        _raw_samples(raw_by_cell[key], cell, digest)
+        _, server_tree = _raw_samples(raw_by_cell[key], cell, digest)
+        pair = key[:2]
+        require(pair not in pair_trees or pair_trees[pair] == server_tree,
+                "resource_pid")
+        pair_trees[pair] = server_tree
     for case in CASES:
         for trial in range(3):
             on, off = (by_cell[(case, trial, mode)] for mode in ("on", "off"))

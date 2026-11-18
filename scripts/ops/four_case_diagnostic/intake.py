@@ -169,6 +169,15 @@ def _decode(content, expected_binding, expected_fixtures):
     resources = _json(content["resource-manifests.json"], "resource_inventory")
     keys = {f"{case}-{trial}" for case in audit.CASES for trial in range(3)}
     require(type(resources) is dict and set(resources) == keys, "resource_inventory")
+    cell_servers = {}
+    for cell in cells:
+        require(type(cell) is dict and cell.get("case") in audit.CASES and
+                type(cell.get("trial")) is int and cell["trial"] in range(3) and
+                cell.get("mode") in ("on", "off") and
+                type(cell.get("pair_server")) is dict, "resource_identity")
+        key = (cell["case"], cell["trial"], cell["mode"])
+        require(key not in cell_servers, "resource_identity")
+        cell_servers[key] = cell["pair_server"]
     resource_digests = {}
     raw = {}
     for case in audit.CASES:
@@ -176,11 +185,19 @@ def _decode(content, expected_binding, expected_fixtures):
             key = f"{case}-{trial}"
             data = content[f"resources/{key}.json"]
             resource = _json(data, "resource_format")
-            require(type(resource) is dict and
+            require(type(resource) is dict and set(resource) == {"schema", "servers"} and
+                    resource["schema"] == "alopex.sql-resource-servers/v1" and
+                    type(resource["servers"]) is dict and
+                    {"alopex-server"} <= set(resource["servers"]) <=
+                    {"alopex-server", "postgresql"} and
+                    all(type(server) is dict and set(server) == {"pid", "start_ticks"} and
+                        type(server["pid"]) is int and server["pid"] > 0 and
+                        type(server["start_ticks"]) is int and server["start_ticks"] > 0
+                        for server in resource["servers"].values()) and
+                    type(resource["servers"]["alopex-server"]) is dict and
                     resources[key] == digest(data) and
-                    resource.get("schema") == "alopex.sql-operation-resources/v1" and
-                    resource.get("status") == "observed" and
-                    resource.get("coverage") == "stable_pid_namespace_allocation",
+                    all(cell_servers.get((case, trial, mode)) ==
+                        resource["servers"]["alopex-server"] for mode in ("on", "off")),
                     "resource_identity")
             resource_digests[(case, trial)] = digest(data)
             for mode in ("on", "off"):

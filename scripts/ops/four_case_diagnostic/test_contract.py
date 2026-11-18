@@ -131,6 +131,32 @@ class ContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "resource_pid"):
             checked(cells, clients, servers, raw, manifests)
 
+    def test_stable_server_child_is_accepted_but_child_drift_is_rejected(self):
+        cells, clients, servers, raw, manifests = evidence()
+        for mode in ("on", "off"):
+            key = ("aggregate", 0, mode)
+            rows = [json.loads(line) for line in raw[key].splitlines()]
+            for row in rows:
+                row["resources"]["server_processes"].append({
+                    "pid": 900, "start_ticks": 901,
+                    **{name: 1 for name in audit.COUNTERS}})
+            raw[key] = b"".join((json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                                for row in rows)
+            next(cell for cell in cells if
+                 (cell["case"], cell["trial"], cell["mode"]) == key)["raw_sha256"] = \
+                hashlib.sha256(raw[key]).hexdigest()
+        checked(cells, clients, servers, raw, manifests)
+        key = ("aggregate", 0, "off")
+        rows = [json.loads(line) for line in raw[key].splitlines()]
+        rows[7]["resources"]["server_processes"][1]["start_ticks"] = 902
+        raw[key] = b"".join((json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                            for row in rows)
+        next(cell for cell in cells if
+             (cell["case"], cell["trial"], cell["mode"]) == key)["raw_sha256"] = \
+            hashlib.sha256(raw[key]).hexdigest()
+        with self.assertRaisesRegex(ValueError, "resource_pid"):
+            checked(cells, clients, servers, raw, manifests)
+
     def test_inner_case_and_timer_containment(self):
         trace_id = str(uuid.uuid4())
         clients = [{"trace_id": trace_id, "case": "aggregate", "phase": "measured"}]

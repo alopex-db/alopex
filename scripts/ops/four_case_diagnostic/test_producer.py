@@ -20,9 +20,12 @@ def evidence_files():
     for case in audit.CASES:
         for trial in range(3):
             key = f"{case}-{trial}"
+            pair_server = next(cell["pair_server"] for cell in cells if
+                               (cell["case"], cell["trial"], cell["mode"]) ==
+                               (case, trial, "on"))
             resource = producer._json_line({
-                "schema": "alopex.sql-operation-resources/v1",
-                "status": "observed", "coverage": "stable_pid_namespace_allocation"})
+                "schema": "alopex.sql-resource-servers/v1",
+                "servers": {"alopex-server": pair_server}})
             digest = intake.digest(resource)
             resources[key] = digest
             files[f"resources/{key}.json"] = resource
