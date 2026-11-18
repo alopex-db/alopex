@@ -46,6 +46,24 @@ def nonnegative_int(value):
     return type(value) is int and value >= 0
 
 
+def strict_raw_json(line):
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            require(key not in value, "raw_format")
+            value[key] = item
+        return value
+
+    def constant(_value):
+        raise ValueError("raw_format")
+
+    try:
+        return json.loads(line.decode("utf-8"), object_pairs_hook=pairs,
+                          parse_constant=constant)
+    except (UnicodeError, ValueError) as error:
+        raise ValueError("raw_format") from error
+
+
 def _raw_samples(raw_bytes, cell, resource_digest):
     require(type(raw_bytes) is bytes and 0 < len(raw_bytes) <= 1_000_000 and
             hashlib.sha256(raw_bytes).hexdigest() == cell["raw_sha256"], "raw_digest")
@@ -54,10 +72,7 @@ def _raw_samples(raw_bytes, cell, resource_digest):
     client_identity = None
     for index, line in enumerate(raw_bytes.splitlines()):
         require(0 < len(line) <= 50_000, "raw_bound")
-        try:
-            sample = json.loads(line)
-        except (UnicodeError, ValueError) as error:
-            raise ValueError("raw_format") from error
+        sample = strict_raw_json(line)
         require(type(sample) is dict and set(sample) == {"sample", "seconds", "pair_ordinal", "resources"},
                 "raw_fields")
         require(sample["sample"] == index and type(sample["seconds"]) in (int, float)

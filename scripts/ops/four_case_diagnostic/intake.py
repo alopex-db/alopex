@@ -7,14 +7,13 @@ trusted receipt. None of those values is inferred from this archive.
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 from pathlib import Path
 import re
 import stat
 import subprocess
-import tarfile
 import tempfile
+import zlib
 
 from . import audit
 
@@ -23,7 +22,6 @@ BASE = {"manifest.json": 16_384, "cells.ndjson": 262_144,
         "client.ndjson": 4_000_000, "server.ndjson": 8_000_000,
         "resource-manifests.json": 16_384}
 MAX_CMS = 18_000_000
-MAX_ARCHIVE = 18_000_000
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -79,22 +77,67 @@ def _paths():
     return files
 
 
+MAX_ARCHIVE = sum(_paths().values()) + 512 * (len(_paths()) + 2) + 10_240
+
+
+def _gunzip(data):
+    """Bound expansion before inspecting tar headers; require one complete gzip."""
+    require(type(data) is bytes and 0 < len(data) <= MAX_ARCHIVE, "archive_bound")
+    inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    output = bytearray()
+    try:
+        for start in range(0, len(data), 65_536):
+            chunk = data[start:start + 65_536]
+            output.extend(inflater.decompress(chunk, MAX_ARCHIVE + 1 - len(output)))
+            require(len(output) <= MAX_ARCHIVE and not inflater.unconsumed_tail and
+                    not inflater.unused_data, "archive_bound")
+        require(inflater.eof and not inflater.unconsumed_tail and
+                not inflater.unused_data, "archive_format")
+    except zlib.error as error:
+        raise ValueError("archive_format") from error
+    return bytes(output)
+
+
+def _octal(field):
+    value = field.strip(b"\0 ")
+    require(value and all(char in b"01234567" for char in value), "archive_format")
+    return int(value, 8)
+
+
 def _archive(data):
+    """Read only plain ustar regular files, including exact zero-pad EOF."""
+    plain = _gunzip(data)
     expected = _paths()
     content = {}
-    try:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as bundle:
-            for member in bundle:
-                require(member.name in expected and member.name not in content and
-                        member.isfile() and 0 < member.size <= expected[member.name] and
-                        not member.pax_headers, "archive_allowlist")
-                stream = bundle.extractfile(member)
-                require(stream is not None, "archive_allowlist")
-                value = stream.read(expected[member.name] + 1)
-                require(len(value) == member.size, "archive_bound")
-                content[member.name] = value
-    except (tarfile.TarError, OSError, EOFError) as error:
-        raise ValueError("archive_format") from error
+    offset = 0
+    while True:
+        require(offset + 1024 <= len(plain), "archive_format")
+        header = plain[offset:offset + 512]
+        if header == b"\0" * 512:
+            require(plain[offset + 512:offset + 1024] == b"\0" * 512 and
+                    not any(plain[offset + 1024:]) and
+                    len(plain) % 10_240 == 0 and
+                    len(plain) - offset <= 10_240, "archive_trailing")
+            break
+        require(header[257:265] == b"ustar\0" + b"00" and
+                header[156:157] in (b"0", b"\0") and
+                header[345:500] == b"\0" * 155 and
+                header[100:108] != b"", "archive_allowlist")
+        checksum = sum(header[:148]) + 8 * 32 + sum(header[156:])
+        require(_octal(header[148:156]) == checksum, "archive_format")
+        name_bytes = header[:100].split(b"\0", 1)[0]
+        require(name_bytes and all(char < 128 for char in name_bytes), "archive_allowlist")
+        name = name_bytes.decode("ascii")
+        require(name in expected and name not in content, "archive_allowlist")
+        size = _octal(header[124:136])
+        require(0 < size <= expected[name], "archive_bound")
+        start = offset + 512
+        end = start + size
+        next_offset = start + ((size + 511) // 512) * 512
+        require(next_offset <= len(plain) and not any(plain[end:next_offset]),
+                "archive_format")
+        content[name] = plain[start:end]
+        offset = next_offset
     require(set(content) == set(expected), "archive_inventory")
     return content
 

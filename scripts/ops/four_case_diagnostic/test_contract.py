@@ -85,6 +85,19 @@ def evidence():
 
 
 class ContractTests(unittest.TestCase):
+    def test_raw_json_rejects_duplicate_and_nonfinite_values(self):
+        for replacement in (b'"seconds":0.001,"seconds":0.001',
+                            b'"seconds":NaN', b'"seconds":Infinity'):
+            with self.subTest(replacement=replacement):
+                cells, clients, servers, raw, manifests = evidence()
+                key = ("aggregate", 0, "on")
+                raw[key] = raw[key].replace(b'"seconds":0.001', replacement, 1)
+                next(cell for cell in cells if
+                     (cell["case"], cell["trial"], cell["mode"]) == key)["raw_sha256"] = \
+                    hashlib.sha256(raw[key]).hexdigest()
+                with self.assertRaisesRegex(ValueError, "raw_format"):
+                    checked(cells, clients, servers, raw, manifests)
+
     def test_raw_and_resource_evidence_required(self):
         cells, clients, servers, raw, manifests = evidence()
         with self.assertRaisesRegex(ValueError, "raw_inventory"):

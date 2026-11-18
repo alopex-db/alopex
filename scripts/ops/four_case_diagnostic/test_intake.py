@@ -7,6 +7,7 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+import gzip
 
 from . import audit, intake
 
@@ -58,6 +59,29 @@ def archive(files):
 
 
 class IntakeTests(unittest.TestCase):
+    def test_rejects_bomb_header_and_trailing_archive_data(self):
+        files, _ = fixture()
+        good = archive(files)
+        with self.assertRaisesRegex(ValueError, "archive_bound"):
+            intake._archive(gzip.compress(b"X" * (intake.MAX_ARCHIVE + 1)))
+        with self.assertRaisesRegex(ValueError, "archive_bound"):
+            intake._archive(good + gzip.compress(b"hidden"))
+        with self.assertRaisesRegex(ValueError, "archive_trailing"):
+            intake._archive(gzip.compress(gzip.decompress(good) + b"hidden"))
+        with self.assertRaisesRegex(ValueError, "archive_trailing"):
+            intake._archive(gzip.compress(gzip.decompress(good) + b"\0" * 10_240))
+        with self.assertRaisesRegex(ValueError, "archive_trailing"):
+            intake._archive(gzip.compress(gzip.decompress(good)[:-512] + b"hidden" +
+                                          b"\0" * 506))
+        pax = io.BytesIO()
+        with tarfile.open(fileobj=pax, mode="w:gz", format=tarfile.PAX_FORMAT) as bundle:
+            info = tarfile.TarInfo("manifest.json")
+            info.pax_headers = {"comment": "X" * 1024}
+            info.size = 1
+            bundle.addfile(info, io.BytesIO(b"x"))
+        with self.assertRaisesRegex(ValueError, "archive_allowlist"):
+            intake._archive(pax.getvalue())
+
     def test_real_cms_round_trip_requires_pinned_digest(self):
         files, binding = fixture()
         with tempfile.TemporaryDirectory() as directory:
