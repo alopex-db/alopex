@@ -50,6 +50,13 @@ jobs:
           python3 -B -m unittest discover -s scripts/ops/tests \
             -p test_s04_wire_preflight.py \
             -k test_real_unix_peer_pidfd_tracks_exit_without_docker -v
+      - name: Verify signed-index capture and WAL controller contracts
+        env:
+          PYTHONPATH: scripts/test-env:scripts/ops
+        run: |
+          python3 -B -m unittest discover -s scripts/ops/wal_cost_next -p 'test_*.py' -v
+          python3 -B -m unittest discover -s scripts/ops/tests -p 'test_wal_cost_next*.py' -v
+          python3 -B scripts/ops/tests/test_sql_diagnostic_qualification_copy.py -v
       - name: Classify production and release-process changes
         id: classify
         shell: bash
