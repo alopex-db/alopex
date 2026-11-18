@@ -179,10 +179,19 @@ enum TableLifecycleCandidate {
 // This diagnostic is disabled unless the dedicated private lane opts in.
 // A parsed UUID cannot carry SQL, row values, a URL or a machine path into logs.
 fn sql_timing_id(correlation_id: &str) -> Option<Uuid> {
+    #[cfg(test)]
+    if let Some(enabled) = SQL_TIMING_TEST_OVERRIDE.with(|override_| override_.get()) {
+        return sql_timing_id_when(enabled, correlation_id);
+    }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let enabled = *ENABLED
         .get_or_init(|| matches!(std::env::var("ALOPEX_SQL_TIMING"), Ok(value) if value == "1"));
     sql_timing_id_when(enabled, correlation_id)
+}
+
+#[cfg(test)]
+thread_local! {
+    static SQL_TIMING_TEST_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 fn sql_timing_id_when(enabled: bool, correlation_id: &str) -> Option<Uuid> {
@@ -2590,6 +2599,46 @@ fn is_write_sql(sql: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+
+    struct TimingFields(BTreeMap<String, String>);
+
+    impl Visit for TimingFields {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    struct PrivateTimingEvents(Arc<Mutex<Vec<TimingFields>>>);
+
+    struct TimingOverrideReset;
+
+    impl Drop for TimingOverrideReset {
+        fn drop(&mut self) {
+            SQL_TIMING_TEST_OVERRIDE.with(|override_| override_.set(None));
+        }
+    }
+
+    impl<S: Subscriber> Layer<S> for PrivateTimingEvents {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            if event.metadata().target() != "alopex_sql_private_timing" {
+                return;
+            }
+            let mut fields = TimingFields(BTreeMap::new());
+            event.record(&mut fields);
+            self.0.lock().expect("timing event lock").push(fields);
+        }
+    }
 
     fn done_stream_item() -> StreamItem {
         StreamItem {
@@ -2688,6 +2737,96 @@ mod tests {
         })
         .expect("server");
         (temp_dir, server.state)
+    }
+
+    #[tokio::test]
+    async fn session_sql_http_route_emits_seven_private_stages_only_when_enabled() {
+        let (_temp_dir, state) = catalog_guard_test_server();
+        let session_id = state
+            .session_manager
+            .create_session()
+            .await
+            .expect("session");
+        state
+            .session_manager
+            .begin_transaction(&session_id)
+            .await
+            .expect("transaction");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(PrivateTimingEvents(events.clone()));
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let sql = "SELECT 1 AS private_sql_marker";
+        let diagnostic_id = "diag-550e8400-e29b-41d4-a716-446655440000";
+        let _override_reset = TimingOverrideReset;
+        SQL_TIMING_TEST_OVERRIDE.with(|override_| override_.set(Some(true)));
+        let response = handle(
+            Extension(state.clone()),
+            Extension(RequestContext {
+                correlation_id: diagnostic_id.into(),
+                actor: None,
+            }),
+            Json(SqlRequest {
+                sql: sql.into(),
+                session_id: Some(session_id.to_string()),
+                streaming: false,
+            }),
+        )
+        .await;
+        assert!(response.status().is_success(), "session SQL response");
+        let captured = events.lock().expect("timing event lock");
+        let mut stages = BTreeMap::<String, usize>::new();
+        for event in captured.iter() {
+            let stage = event.0.get("stage").expect("stage field");
+            *stages
+                .entry(stage.trim_matches('"').to_string())
+                .or_default() += 1;
+            assert_eq!(
+                event.0.get("trace_id").map(|value| value.trim_matches('"')),
+                Some("550e8400-e29b-41d4-a716-446655440000")
+            );
+            assert_eq!(
+                event.0.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["duration_ns", "message", "stage", "trace_id"]
+            );
+            let payload = format!("{:?}", event.0);
+            assert!(
+                !payload.contains("private_sql_marker"),
+                "SQL leaked into timing event"
+            );
+            assert!(!payload.contains("/sql"), "URL leaked into timing event");
+        }
+        assert_eq!(
+            stages,
+            BTreeMap::from([
+                ("execute_and_map".into(), 1),
+                ("execute_multi".into(), 1),
+                ("response_build".into(), 1),
+                ("result_map".into(), 1),
+                ("route_plan".into(), 1),
+                ("session_completion".into(), 1),
+                ("session_setup".into(), 1),
+            ])
+        );
+        drop(captured);
+
+        for (enabled, correlation_id) in [(false, diagnostic_id), (true, "ordinary-request")] {
+            SQL_TIMING_TEST_OVERRIDE.with(|override_| override_.set(Some(enabled)));
+            let response = handle(
+                Extension(state.clone()),
+                Extension(RequestContext {
+                    correlation_id: correlation_id.into(),
+                    actor: None,
+                }),
+                Json(SqlRequest {
+                    sql: sql.into(),
+                    session_id: Some(session_id.to_string()),
+                    streaming: false,
+                }),
+            )
+            .await;
+            assert!(response.status().is_success(), "session SQL response");
+            assert_eq!(events.lock().expect("timing event lock").len(), 7);
+        }
     }
 
     #[tokio::test]
