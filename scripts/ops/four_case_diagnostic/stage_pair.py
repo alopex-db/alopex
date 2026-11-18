@@ -167,6 +167,33 @@ def _extra_bundle(manifest, config, proof, profile, bundle, budget, *, repo,
     return files
 
 
+def _retain_error(primary, operation, secondary, common):
+    if primary is None:
+        return secondary
+    common.record_cleanup_error(primary, operation, secondary)
+    return primary
+
+
+def _record_failure(run, error, common):
+    try:
+        common.atomic_json(run.root / "failure.json", {"error_code":
+            error.args[0] if type(error) is ValueError and error.args else
+            getattr(error, "code", "INTERNAL")})
+    except BaseException as secondary:
+        _retain_error(error, "persist_pair_failure", secondary, common)
+
+
+def _remove_staging(run, primary, common):
+    for name in ("extra", "extra-verified"):
+        path = run.root / name
+        try:
+            if path.exists():
+                shutil.rmtree(path)
+        except BaseException as secondary:
+            primary = _retain_error(primary, "remove_" + name, secondary, common)
+    return primary
+
+
 def run_in_container(config, pair_output, proof, receipt, *, manifest,
                      repo, runner_temp, operations):
     """Own one #804-policy container through stage, run, collection and deletion.
@@ -288,9 +315,7 @@ def run_in_container(config, pair_output, proof, receipt, *, manifest,
         supervisor.require(state["ExitCode"] == 0 and not state["OOMKilled"], "PAIR_FAILED")
     except BaseException as error:
         primary = error
-        common.atomic_json(run.root / "failure.json", {"error_code":
-            error.args[0] if type(error) is ValueError and error.args else
-            getattr(error, "code", "INTERNAL")})
+        _record_failure(run, error, common)
     finally:
         try:
             envctl.collect(selected, docker, budget, run.run_id)
@@ -298,14 +323,8 @@ def run_in_container(config, pair_output, proof, receipt, *, manifest,
             run.clean(docker.inspect, docker.remove)
             budget.check()
         except BaseException as error:
-            if primary is None:
-                primary = error
-            else:
-                common.record_cleanup_error(primary, "pair_collection_cleanup", error)
-        for name in ("extra", "extra-verified"):
-            path = run.root / name
-            if path.exists():
-                shutil.rmtree(path)
+            primary = _retain_error(primary, "pair_collection_cleanup", error, common)
+        primary = _remove_staging(run, primary, common)
     if primary is not None:
         raise primary
     return run

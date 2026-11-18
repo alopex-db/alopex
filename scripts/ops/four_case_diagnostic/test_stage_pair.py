@@ -3,8 +3,9 @@ import hashlib
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from . import stage_pair
 from .test_qualification import fixture, JOB
@@ -108,6 +109,26 @@ class StagePairTests(unittest.TestCase):
             stage_pair._extra_bundle(
                 manifest, self.config, self.proof, {"platform": "linux/amd64"},
                 root / "open-docs", Mock(), repo=repo, runner_temp=runner_temp)
+
+    def test_secondary_receipt_and_removal_errors_preserve_primary(self):
+        primary = ValueError("MISSING_PIN")
+        run = SimpleNamespace(root=Path(self.temp.name))
+        (run.root / "extra").mkdir()
+        (run.root / "extra-verified").mkdir()
+        recorded = []
+        common = SimpleNamespace(
+            atomic_json=Mock(side_effect=OSError("write failed")),
+            record_cleanup_error=lambda error, operation, secondary:
+                recorded.append((error, operation, secondary)))
+        stage_pair._record_failure(run, primary, common)
+        with patch.object(stage_pair.shutil, "rmtree",
+                          side_effect=OSError("remove failed")):
+            returned = stage_pair._remove_staging(run, primary, common)
+        self.assertIs(returned, primary)
+        self.assertEqual([row[1] for row in recorded],
+                         ["persist_pair_failure", "remove_extra",
+                          "remove_extra-verified"])
+        self.assertTrue(all(row[0] is primary for row in recorded))
 
 
 if __name__ == "__main__":
