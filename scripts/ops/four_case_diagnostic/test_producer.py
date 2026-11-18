@@ -65,7 +65,7 @@ class ProducerTests(unittest.TestCase):
                 expected_binding=test_contract.BINDING,
                 expected_fixtures=test_contract.FIXTURES)
             self.assertEqual((result["measured_uuids"], result["measured_server_events"]),
-                             (252, 1827))
+                             (252, 1764))
             self.assertFalse(result["performance_qualification"])
             with self.assertRaisesRegex(ValueError, "cms_output"):
                 producer.seal_evidence(

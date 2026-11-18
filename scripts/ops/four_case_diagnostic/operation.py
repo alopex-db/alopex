@@ -53,6 +53,5 @@ def prepare(case, module, connection, traced_setup, *, txn_mode=None):
 def postcheck(case, connection):
     if case != "insert-rollback":
         raise ValueError("POSTCHECK")
-    value = execute(connection, ROLLBACK_SQL)
-    oracle.rollback(value)
-    return value
+    # The caller validates rollback after its timed SQL operation has ended.
+    return execute(connection, ROLLBACK_SQL)

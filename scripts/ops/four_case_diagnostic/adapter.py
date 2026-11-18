@@ -33,7 +33,7 @@ CLIENT_FIELDS = ("bind_ns", "transport_ns", "parse_ns", "rows_ns", "residual_ns"
                  "response_chars", "result_rows")
 STAGES = frozenset(("transaction_setup", "route_plan", "execute_multi",
                     "completion_and_commit", "result_map", "execute_and_map", "response_build"))
-SESSION_STAGES = (STAGES - {"transaction_setup"}) | {"session_setup", "session_completion"}
+SESSION_STAGES = (STAGES - {"transaction_setup", "completion_and_commit"}) | {"session_setup", "session_completion"}
 INNER_STAGES = frozenset((
     "session_lookup_wait", "session_operation_wait", "session_txn_wait",
     "bridge_operation_wait", "bridge_state_wait", "worker_dispatch",

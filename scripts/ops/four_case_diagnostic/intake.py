@@ -110,8 +110,8 @@ def _archive(data):
         if header == b"\0" * 512:
             require(plain[offset + 512:offset + 1024] == b"\0" * 512 and
                     not any(plain[offset + 1024:]) and
-                    len(plain) % 10_240 == 0 and
-                    len(plain) - offset <= 10_240, "archive_trailing")
+                    len(plain) == ((offset + 1024 + 10_239) // 10_240) * 10_240,
+                    "archive_trailing")
             break
         require(header[100:124] == b"0000600\0" + b"0000000\0" * 2 and
                 header[136:148] == b"00000000000\0" and
@@ -151,7 +151,7 @@ def _decode(content, expected_binding, expected_fixtures):
              "server_count", "cleanup_verified", "performance_qualification"} and
             manifest["schema"] == SCHEMA and manifest["binding"] == expected_binding and
             manifest["cell_count"] == 24 and manifest["client_count"] == 3720 and
-            manifest["server_count"] == 23994 and
+            manifest["server_count"] == 23919 and
             manifest["cleanup_verified"] is True and
             manifest["performance_qualification"] is False, "manifest_identity")
     files = set(content) - {"manifest.json"}
@@ -165,7 +165,7 @@ def _decode(content, expected_binding, expected_fixtures):
                 digest(content[name]) == entry["sha256"], "file_digest")
     cells = _records(content["cells.ndjson"], 24, "cell_inventory")
     clients = _records(content["client.ndjson"], 3720, "client_inventory")
-    servers = _records(content["server.ndjson"], 23994, "server_inventory")
+    servers = _records(content["server.ndjson"], 23919, "server_inventory")
     resources = _json(content["resource-manifests.json"], "resource_inventory")
     keys = {f"{case}-{trial}" for case in audit.CASES for trial in range(3)}
     require(type(resources) is dict and set(resources) == keys, "resource_inventory")

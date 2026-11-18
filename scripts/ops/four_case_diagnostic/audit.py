@@ -15,7 +15,7 @@ CLIENT_FIELDS = ("bind_ns", "transport_ns", "parse_ns", "rows_ns", "residual_ns"
                  "total_ns", "response_chars", "result_rows")
 READ_STAGES = frozenset(("transaction_setup", "route_plan", "execute_multi",
                          "completion_and_commit", "result_map", "execute_and_map", "response_build"))
-SESSION_STAGES = (READ_STAGES - {"transaction_setup"}) | {"session_setup", "session_completion"}
+SESSION_STAGES = (READ_STAGES - {"transaction_setup", "completion_and_commit"}) | {"session_setup", "session_completion"}
 SETUP = {"aggregate": 345, "ordered": 345, "select-all": 345, "insert-rollback": 3}
 POSTCHECK = {"aggregate": 0, "ordered": 0, "select-all": 0, "insert-rollback": 1}
 COUNTERS = ("user_cpu_seconds", "system_cpu_seconds", "rss_before_bytes", "rss_after_bytes",
@@ -259,13 +259,14 @@ def audit(cells, clients, servers, *, binding, expected_binding, expected_fixtur
             measured_events += len(stage)
         inner = sum(stage[name] for name in (("session_setup" if required == SESSION_STAGES else "transaction_setup"),
                                                 "route_plan", "execute_multi",
-                                                "completion_and_commit", "result_map"))
+                                                ("session_completion" if required == SESSION_STAGES else "completion_and_commit"),
+                                                "result_map"))
         outer = stage["execute_and_map"] + stage["response_build"]
         require(inner <= stage["execute_and_map"] + tolerance_ns, "server_inner_excess")
         require(outer <= row["transport_ns"] + tolerance_ns, "server_transport_excess")
         residuals.append({"trace_id": trace_id, "unattributed_ns": stage["execute_and_map"] - inner,
                           "combined_transport_residual_ns": row["transport_ns"] - outer})
-    require(measured_events == 1827 and len(servers) == 23994, "server_event_inventory")
+    require(measured_events == 1764 and len(servers) == 23919, "server_event_inventory")
 
     paired = {}
     for case in CASES:

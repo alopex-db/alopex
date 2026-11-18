@@ -95,7 +95,7 @@ def seal_evidence(files, *, binding, expected_fixtures, recipient_certificate,
     manifest = {"schema": intake.SCHEMA, "binding": binding,
                 "files": {name: {"sha256": intake.digest(data), "size": len(data)}
                           for name, data in members.items()},
-                "cell_count": 24, "client_count": 3720, "server_count": 23994,
+                "cell_count": 24, "client_count": 3720, "server_count": 23919,
                 "cleanup_verified": True, "performance_qualification": False}
     members["manifest.json"] = _json_line(manifest)
     intake.require(len(members["manifest.json"]) <= intake.BASE["manifest.json"],

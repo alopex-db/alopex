@@ -32,7 +32,7 @@ def fixture():
     files.update({"resource-manifests.json": encode(resources),
                   "cells.ndjson": b"{}\n" * 24,
                   "client.ndjson": b"{}\n" * 3720,
-                  "server.ndjson": b"{}\n" * 23994})
+                  "server.ndjson": b"{}\n" * 23919})
     binding = {"source": {"commit": "a" * 40, "tree": "b" * 40,
                           "profile": "release"},
                "assets_digest": "c" * 64, "controller_sha256": "d" * 64,
@@ -42,7 +42,7 @@ def fixture():
     manifest = {"schema": intake.SCHEMA, "binding": binding,
                 "files": {name: {"sha256": intake.digest(data), "size": len(data)}
                           for name, data in files.items()},
-                "cell_count": 24, "client_count": 3720, "server_count": 23994,
+                "cell_count": 24, "client_count": 3720, "server_count": 23919,
                 "cleanup_verified": True, "performance_qualification": False}
     files["manifest.json"] = encode(manifest)
     return files, binding

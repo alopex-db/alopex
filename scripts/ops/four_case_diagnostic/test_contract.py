@@ -85,6 +85,12 @@ def evidence():
 
 
 class ContractTests(unittest.TestCase):
+    def test_session_stages_match_instrumented_server_route(self):
+        self.assertEqual(audit.SESSION_STAGES, {
+            "session_setup", "route_plan", "execute_multi", "session_completion",
+            "result_map", "execute_and_map", "response_build"})
+        self.assertNotIn("completion_and_commit", audit.SESSION_STAGES)
+
     def test_raw_json_rejects_duplicate_and_nonfinite_values(self):
         for replacement in (b'"seconds":0.001,"seconds":0.001',
                             b'"seconds":NaN', b'"seconds":Infinity'):
@@ -145,9 +151,9 @@ class ContractTests(unittest.TestCase):
 
     def test_complete_inventory(self):
         cells, clients, servers, raw, manifests = evidence()
-        self.assertEqual((len(cells), len(clients), len(servers)), (24, 3720, 23994))
+        self.assertEqual((len(cells), len(clients), len(servers)), (24, 3720, 23919))
         result = checked(cells, clients, servers, raw, manifests)
-        self.assertEqual((result["measured_uuids"], result["measured_server_events"]), (252, 1827))
+        self.assertEqual((result["measured_uuids"], result["measured_server_events"]), (252, 1764))
         self.assertFalse(result["performance_qualification"])
 
     def test_rejects_correlation_and_stage_drift(self):
@@ -156,6 +162,10 @@ class ContractTests(unittest.TestCase):
             ("extra stage", lambda c, s: s.append(copy.copy(s[0]))),
             ("missing session stage", lambda c, s: next(s.pop(i) for i, row in enumerate(s)
                                                      if row["stage"] == "session_completion")),
+            ("non-session stage on session route", lambda c, s: s.append({
+                "trace_id": next(row["trace_id"] for row in c if row["case"] == "insert-rollback" and
+                                 row["phase"] == "measured" and row["mode"] == "on"),
+                "stage": "completion_and_commit", "duration_ns": 5})),
             ("wrong phase", lambda c, s: c[0].update(phase="measured")),
             ("off trace", lambda c, s: c[-1].update(trace_id=str(uuid.uuid4()))),
             ("bad timer", lambda c, s: c[0].update(total_ns=141)),
