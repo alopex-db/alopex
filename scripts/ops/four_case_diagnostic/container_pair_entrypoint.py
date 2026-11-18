@@ -42,6 +42,15 @@ def validate_process_pair(server, client, url):
                        set(server) == {"pid", "start_ticks", "pid_namespace",
                                        "net_namespace"} and
                        set(client) == set(server) and
+                       all(type(item[key]) is int and item[key] > 0
+                           for item in (server, client)
+                           for key in ("pid", "start_ticks")) and
+                       all(type(item[key]) is str and
+                           NAMESPACE.fullmatch(item[key]) is not None and
+                           item[key].startswith(prefix)
+                           for item in (server, client)
+                           for key, prefix in (("pid_namespace", "pid:"),
+                                               ("net_namespace", "net:"))) and
                        server["pid"] != client["pid"] and
                        server["pid_namespace"] == client["pid_namespace"] and
                        server["net_namespace"] == client["net_namespace"] and

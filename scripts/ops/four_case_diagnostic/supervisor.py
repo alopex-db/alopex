@@ -446,22 +446,13 @@ def run_collected_pair(config, run, proof, receipt):
     require(type(server) is dict and type(client) is dict and
             set(server) == {"pid", "start_ticks", "url", "pid_namespace", "net_namespace"} and
             set(client) == {"pid", "start_ticks", "pid_namespace", "net_namespace"} and
-            all(type(item.get(key)) is int and item[key] > 0
-                for item in (server, client) for key in ("pid", "start_ticks")) and
-            server["pid"] != client["pid"] and
-            type(server["url"]) is str and
-            server["url"].startswith("http://127.0.0.1:") and
-            all(type(item.get(key)) is str and item[key].startswith(prefix) and
-                item[key].endswith("]")
-                for item in (server, client)
-                for key, prefix in (("pid_namespace", "pid:["),
-                                    ("net_namespace", "net:["))) and
-            server["pid_namespace"] == client["pid_namespace"] and
-            server["net_namespace"] == client["net_namespace"] and
             report["cleanup"] == {"server_reaped": True,
                                   "worker_reaped": True,
                                   "process_groups_empty": True} and
             _hex(report["resource_manifest_sha256"], 64), "PAIR_IDENTITY")
+    from .container_pair_entrypoint import validate_process_pair
+    validate_process_pair({key: server[key] for key in client}, client,
+                          server["url"])
     identity = {"pid": server["pid"], "start_ticks": server["start_ticks"]}
     require(digest(_private_file(collected / "resources.json", RESULT_BYTES)) ==
             report["resource_manifest_sha256"], "RESOURCE_IDENTITY")

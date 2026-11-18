@@ -102,6 +102,24 @@ class ContainerPairTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
             inside.main()
 
+    def test_collected_report_rejects_malformed_url_and_namespace(self):
+        for url in ("http://127.0.0.1:0", "http://127.0.0.1:65536",
+                    "http://127.0.0.1:8080/path", "http://127.0.0.1:abc"):
+            with self.subTest(url=url):
+                self.report["server"]["url"] = url
+                self.write("result.json", (json.dumps(self.report) + "\n").encode())
+                with self.assertRaisesRegex(ValueError, "PAIR_IDENTITY"):
+                    supervisor.run_collected_pair(
+                        self.config, self.run, self.proof, self.receipt)
+        self.report["server"]["url"] = self.url
+        for value in ("pid:[bad]", "pid:[0]", "net:[1234]", "pid:[1234]junk"):
+            with self.subTest(namespace=value):
+                self.report["client"]["pid_namespace"] = value
+                self.write("result.json", (json.dumps(self.report) + "\n").encode())
+                with self.assertRaisesRegex(ValueError, "PAIR_IDENTITY"):
+                    supervisor.run_collected_pair(
+                        self.config, self.run, self.proof, self.receipt)
+
 
 if __name__ == "__main__":
     unittest.main()
