@@ -54,11 +54,25 @@ def archive(files):
         for name, data in files.items():
             info = tarfile.TarInfo(name)
             info.size = len(data)
+            info.mode = 0o600
             bundle.addfile(info, io.BytesIO(data))
     return output.getvalue()
 
 
 class IntakeTests(unittest.TestCase):
+    def test_rejects_hidden_regular_header_metadata(self):
+        files, _ = fixture()
+        original = gzip.decompress(archive(files))
+        for offset in (157, 265, 297, 329, 337, 345, 500, 99):
+            with self.subTest(offset=offset):
+                altered = bytearray(original)
+                altered[offset] = ord("X")
+                header = altered[:512]
+                checksum = sum(header[:148]) + 8 * 32 + sum(header[156:])
+                altered[148:156] = f"{checksum:06o}".encode() + b"\0 "
+                with self.assertRaisesRegex(ValueError, "archive_allowlist"):
+                    intake._archive(gzip.compress(altered))
+
     def test_rejects_bomb_header_and_trailing_archive_data(self):
         files, _ = fixture()
         good = archive(files)

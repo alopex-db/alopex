@@ -98,12 +98,6 @@ def _gunzip(data):
     return bytes(output)
 
 
-def _octal(field):
-    value = field.strip(b"\0 ")
-    require(value and all(char in b"01234567" for char in value), "archive_format")
-    return int(value, 8)
-
-
 def _archive(data):
     """Read only plain ustar regular files, including exact zero-pad EOF."""
     plain = _gunzip(data)
@@ -119,17 +113,25 @@ def _archive(data):
                     len(plain) % 10_240 == 0 and
                     len(plain) - offset <= 10_240, "archive_trailing")
             break
-        require(header[257:265] == b"ustar\0" + b"00" and
-                header[156:157] in (b"0", b"\0") and
-                header[345:500] == b"\0" * 155 and
-                header[100:108] != b"", "archive_allowlist")
+        require(header[100:124] == b"0000600\0" + b"0000000\0" * 2 and
+                header[136:148] == b"00000000000\0" and
+                header[156:157] == b"0" and
+                header[157:257] == b"\0" * 100 and
+                header[257:265] == b"ustar\0" + b"00" and
+                header[265:512] == b"\0" * 247, "archive_allowlist")
         checksum = sum(header[:148]) + 8 * 32 + sum(header[156:])
-        require(_octal(header[148:156]) == checksum, "archive_format")
+        require(header[148:156] == f"{checksum:06o}".encode() + b"\0 ",
+                "archive_format")
         name_bytes = header[:100].split(b"\0", 1)[0]
         require(name_bytes and all(char < 128 for char in name_bytes), "archive_allowlist")
         name = name_bytes.decode("ascii")
-        require(name in expected and name not in content, "archive_allowlist")
-        size = _octal(header[124:136])
+        require(name in expected and name not in content and
+                header[:100] == name_bytes.ljust(100, b"\0"), "archive_allowlist")
+        size_field = header[124:136]
+        require(size_field.endswith(b"\0") and
+                all(char in b"01234567" for char in size_field[:11]),
+                "archive_format")
+        size = int(size_field[:11], 8)
         require(0 < size <= expected[name], "archive_bound")
         start = offset + 512
         end = start + size
