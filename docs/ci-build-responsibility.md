@@ -45,6 +45,7 @@ Owner result JSON is the machine-facing evidence. GitHub Job Summary and uploade
 | `compatibility: current-windows-full` | scheduled/manual full Windows workspace compatibility | PR critical path |
 | `coverage` | coverage-instrumented build and tests | reuse as an uninstrumented correctness artifact |
 | `security-audit` | blocking duplicate-version policy followed by RustSec advisory audit | compilation or test execution |
+| `trusted-security-audit` | independently verify main PR dependency data using base-controlled workflow and policy | executing PR scripts or replacing the PR CI audit |
 | `release.yml` | package, sign, publish, and public delivery verdict | repeating implementation tests |
 | `ci-success` | status-only join of required owners | build or test execution |
 

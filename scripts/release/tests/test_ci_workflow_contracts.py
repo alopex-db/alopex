@@ -3,7 +3,12 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import textwrap
 import unittest
 
 
@@ -16,6 +21,108 @@ FLOATING_SETUP = "uses: jiro4989/setup-nim-action@"
 class CiWorkflowContractTests(unittest.TestCase):
     def workflow(self, name: str) -> str:
         return (WORKFLOW_DIR / name).read_text(encoding="utf-8")
+
+    def trusted_audit_python(self, step_name: str) -> str:
+        workflow = self.workflow("trusted-security-audit.yml")
+        step = workflow.split(f"- name: {step_name}\n", maxsplit=1)[1]
+        block = step.split("python3 - <<'PY'\n", maxsplit=1)[1].split(
+            "\n          PY", maxsplit=1
+        )[0]
+        return textwrap.dedent(block)
+
+    def run_trusted_audit_python(
+        self, step_name: str, directory: Path, head: str
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-c", self.trusted_audit_python(step_name)],
+            cwd=directory,
+            env={**os.environ, "PR_HEAD_SHA": head, "CARGO_NET_OFFLINE": "true"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_trusted_audit_stages_only_regular_dependency_data(self) -> None:
+        stage = "Fetch and stage PR dependency data"
+        boundary = "Reject local dependencies outside PR data"
+
+        def commit_fixture(root: Path) -> str:
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=Audit Test", "-c", "user.email=audit@example.invalid", "commit", "-qm", "fixture"],
+                cwd=root,
+                check=True,
+            )
+            return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text(
+                '[package]\nname = "inside"\nversion = "0.1.0"\nedition = "2021"\n',
+                encoding="utf-8",
+            )
+            (root / "Cargo.lock").write_text(
+                'version = 3\n\n[[package]]\nname = "inside"\nversion = "0.1.0"\n',
+                encoding="utf-8",
+            )
+            (root / "src").mkdir()
+            (root / "src" / "lib.rs").touch()
+            (root / "scripts").mkdir()
+            (root / "scripts" / "untrusted.sh").write_text("exit 1\n", encoding="utf-8")
+            (root / ".cargo").mkdir()
+            (root / ".cargo" / "config.toml").write_text("[build]\n", encoding="utf-8")
+            head = commit_fixture(root)
+            result = self.run_trusted_audit_python(stage, root, head)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            staged = root / "audit-input"
+            self.assertEqual((staged / "Cargo.toml").read_bytes(), (root / "Cargo.toml").read_bytes())
+            self.assertEqual((staged / "Cargo.lock").read_bytes(), (root / "Cargo.lock").read_bytes())
+            self.assertFalse((staged / "scripts" / "untrusted.sh").exists())
+            self.assertFalse((staged / ".cargo" / "config.toml").exists())
+            result = self.run_trusted_audit_python(boundary, root, head)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "real.toml").write_text('[package]\nname = "inside"\nversion = "0.1.0"\n')
+            (root / "Cargo.toml").symlink_to("real.toml")
+            (root / "Cargo.lock").write_text('version = 3\n')
+            (root / "src").mkdir()
+            (root / "src" / "lib.rs").touch()
+            head = commit_fixture(root)
+            result = self.run_trusted_audit_python(stage, root, head)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("dependency input is not a regular file", result.stderr)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text(
+                '[package]\nname = "inside"\nversion = "0.1.0"\nedition = "2021"\n'
+                '[dependencies]\noutside = { path = "../outside" }\n'
+            )
+            (root / "Cargo.lock").write_text('version = 3\n')
+            (root / "src").mkdir()
+            (root / "src" / "lib.rs").touch()
+            head = commit_fixture(root)
+            result = self.run_trusted_audit_python(stage, root, head)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            outside = root / "outside"
+            (outside / "src").mkdir(parents=True)
+            (outside / "src" / "lib.rs").touch()
+            (outside / "Cargo.toml").write_text(
+                '[package]\nname = "outside"\nversion = "0.1.0"\nedition = "2021"\n'
+            )
+            subprocess.run(
+                ["cargo", "generate-lockfile", "--offline", "--manifest-path", str(root / "audit-input" / "Cargo.toml")],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            result = self.run_trusted_audit_python(boundary, root, head)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("local dependency manifest escapes PR data", result.stderr)
 
     def test_every_non_linux_host_build_uses_the_exact_local_toolchain(self) -> None:
         for workflow_name in ("alopex-py.yml", "alopex-cli.yml"):
@@ -145,7 +252,7 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("RUSTSEC-2026-0194", audit_job)
         self.assertNotIn("RUSTSEC-2026-0195", audit_job)
         tree_guard = audit_job.index(
-            "cargo tree --locked --workspace --all-features --target all"
+            "cargo tree --locked --workspace --all-features --target all --prefix none --format '{p}'"
         )
         audit_step = audit_job.index("name: Run RustSec audit")
         self.assertLess(tree_guard, audit_step)
@@ -157,6 +264,33 @@ class CiWorkflowContractTests(unittest.TestCase):
             "cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0235", audit_job
         )
         self.assertNotIn("rustsec/audit-check@", audit_job)
+
+    def test_trusted_security_audit_uses_base_controller_and_pr_data_only(self) -> None:
+        workflow = self.workflow("trusted-security-audit.yml")
+        self.assertIn("pull_request_target:", workflow)
+        self.assertIn("branches: [main]", workflow)
+        self.assertIn("types: [opened, synchronize, reopened, ready_for_review, edited]", workflow)
+        self.assertIn("contents: read", workflow)
+        self.assertNotIn("pull-requests: write", workflow)
+        self.assertIn("name: Trusted Security Audit", workflow)
+        self.assertNotIn("needs: [scope]", workflow)
+        self.assertNotIn("classify-change-scope", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertEqual(workflow.count("uses: actions/checkout@"), 1)
+        self.assertIn('git fetch --no-tags --depth=1 origin "refs/pull/${PR_NUMBER}/head"', workflow)
+        self.assertIn('"$(git rev-parse FETCH_HEAD)" == "${PR_HEAD_SHA}"', workflow)
+        self.assertIn('if path != "Cargo.lock" and parts[-1] != "Cargo.toml":', workflow)
+        self.assertIn('mode not in (b"100644", b"100755")', workflow)
+        self.assertIn('name: Reject local dependencies outside PR data', workflow)
+        self.assertIn('if package["source"] is not None:', workflow)
+        self.assertIn('if not manifest.is_relative_to(root) or not manifest.is_file():', workflow)
+        self.assertIn('manifest-path: audit-input/Cargo.toml', workflow)
+        self.assertIn('arguments: --all-features --locked --config deny.toml', workflow)
+        self.assertIn('uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25', workflow)
+        self.assertIn('working-directory: audit-input', workflow)
+        self.assertIn("cargo tree --locked --workspace --all-features --target all --prefix none --format '{p}'", workflow)
+        self.assertIn('cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0235', workflow)
+        self.assertNotIn("continue-on-error", workflow)
 
     def test_clippy_uses_the_release_msrv_toolchain(self) -> None:
         workflow = self.workflow("ci.yml")
