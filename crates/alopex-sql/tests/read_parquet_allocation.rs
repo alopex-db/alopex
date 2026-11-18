@@ -1946,6 +1946,71 @@ fn issue577_page_statistics_shared_budget_before_allocation() {
 }
 
 #[test]
+fn partial_modern_page_statistics_ignore_malformed_legacy_bounds() {
+    use std::io::Cursor;
+    use thrift::protocol::TCompactInputProtocol;
+
+    let file = fixture(false);
+    let bytes = std::fs::read(file.path()).unwrap();
+    let mut footer = wire_footer(&bytes);
+    let footer_size =
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
+    let footer_start = bytes.len() - 8 - footer_size;
+    let metadata = footer.row_groups[0].columns[0].meta_data.as_ref().unwrap();
+    let page_start = metadata.data_page_offset as usize;
+    let mut input = Cursor::new(&bytes[page_start..]);
+    let mut header = parquet_wire::format::PageHeader::read_from_in_protocol(
+        &mut TCompactInputProtocol::new(&mut input),
+    )
+    .unwrap();
+    let payload_start = page_start + input.position() as usize;
+    let payload_end = payload_start + header.compressed_page_size as usize;
+    header.data_page_header.as_mut().unwrap().statistics = Some(parquet_wire::format::Statistics {
+        min: Some(vec![0]),
+        max: Some(vec![0]),
+        null_count: Some(0),
+        distinct_count: None,
+        min_value: Some(7_i64.to_le_bytes().to_vec()),
+        max_value: None,
+        is_min_value_exact: None,
+        is_max_value_exact: None,
+    });
+    let mut rewritten = bytes[..page_start].to_vec();
+    header
+        .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut rewritten))
+        .unwrap();
+    rewritten.extend_from_slice(&bytes[payload_start..footer_start]);
+    let growth = rewritten.len() as i64 - footer_start as i64;
+    let group = &mut footer.row_groups[0];
+    group.total_byte_size += growth;
+    if let Some(size) = &mut group.total_compressed_size {
+        *size += growth;
+    }
+    let chunk = &mut group.columns[0];
+    chunk.offset_index_offset = None;
+    chunk.offset_index_length = None;
+    chunk.column_index_offset = None;
+    chunk.column_index_length = None;
+    let metadata = chunk.meta_data.as_mut().unwrap();
+    metadata.total_compressed_size += growth;
+    metadata.total_uncompressed_size += growth;
+    let mut encoded_footer = Vec::new();
+    footer
+        .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut encoded_footer))
+        .unwrap();
+    rewritten.extend_from_slice(&encoded_footer);
+    rewritten.extend_from_slice(&(encoded_footer.len() as u32).to_le_bytes());
+    rewritten.extend_from_slice(b"PAR1");
+    std::fs::write(file.path(), rewritten).unwrap();
+
+    let (result, _) = execute_observed(&file);
+    let ExecutionResult::Query(result) = result.unwrap() else {
+        panic!("expected one row with partial modern page statistics");
+    };
+    assert_eq!(result.rows, vec![vec![SqlValue::BigInt(7)]]);
+}
+
+#[test]
 fn issue577_query_row_container_shared_budget() {
     let rows = 2048;
     let limit = rows * (std::mem::size_of::<SqlValue>() + 2 * std::mem::size_of::<Vec<SqlValue>>())
