@@ -158,6 +158,28 @@ class CiWorkflowContractTests(unittest.TestCase):
         )
         self.assertNotIn("rustsec/audit-check@", audit_job)
 
+    def test_trusted_security_audit_uses_base_controller_and_pr_data_only(self) -> None:
+        workflow = self.workflow("trusted-security-audit.yml")
+        self.assertIn("pull_request_target:", workflow)
+        self.assertIn("branches: [main]", workflow)
+        self.assertIn("contents: read", workflow)
+        self.assertNotIn("pull-requests: write", workflow)
+        self.assertIn("name: Trusted Security Audit", workflow)
+        self.assertNotIn("needs: [scope]", workflow)
+        self.assertNotIn("classify-change-scope", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertEqual(workflow.count("uses: actions/checkout@"), 1)
+        self.assertIn('git fetch --no-tags --depth=1 origin "refs/pull/${PR_NUMBER}/head"', workflow)
+        self.assertIn('"$(git rev-parse FETCH_HEAD)" == "${PR_HEAD_SHA}"', workflow)
+        self.assertIn('if path != "Cargo.lock" and parts[-1] != "Cargo.toml":', workflow)
+        self.assertIn('mode not in (b"100644", b"100755")', workflow)
+        self.assertIn('manifest-path: audit-input/Cargo.toml', workflow)
+        self.assertIn('--config deny.toml', workflow)
+        self.assertIn('working-directory: audit-input', workflow)
+        self.assertIn('cargo tree --locked --workspace --all-features --target all', workflow)
+        self.assertIn('cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0235', workflow)
+        self.assertNotIn("continue-on-error", workflow)
+
     def test_clippy_uses_the_release_msrv_toolchain(self) -> None:
         workflow = self.workflow("ci.yml")
         clippy_job = workflow.split("  clippy:", maxsplit=1)[1].split(

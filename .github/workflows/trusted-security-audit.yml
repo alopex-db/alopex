@@ -1,0 +1,121 @@
+name: Trusted Security Audit
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# The workflow and deny.toml come from main. PR content is read only as Cargo
+# manifest/lockfile data; no PR checkout, script, config, source, or secret runs.
+permissions:
+  contents: read
+
+concurrency:
+  group: trusted-security-audit-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  trusted-security-audit:
+    name: Trusted Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out trusted base policy
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch and stage PR dependency data
+        shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          [[ "${PR_NUMBER}" =~ ^[0-9]+$ ]]
+          [[ "${PR_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags --depth=1 origin "refs/pull/${PR_NUMBER}/head"
+          [[ "$(git rev-parse FETCH_HEAD)" == "${PR_HEAD_SHA}" ]]
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import tomllib
+
+          head = os.environ["PR_HEAD_SHA"]
+          output = Path("audit-input")
+          output.mkdir()
+          tree = subprocess.check_output(["git", "ls-tree", "-r", "-z", head])
+          selected = set()
+          for item in tree.split(b"\0"):
+              if not item:
+                  continue
+              header, raw_path = item.split(b"\t", 1)
+              mode, kind, blob = header.split(b" ")
+              path = raw_path.decode("utf-8")
+              parts = Path(path).parts
+              if not parts or any(part in (".", "..") for part in parts):
+                  raise ValueError("invalid repository path")
+              if path != "Cargo.lock" and parts[-1] != "Cargo.toml":
+                  continue
+              if mode not in (b"100644", b"100755") or kind != b"blob":
+                  raise ValueError(f"dependency input is not a regular file: {path}")
+              data = subprocess.check_output(["git", "cat-file", "blob", blob.decode("ascii")])
+              target = output.joinpath(*parts)
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(data)
+              selected.add(path)
+          if not {"Cargo.toml", "Cargo.lock"}.issubset(selected):
+              raise ValueError("PR is missing the root Cargo manifest or lockfile")
+          # Cargo metadata needs target files to exist. Supply inert placeholders
+          # rather than any PR source or build script; neither command compiles.
+          for path in sorted(selected):
+              if not path.endswith("Cargo.toml"):
+                  continue
+              manifest_path = output / path
+              manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+              if "package" not in manifest:
+                  continue
+              targets = ["src/lib.rs", "src/main.rs"]
+              for table in ("lib", "bin", "example", "test", "bench"):
+                  for target in (manifest.get(table, []) if table != "lib" else [manifest.get(table, {})]):
+                      if "path" in target:
+                          targets.append(target["path"])
+              build = manifest["package"].get("build")
+              if isinstance(build, str):
+                  targets.append(build)
+              for relative in targets:
+                  target = (manifest_path.parent / relative).resolve()
+                  if not target.is_relative_to(output.resolve()):
+                      raise ValueError("target path escapes dependency data directory")
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.touch(exist_ok=True)
+          PY
+      - name: Enforce trusted dependency duplication policy
+        uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902
+        with:
+          command: check bans
+          manifest-path: audit-input/Cargo.toml
+          arguments: --all-features --locked
+          command-arguments: >-
+            --config deny.toml
+            --hide-inclusion-graph
+            --deny unmatched-skip
+            --deny unnecessary-skip
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - name: Verify ignored rkyv advisory remains unreachable
+        shell: bash
+        working-directory: audit-input
+        run: |
+          set -euo pipefail
+          tree_file="${RUNNER_TEMP}/alopex-security-dependency-tree.txt"
+          cargo tree --locked --workspace --all-features --target all > "${tree_file}"
+          if grep -Eq '^rkyv v0\.7\.46([[:space:]]|$)' "${tree_file}"; then
+            echo "::error::RUSTSEC-2026-0235 is reachable; remove the exception and upgrade rkyv"
+            exit 1
+          fi
+      - name: Install pinned cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Run trusted RustSec audit
+        working-directory: audit-input
+        # The preceding full dependency-tree check must fail before the
+        # unreachable rkyv 0.7.46 exception can be applied. Tracking: #94.
+        run: cargo audit --file Cargo.lock --ignore RUSTSEC-2026-0235
