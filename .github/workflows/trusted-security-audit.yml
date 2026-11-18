@@ -89,6 +89,26 @@ jobs:
                   target.parent.mkdir(parents=True, exist_ok=True)
                   target.touch(exist_ok=True)
           PY
+      - name: Reject local dependencies outside PR data
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+
+          root = Path("audit-input").resolve()
+          metadata = json.loads(subprocess.check_output([
+              "cargo", "metadata", "--locked", "--all-features",
+              "--format-version", "1", "--manifest-path", str(root / "Cargo.toml"),
+          ]))
+          for package in metadata["packages"]:
+              if package["source"] is not None:
+                  continue
+              manifest = Path(package["manifest_path"]).resolve()
+              if not manifest.is_relative_to(root) or not manifest.is_file():
+                  raise ValueError("local dependency manifest escapes PR data")
+          PY
       - name: Enforce trusted dependency duplication policy
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
         with:
