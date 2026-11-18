@@ -217,7 +217,7 @@ class CiWorkflowContractTests(unittest.TestCase):
         workflow = self.workflow("ci.yml")
         self.assertIn(
             "uses: alopex-db/alopex/.github/actions/cargo-deny@"
-            "de1b61a97b34fafc254f7764deeab9622aaa22dd", workflow
+            "1ac106371815254e11fd6ac20add3494edd3a52f", workflow
         )
         self.assertNotIn("uses: ./.github/actions/cargo-deny", workflow)
         action = REPOSITORY_ROOT / ".github/actions/cargo-deny"
