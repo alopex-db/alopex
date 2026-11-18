@@ -16,12 +16,14 @@ class ControllerTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.lock, self.proof, self.receipt = fixture()
-        self.lock_path = self.root / "lock.json"
+        lock_dir = self.root / "alopex-712-lock"
+        lock_dir.mkdir(mode=0o700)
+        self.lock_path = lock_dir / "lock.json"
         lock_bytes = json.dumps(self.lock).encode()
         self.lock_path.write_bytes(lock_bytes)
+        self.lock_path.chmod(0o600)
         self.manifest = {
-            "schema": controller.SCHEMA, "job_id": JOB, "run_attempt": "1",
-            "lock_path": str(self.lock_path),
+            "schema": controller.SCHEMA,
             "lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
             "source_commit": self.lock["pin"]["source_commit"],
             "source_tree": self.lock["pin"]["source_tree"],
@@ -29,16 +31,14 @@ class ControllerTests(unittest.TestCase):
             "fixture_sha256": "a" * 64,
             "package_files": {f"four_case_diagnostic/{name}.py": "b" * 64 for name in
                               ("__init__", "adapter", "log_parser", "operation",
-                               "oracle", "runner", "worker")},
-            "package_root": str(self.root / "package"),
-            "docs_harness_root": str(self.root / "docs"),
-            "product_harness_root": str(self.root / "product"),
-            "python": str(self.root / "python")}
+                               "oracle", "runner", "worker")}}
         self.manifest_path = self.root / "manifest.json"
         self.output = self.root / "output"
         self.env = {"GITHUB_RUN_ID": JOB, "GITHUB_RUN_ATTEMPT": "1",
                     "GITHUB_ACTIONS": "true",
-                    "RUNNER_ENVIRONMENT": "github-hosted"}
+                    "RUNNER_ENVIRONMENT": "github-hosted",
+                    "RUNNER_TEMP": str(self.root),
+                    "ALOPEX_FOUR_CASE_LOCK_SHA256": self.manifest["lock_sha256"]}
 
     def save(self):
         data = json.dumps(self.manifest).encode()
@@ -52,22 +52,45 @@ class ControllerTests(unittest.TestCase):
             environment=self.env, output=self.output, operations={},
             stage_pair=stage)
 
+    def staged(self):
+        return {"start": lambda: None, "identity_of": lambda _: None,
+                "subject_environment": {}, "python": str(self.root / "python"),
+                "package_root": str(self.root / "package"),
+                "docs_harness_root": str(self.root / "docs"),
+                "product_harness_root": str(self.root / "product")}
+
     def test_manifest_requires_independent_digest_and_private_mode(self):
         digest = self.save()
         self.assertEqual(controller.load_manifest(self.manifest_path, digest), self.manifest)
+        self.assertFalse({"job_id", "run_attempt", "lock_path", "package_root",
+                          "docs_harness_root", "product_harness_root", "python"}
+                         & set(self.manifest))
         with self.assertRaisesRegex(ValueError, "PRIVATE_MANIFEST"):
             controller.load_manifest(self.manifest_path, "0" * 64)
         self.manifest_path.chmod(0o644)
         with self.assertRaisesRegex(ValueError, "PRIVATE_MANIFEST"):
             controller.load_manifest(self.manifest_path, digest)
 
+    def test_rejects_dynamic_path_in_reviewed_manifest(self):
+        self.manifest["lock_path"] = str(self.lock_path)
+        digest = self.save()
+        with self.assertRaisesRegex(ValueError, "PRIVATE_MANIFEST"):
+            controller.load_manifest(self.manifest_path, digest)
+
+    def test_rejects_lock_digest_not_matching_independent_environment_pin(self):
+        digest = self.save()
+        self.env["ALOPEX_FOUR_CASE_LOCK_SHA256"] = "0" * 64
+        with patch.object(controller.entrypoint, "attest_current_job") as attest:
+            with self.assertRaisesRegex(ValueError, "SAME_JOB"):
+                self.invoke(digest, lambda *args: None)
+        attest.assert_not_called()
+
     def test_same_job_attestation_precedes_staging_and_runs_all_pairs(self):
         digest = self.save()
         staged = []
         def stage(config, output, proof, receipt):
             staged.append((config["case"], config["trial"], output))
-            return {"start": lambda: None, "identity_of": lambda _: None,
-                    "subject_environment": {}}
+            return self.staged()
         with patch.object(controller.entrypoint, "attest_current_job",
                           return_value=(self.proof, self.receipt)) as attest, \
              patch.object(controller.supervisor, "run_owned_pair",
@@ -91,9 +114,9 @@ class ControllerTests(unittest.TestCase):
                 self.output, job_id=JOB, run_attempt="2",
                 binding_sha256=self.receipt["binding_sha256"])
 
-    def test_wrong_job_fails_closed_before_attestation(self):
+    def test_invalid_attempt_fails_closed_before_attestation(self):
         digest = self.save()
-        self.env["GITHUB_RUN_ID"] = "999"
+        self.env["GITHUB_RUN_ATTEMPT"] = "0"
         with patch.object(controller.entrypoint, "attest_current_job") as attest:
             with self.assertRaisesRegex(ValueError, "SAME_JOB"):
                 self.invoke(digest, lambda *args: None)
@@ -103,8 +126,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_failed_pair_never_emits_success_receipt(self):
         digest = self.save()
-        staged = lambda *args: {"start": lambda: None, "identity_of": lambda _: None,
-                                "subject_environment": {}}
+        staged = lambda *args: self.staged()
         with patch.object(controller.entrypoint, "attest_current_job",
                           return_value=(self.proof, self.receipt)), \
              patch.object(controller.supervisor, "run_owned_pair",
@@ -127,10 +149,11 @@ class ControllerTests(unittest.TestCase):
             path.write_text(json.dumps({"status": "passed", "run_attempt": "1"}))
             path.chmod(0o600)
         self.env["GITHUB_RUN_ATTEMPT"] = "2"
-        with patch.object(controller.entrypoint, "attest_current_job") as attest:
-            with self.assertRaisesRegex(ValueError, "SAME_JOB"):
+        with patch.object(controller.entrypoint, "attest_current_job",
+                          return_value=(self.proof, self.receipt)) as attest:
+            with self.assertRaises(FileExistsError):
                 self.invoke(digest, lambda *args: None)
-        attest.assert_not_called()
+        self.assertEqual(attest.call_count, 1)
         public = json.loads((self.output / "receipt.public.json").read_text())
         private = json.loads((self.output / "receipt.private.json").read_text())
         self.assertEqual(public["status"], "failed")

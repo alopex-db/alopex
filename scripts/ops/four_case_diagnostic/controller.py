@@ -15,10 +15,9 @@ import stat
 from . import adapter, entrypoint, qualification, supervisor
 
 SCHEMA = "alopex.sql-four-case-controller/v1"
-MANIFEST_FIELDS = frozenset(("schema", "job_id", "run_attempt", "lock_path", "lock_sha256",
+MANIFEST_FIELDS = frozenset(("schema", "lock_sha256",
                              "source_commit", "source_tree", "assets_digest",
-                             "fixture_sha256", "package_files", "package_root",
-                             "docs_harness_root", "product_harness_root", "python"))
+                             "fixture_sha256", "package_files"))
 
 
 def require(value, code):
@@ -54,11 +53,7 @@ def load_manifest(path, expected_digest):
     except (ValueError, UnicodeError) as error:
         raise ValueError("PRIVATE_MANIFEST") from error
     require(type(manifest) is dict and set(manifest) == MANIFEST_FIELDS and
-            manifest["schema"] == SCHEMA and type(manifest["job_id"]) is str and
-            manifest["job_id"].isdecimal() and
-            type(manifest["run_attempt"]) is str and
-            manifest["run_attempt"].isdecimal() and
-            int(manifest["run_attempt"]) > 0 and
+            manifest["schema"] == SCHEMA and
             all(type(manifest[key]) is str and qualification.HEX40.fullmatch(manifest[key])
                 for key in ("source_commit", "source_tree")) and
             all(type(manifest[key]) is str and qualification.HEX64.fullmatch(manifest[key])
@@ -69,10 +64,7 @@ def load_manifest(path, expected_digest):
                 ("__init__", "adapter", "log_parser", "operation", "oracle",
                  "runner", "worker")} and
             all(type(value) is str and qualification.HEX64.fullmatch(value)
-                for value in manifest["package_files"].values()) and
-            all(type(manifest[key]) is str and Path(manifest[key]).is_absolute()
-                for key in ("lock_path", "package_root", "docs_harness_root",
-                            "product_harness_root", "python")), "PRIVATE_MANIFEST")
+                for value in manifest["package_files"].values()), "PRIVATE_MANIFEST")
     return manifest
 
 
@@ -175,13 +167,27 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
     output directory. No success receipt is emitted on any incomplete pair.
     """
     manifest = load_manifest(manifest_path, manifest_digest)
-    job_id = manifest["job_id"]
-    require(environment.get("GITHUB_RUN_ID") == job_id and
-            environment.get("GITHUB_RUN_ATTEMPT") == manifest["run_attempt"] and
+    job_id = environment.get("GITHUB_RUN_ID")
+    run_attempt = environment.get("GITHUB_RUN_ATTEMPT")
+    require(type(job_id) is str and job_id.isdecimal() and
+            type(run_attempt) is str and run_attempt.isdecimal() and
+            int(run_attempt) > 0 and
             environment.get("GITHUB_ACTIONS") == "true" and
             environment.get("RUNNER_ENVIRONMENT") == "github-hosted" and
+            environment.get("RUNNER_TEMP") == str(runner_temp) and
+            environment.get("ALOPEX_FOUR_CASE_LOCK_SHA256") == manifest["lock_sha256"] and
             callable(stage_pair), "SAME_JOB")
-    lock = entrypoint.load_reviewed_lock(manifest["lock_path"],
+    runner_temp = Path(runner_temp)
+    lock_dir = runner_temp / "alopex-712-lock"
+    lock_path = lock_dir / "lock.json"
+    require(runner_temp.is_dir() and not runner_temp.is_symlink() and
+            lock_dir.is_dir() and not lock_dir.is_symlink() and
+            lock_dir.stat().st_uid == os.geteuid() and
+            stat.S_IMODE(lock_dir.stat().st_mode) == 0o700 and
+            lock_path.is_file() and not lock_path.is_symlink() and
+            lock_path.stat().st_uid == os.geteuid() and
+            stat.S_IMODE(lock_path.stat().st_mode) == 0o600, "MISSING_PIN")
+    lock = entrypoint.load_reviewed_lock(lock_path,
                                          manifest["lock_sha256"])
     pin = lock["pin"]
     require(pin["source_commit"] == manifest["source_commit"] and
@@ -213,25 +219,30 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
                       "fixture_sha256": manifest["fixture_sha256"]}
             staged = stage_pair(config, pair_output, proof, receipt)
             require(type(staged) is dict and set(staged) ==
-                    {"start", "identity_of", "subject_environment"} and
+                    {"start", "identity_of", "subject_environment", "python",
+                     "package_root", "docs_harness_root", "product_harness_root"} and
                     callable(staged["start"]) and callable(staged["identity_of"]) and
-                    type(staged["subject_environment"]) is dict, "PAIR_STAGE")
+                    type(staged["subject_environment"]) is dict and
+                    all(isinstance(staged[name], (str, Path)) and
+                        Path(staged[name]).is_absolute()
+                        for name in ("python", "package_root", "docs_harness_root",
+                                     "product_harness_root")), "PAIR_STAGE")
             report = supervisor.run_owned_pair(
                 config, pair_output, source=source, assets_digest=pin["assets_digest"],
                 job_id=job_id, start=staged["start"],
                 identity_of=staged["identity_of"],
                 subject_environment=staged["subject_environment"],
-                python=manifest["python"], package_root=manifest["package_root"],
+                python=staged["python"], package_root=staged["package_root"],
                 package_files=manifest["package_files"],
-                docs=manifest["docs_harness_root"],
-                product=manifest["product_harness_root"])
+                docs=staged["docs_harness_root"],
+                product=staged["product_harness_root"])
             require(report["status"] == "passed" and
                     report["primary_error"] is None and
                     report["worker_cleanup_error"] is None and
                     report["stop_error"] is None, "PAIR_FAILED")
             results.append({"case": case, "trial": trial, "status": "passed"})
     private = {"schema": SCHEMA, "status": "passed", "job_id": job_id,
-               "run_attempt": manifest["run_attempt"],
+               "run_attempt": run_attempt,
                "source_commit": pin["source_commit"],
                "source_tree": pin["source_tree"],
                "assets_digest": pin["assets_digest"],
@@ -240,7 +251,7 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
                "performance_qualification": False}
     private_digest = _write_json(output / "receipt.private.json", private)
     public = {"schema": SCHEMA, "status": "passed", "job_id": job_id,
-              "run_attempt": manifest["run_attempt"],
+              "run_attempt": run_attempt,
               "source_commit": pin["source_commit"],
               "assets_digest": pin["assets_digest"],
               "qualification_binding_sha256": receipt["binding_sha256"],
