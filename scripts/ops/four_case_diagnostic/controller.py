@@ -161,10 +161,9 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
                      environment, output, operations, stage_pair):
     """Attest #804, then run 12 independently staged owned-server pairs.
 
-    ``stage_pair`` comes from the source-pinned wrapper and returns ``start``,
-    ``identity_of`` and ``subject_environment`` for one pair. It must use the
-    already qualified image and #804 security profile. Every pair gets a fresh
-    output directory. No success receipt is emitted on any incomplete pair.
+    ``stage_pair`` comes from the source-pinned wrapper and returns a deleted,
+    collected owned Run for one pair. It must use the already qualified image
+    and #804 security profile. No success receipt is emitted on an incomplete pair.
     """
     manifest = load_manifest(manifest_path, manifest_digest)
     job_id = environment.get("GITHUB_RUN_ID")
@@ -205,41 +204,27 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
               "profile": "release"}
     output = _owned_directory(output)
     results = []
+    run_roots = set()
     for case in adapter.CASES:
         for trial in range(3):
             pair_id = f"{case}-{trial}"
             pair_output = _owned_directory(output / pair_id)
-            _owned_directory(pair_output / "on")
-            _owned_directory(pair_output / "off")
             config = {"schema": "alopex.sql-four-case-pair/v1",
                       "engine": "alopex-server", "case": case, "trial": trial,
                       "modes": ["on", "off"], "source": source,
                       "assets_digest": pin["assets_digest"],
                       "same_job_id": job_id,
                       "fixture_sha256": manifest["fixture_sha256"]}
-            staged = stage_pair(config, pair_output, proof, receipt)
-            require(type(staged) is dict and set(staged) ==
-                    {"start", "identity_of", "subject_environment", "python",
-                     "package_root", "docs_harness_root", "product_harness_root"} and
-                    callable(staged["start"]) and callable(staged["identity_of"]) and
-                    type(staged["subject_environment"]) is dict and
-                    all(isinstance(staged[name], (str, Path)) and
-                        Path(staged[name]).is_absolute()
-                        for name in ("python", "package_root", "docs_harness_root",
-                                     "product_harness_root")), "PAIR_STAGE")
-            report = supervisor.run_owned_pair(
-                config, pair_output, source=source, assets_digest=pin["assets_digest"],
-                job_id=job_id, start=staged["start"],
-                identity_of=staged["identity_of"],
-                subject_environment=staged["subject_environment"],
-                python=staged["python"], package_root=staged["package_root"],
-                package_files=manifest["package_files"],
-                docs=staged["docs_harness_root"],
-                product=staged["product_harness_root"])
+            run = stage_pair(config, pair_output, proof, receipt)
+            require(hasattr(run, "root") and type(getattr(run, "record", None)) is dict and
+                    callable(getattr(run, "verify_collection", None)) and
+                    Path(run.root).is_absolute() and
+                    Path(run.root) not in run_roots, "PAIR_STAGE")
+            run_roots.add(Path(run.root))
+            report = supervisor.run_collected_pair(config, run, proof, receipt)
             require(report["status"] == "passed" and
-                    report["primary_error"] is None and
-                    report["worker_cleanup_error"] is None and
-                    report["stop_error"] is None, "PAIR_FAILED")
+                    report["collection_verified"] is True and
+                    report["owned_resources_cleaned"] is True, "PAIR_FAILED")
             results.append({"case": case, "trial": trial, "status": "passed"})
     private = {"schema": SCHEMA, "status": "passed", "job_id": job_id,
                "run_attempt": run_attempt,

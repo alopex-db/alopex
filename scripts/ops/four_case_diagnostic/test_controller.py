@@ -52,12 +52,14 @@ class ControllerTests(unittest.TestCase):
             environment=self.env, output=self.output, operations={},
             stage_pair=stage)
 
-    def staged(self):
-        return {"start": lambda: None, "identity_of": lambda _: None,
-                "subject_environment": {}, "python": str(self.root / "python"),
-                "package_root": str(self.root / "package"),
-                "docs_harness_root": str(self.root / "docs"),
-                "product_harness_root": str(self.root / "product")}
+    def staged(self, output):
+        class Run:
+            root = output
+            record = {"phase": "deleted"}
+
+            def verify_collection(self):
+                pass
+        return Run()
 
     def test_manifest_requires_independent_digest_and_private_mode(self):
         digest = self.save()
@@ -90,13 +92,13 @@ class ControllerTests(unittest.TestCase):
         staged = []
         def stage(config, output, proof, receipt):
             staged.append((config["case"], config["trial"], output))
-            return self.staged()
+            return self.staged(output)
         with patch.object(controller.entrypoint, "attest_current_job",
                           return_value=(self.proof, self.receipt)) as attest, \
-             patch.object(controller.supervisor, "run_owned_pair",
-                          return_value={"status": "passed", "primary_error": None,
-                                        "worker_cleanup_error": None,
-                                        "stop_error": None}) as pair:
+             patch.object(controller.supervisor, "run_collected_pair",
+                          return_value={"status": "passed",
+                                        "collection_verified": True,
+                                        "owned_resources_cleaned": True}) as pair:
             result = self.invoke(digest, stage)
         self.assertEqual(result["pair_count"], 12)
         self.assertEqual(result["run_attempt"], "1")
@@ -126,13 +128,13 @@ class ControllerTests(unittest.TestCase):
 
     def test_failed_pair_never_emits_success_receipt(self):
         digest = self.save()
-        staged = lambda *args: self.staged()
+        staged = lambda config, output, *args: self.staged(output)
         with patch.object(controller.entrypoint, "attest_current_job",
                           return_value=(self.proof, self.receipt)), \
-             patch.object(controller.supervisor, "run_owned_pair",
-                          return_value={"status": "failed", "primary_error": "PAIR_FAILED",
-                                        "worker_cleanup_error": None,
-                                        "stop_error": None}):
+             patch.object(controller.supervisor, "run_collected_pair",
+                          return_value={"status": "failed",
+                                        "collection_verified": False,
+                                        "owned_resources_cleaned": False}):
             with self.assertRaisesRegex(ValueError, "PAIR_FAILED"):
                 self.invoke(digest, staged)
         failure = json.loads((self.output / "receipt.private.json").read_text())
@@ -140,6 +142,20 @@ class ControllerTests(unittest.TestCase):
         public = json.loads((self.output / "receipt.public.json").read_text())
         self.assertEqual(public["status"], "failed")
         self.assertEqual(public["pair_count"], 0)
+
+    def test_rejects_reused_run_between_pairs(self):
+        digest = self.save()
+        reused = self.staged(self.root / "one-run")
+        with patch.object(controller.entrypoint, "attest_current_job",
+                          return_value=(self.proof, self.receipt)), \
+             patch.object(controller.supervisor, "run_collected_pair",
+                          return_value={"status": "passed", "collection_verified": True,
+                                        "owned_resources_cleaned": True}) as verifier:
+            with self.assertRaisesRegex(ValueError, "PAIR_STAGE"):
+                self.invoke(digest, lambda *args: reused)
+        self.assertEqual(verifier.call_count, 1)
+        self.assertEqual(json.loads((self.output / "receipt.public.json").read_text())
+                         ["status"], "failed")
 
     def test_reinvocation_replaces_stale_success_with_failed_attempt(self):
         digest = self.save()
