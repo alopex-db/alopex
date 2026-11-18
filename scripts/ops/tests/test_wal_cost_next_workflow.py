@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 import types
@@ -101,14 +102,22 @@ class WorkflowContract(unittest.TestCase):
 
             with patch.object(sealer.subprocess, 'run', side_effect=fake_encrypt):
                 public = sealer.seal(qualification, frozen, private, output)
-            self.assertEqual(public['outcome'], 'passed')
+            self.assertEqual(public['outcome'], 'failed')
+            self.assertEqual(public['error_code'], 'LOCK_UNAPPROVED')
             self.assertEqual(public['wal_outcome'], 'passed')
             self.assertEqual(public['closure_outcome'], 'candidate')
+            self.assertEqual(public['closure_approval'], 'unapproved')
+            self.assertIs(public['formal_lock'], False)
             self.assertNotIn('/hidden/closure', (output / 'public.json').read_text())
             self.assertNotIn('secret_machine_path', (output / 'public.json').read_text())
             self.assertTrue((output / 'private-evidence.cms').is_file())
             self.assertFalse((private / 'wrapper-result.private.json').exists())
             self.assertFalse((private / 'comparator.stdout.private.log').exists())
+            with patch.object(sealer, 'seal', return_value=public), \
+                 patch.object(sys, 'argv', ['seal_wrapper', '--qualification', str(qualification),
+                                            '--frozen', str(frozen), '--private', str(private),
+                                            '--output', str(output)]):
+                self.assertEqual(sealer.main(), 1)
 
     def test_missing_comparator_export_still_encrypts_wrapper_failure(self):
         with tempfile.TemporaryDirectory() as directory:

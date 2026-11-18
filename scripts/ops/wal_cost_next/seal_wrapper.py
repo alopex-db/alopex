@@ -106,9 +106,11 @@ def seal(qualification, frozen, private, output):
         except (OSError, ValueError, KeyError, TypeError):
             public['error_code'] = 'COST_FAILURE'
             public['wal_outcome'] = 'failed'
-    if public.get('closure_outcome') != 'candidate' and public['outcome'] == 'passed':
+    if public['outcome'] == 'passed':
         public['outcome'] = 'failed'
-        public['error_code'] = public['closure_error_code']
+        public['error_code'] = ('LOCK_UNAPPROVED' if
+                                public['closure_outcome'] == 'candidate' else
+                                public['closure_error_code'])
     archive = private / 'wrapper-evidence.tar.gz'
     encrypted = output / 'private-evidence.cms'
     if evidence:
