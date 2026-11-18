@@ -15,7 +15,7 @@ import stat
 from . import adapter, entrypoint, qualification, supervisor
 
 SCHEMA = "alopex.sql-four-case-controller/v1"
-MANIFEST_FIELDS = frozenset(("schema", "job_id", "lock_path", "lock_sha256",
+MANIFEST_FIELDS = frozenset(("schema", "job_id", "run_attempt", "lock_path", "lock_sha256",
                              "source_commit", "source_tree", "assets_digest",
                              "fixture_sha256", "package_files", "package_root",
                              "docs_harness_root", "product_harness_root", "python"))
@@ -56,6 +56,9 @@ def load_manifest(path, expected_digest):
     require(type(manifest) is dict and set(manifest) == MANIFEST_FIELDS and
             manifest["schema"] == SCHEMA and type(manifest["job_id"]) is str and
             manifest["job_id"].isdecimal() and
+            type(manifest["run_attempt"]) is str and
+            manifest["run_attempt"].isdecimal() and
+            int(manifest["run_attempt"]) > 0 and
             all(type(manifest[key]) is str and qualification.HEX40.fullmatch(manifest[key])
                 for key in ("source_commit", "source_tree")) and
             all(type(manifest[key]) is str and qualification.HEX64.fullmatch(manifest[key])
@@ -91,6 +94,77 @@ def _write_json(path, value):
     return hashlib.sha256(raw).hexdigest()
 
 
+def _invalidate_receipts(output):
+    """Remove any previous result before attempting this output namespace."""
+    output = Path(output)
+    if not output.exists() and not output.is_symlink():
+        return
+    info = output.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and
+            stat.S_IMODE(info.st_mode) == 0o700, "OUTPUT_STATE")
+    for name in ("receipt.public.json", "receipt.private.json"):
+        path = output / name
+        if path.exists() or path.is_symlink():
+            item = path.lstat()
+            require(stat.S_ISREG(item.st_mode) and item.st_uid == os.geteuid() and
+                    stat.S_IMODE(item.st_mode) == 0o600, "OUTPUT_STATE")
+            path.unlink()
+
+
+def _read_owned_file(path, limit):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and before.st_uid == os.geteuid() and
+                stat.S_IMODE(before.st_mode) == 0o600 and
+                0 < before.st_size <= limit, "RECEIPT_IDENTITY")
+        raw = os.read(fd, limit + 1)
+        after = os.fstat(fd)
+        require(len(raw) == before.st_size and
+                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) ==
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+                "RECEIPT_IDENTITY")
+        return raw
+    finally:
+        os.close(fd)
+
+
+def verify_public_receipt(output, *, job_id, run_attempt, binding_sha256):
+    """Accept a result only for the caller's exact job, attempt and #804 proof."""
+    require(type(job_id) is str and job_id.isdecimal() and
+            type(run_attempt) is str and run_attempt.isdecimal() and
+            type(binding_sha256) is str and
+            qualification.HEX64.fullmatch(binding_sha256), "RECEIPT_IDENTITY")
+    output = Path(output)
+    public_path = output / "receipt.public.json"
+    private_path = output / "receipt.private.json"
+    try:
+        public = json.loads(_read_owned_file(public_path, 4096),
+                            object_pairs_hook=entrypoint.acquire.acquisition._unique_pairs)
+        private_raw = _read_owned_file(private_path, 16384)
+        private = json.loads(private_raw,
+                             object_pairs_hook=entrypoint.acquire.acquisition._unique_pairs)
+    except (OSError, ValueError, UnicodeError) as error:
+        raise ValueError("RECEIPT_IDENTITY") from error
+    require(type(public) is dict and type(private) is dict and
+            public.get("schema") == private.get("schema") == SCHEMA and
+            public.get("status") == private.get("status") == "passed" and
+            public.get("job_id") == private.get("job_id") == job_id and
+            public.get("run_attempt") == private.get("run_attempt") == run_attempt and
+            public.get("qualification_binding_sha256") ==
+            private.get("qualification_binding_sha256") == binding_sha256 and
+            public.get("private_receipt_sha256") ==
+            hashlib.sha256(private_raw).hexdigest() and
+            public.get("pair_count") == 12 and
+            type(private.get("pairs")) is list and len(private["pairs"]) == 12 and
+            {(row.get("case"), row.get("trial"), row.get("status"))
+             for row in private["pairs"] if type(row) is dict} ==
+            {(case, trial, "passed") for case in adapter.CASES for trial in range(3)} and
+            public.get("performance_qualification") is False and
+            private.get("performance_qualification") is False, "RECEIPT_IDENTITY")
+    return public
+
+
 def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
                      environment, output, operations, stage_pair):
     """Attest #804, then run 12 independently staged owned-server pairs.
@@ -103,6 +177,7 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
     manifest = load_manifest(manifest_path, manifest_digest)
     job_id = manifest["job_id"]
     require(environment.get("GITHUB_RUN_ID") == job_id and
+            environment.get("GITHUB_RUN_ATTEMPT") == manifest["run_attempt"] and
             environment.get("GITHUB_ACTIONS") == "true" and
             environment.get("RUNNER_ENVIRONMENT") == "github-hosted" and
             callable(stage_pair), "SAME_JOB")
@@ -156,6 +231,7 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
                     report["stop_error"] is None, "PAIR_FAILED")
             results.append({"case": case, "trial": trial, "status": "passed"})
     private = {"schema": SCHEMA, "status": "passed", "job_id": job_id,
+               "run_attempt": manifest["run_attempt"],
                "source_commit": pin["source_commit"],
                "source_tree": pin["source_tree"],
                "assets_digest": pin["assets_digest"],
@@ -164,6 +240,7 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
                "performance_qualification": False}
     private_digest = _write_json(output / "receipt.private.json", private)
     public = {"schema": SCHEMA, "status": "passed", "job_id": job_id,
+              "run_attempt": manifest["run_attempt"],
               "source_commit": pin["source_commit"],
               "assets_digest": pin["assets_digest"],
               "qualification_binding_sha256": receipt["binding_sha256"],
@@ -177,6 +254,7 @@ def run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
                     environment, output, operations, stage_pair):
     """Run the matrix and emit a fixed-code public failure when it cannot pass."""
     try:
+        _invalidate_receipts(output)
         return _run_current_job(
             manifest_path, manifest_digest, repo=repo, runner_temp=runner_temp,
             environment=environment, output=output, operations=operations,
@@ -189,6 +267,9 @@ def run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
         public = {"schema": SCHEMA, "status": "failed",
                   "error_code": code if code in allowed else "INTERNAL",
                   "pair_count": 0, "performance_qualification": False}
+        attempt = environment.get("GITHUB_RUN_ATTEMPT")
+        if type(attempt) is str and attempt.isdecimal() and int(attempt) > 0:
+            public["run_attempt"] = attempt
         try:
             destination = Path(output)
             if not destination.exists():

@@ -20,7 +20,7 @@ class ControllerTests(unittest.TestCase):
         lock_bytes = json.dumps(self.lock).encode()
         self.lock_path.write_bytes(lock_bytes)
         self.manifest = {
-            "schema": controller.SCHEMA, "job_id": JOB,
+            "schema": controller.SCHEMA, "job_id": JOB, "run_attempt": "1",
             "lock_path": str(self.lock_path),
             "lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
             "source_commit": self.lock["pin"]["source_commit"],
@@ -36,7 +36,8 @@ class ControllerTests(unittest.TestCase):
             "python": str(self.root / "python")}
         self.manifest_path = self.root / "manifest.json"
         self.output = self.root / "output"
-        self.env = {"GITHUB_RUN_ID": JOB, "GITHUB_ACTIONS": "true",
+        self.env = {"GITHUB_RUN_ID": JOB, "GITHUB_RUN_ATTEMPT": "1",
+                    "GITHUB_ACTIONS": "true",
                     "RUNNER_ENVIRONMENT": "github-hosted"}
 
     def save(self):
@@ -75,12 +76,20 @@ class ControllerTests(unittest.TestCase):
                                         "stop_error": None}) as pair:
             result = self.invoke(digest, stage)
         self.assertEqual(result["pair_count"], 12)
+        self.assertEqual(result["run_attempt"], "1")
         self.assertFalse(result["performance_qualification"])
         self.assertEqual([(case, trial) for case, trial, _ in staged],
                          [(case, trial) for case in adapter.CASES for trial in range(3)])
         self.assertEqual(pair.call_count, 12)
         self.assertEqual(attest.call_count, 1)
         self.assertTrue((self.output / "receipt.private.json").is_file())
+        self.assertEqual(controller.verify_public_receipt(
+            self.output, job_id=JOB, run_attempt="1",
+            binding_sha256=self.receipt["binding_sha256"]), result)
+        with self.assertRaisesRegex(ValueError, "RECEIPT_IDENTITY"):
+            controller.verify_public_receipt(
+                self.output, job_id=JOB, run_attempt="2",
+                binding_sha256=self.receipt["binding_sha256"])
 
     def test_wrong_job_fails_closed_before_attestation(self):
         digest = self.save()
@@ -109,6 +118,42 @@ class ControllerTests(unittest.TestCase):
         public = json.loads((self.output / "receipt.public.json").read_text())
         self.assertEqual(public["status"], "failed")
         self.assertEqual(public["pair_count"], 0)
+
+    def test_reinvocation_replaces_stale_success_with_failed_attempt(self):
+        digest = self.save()
+        self.output.mkdir(mode=0o700)
+        for name in ("receipt.private.json", "receipt.public.json"):
+            path = self.output / name
+            path.write_text(json.dumps({"status": "passed", "run_attempt": "1"}))
+            path.chmod(0o600)
+        self.env["GITHUB_RUN_ATTEMPT"] = "2"
+        with patch.object(controller.entrypoint, "attest_current_job") as attest:
+            with self.assertRaisesRegex(ValueError, "SAME_JOB"):
+                self.invoke(digest, lambda *args: None)
+        attest.assert_not_called()
+        public = json.loads((self.output / "receipt.public.json").read_text())
+        private = json.loads((self.output / "receipt.private.json").read_text())
+        self.assertEqual(public["status"], "failed")
+        self.assertEqual(public["run_attempt"], "2")
+        self.assertEqual(private["status"], "failed")
+        with self.assertRaisesRegex(ValueError, "RECEIPT_IDENTITY"):
+            controller.verify_public_receipt(
+                self.output, job_id=JOB, run_attempt="2",
+                binding_sha256=self.receipt["binding_sha256"])
+
+    def test_same_attempt_reinvocation_invalidates_old_success(self):
+        digest = self.save()
+        self.output.mkdir(mode=0o700)
+        for name in ("receipt.private.json", "receipt.public.json"):
+            path = self.output / name
+            path.write_text(json.dumps({"status": "passed", "run_attempt": "1"}))
+            path.chmod(0o600)
+        with patch.object(controller.entrypoint, "attest_current_job",
+                          return_value=(self.proof, self.receipt)):
+            with self.assertRaises(FileExistsError):
+                self.invoke(digest, lambda *args: None)
+        self.assertEqual(json.loads((self.output / "receipt.public.json").read_text())
+                         ["status"], "failed")
 
 
 if __name__ == "__main__":
