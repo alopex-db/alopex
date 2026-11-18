@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from . import attestor
+from . import attestor, qualification
 from .test_qualification import fixture, JOB
 
 
@@ -29,8 +29,13 @@ class AttestorTests(unittest.TestCase):
             path.mkdir(parents=True, exist_ok=True)
         self.lock, self.proof, _ = fixture()
         self.pin = self.lock["pin"]
-        self.pin["operator_sha256"] = {"operator.py": sha(b"operator bytes")}
-        self.write(self.repo / "scripts/ops/operator.py", b"operator bytes")
+        self.pin["operator_sha256"] = {}
+        for name in qualification.REQUIRED_OPERATORS:
+            path = self.repo / "scripts/ops" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = (name + " operator bytes").encode()
+            self.write(path, data)
+            self.pin["operator_sha256"][name] = sha(data)
         self.pin["common_verifier_sha256"] = sha(b"reviewed verifier bytes")
         self.write(self.repo / "scripts/test-env/common.py", b"reviewed verifier bytes")
         self.pin["image_lock_sha256"] = sha(b"image lock")
@@ -182,6 +187,12 @@ class AttestorTests(unittest.TestCase):
         self.env["GITHUB_RUN_ID"] = JOB
         self.write(self.private / "candidate.original.zip", b"wrong ZIP bytes")
         with self.assertRaisesRegex(ValueError, "ACQUISITION_BINDING"):
+            self.attest()
+
+    def test_rejects_changed_pinned_operator(self):
+        self.write(self.repo / "scripts/ops/four_case_diagnostic/entrypoint.py",
+                   b"changed operator bytes")
+        with self.assertRaisesRegex(ValueError, "OPERATOR_IDENTITY"):
             self.attest()
 
     def test_rejects_partial_cleanup_and_failed_case(self):

@@ -92,9 +92,11 @@ def attest_current_job(lock, job_id, *, repo, runner_temp, environment, operatio
     qualification.require(identity == {"controller_commit": pin["controller_commit"],
                                      "controller_digest": pin["controller_digest"]},
                           "IDENTITY")
+    qualification.require(type(pin["operator_sha256"]) is dict and
+                          set(pin["operator_sha256"]) == qualification.REQUIRED_OPERATORS,
+                          "OPERATOR_IDENTITY")
     for name, expected in pin["operator_sha256"].items():
-        qualification.require("/" not in name and "\\" not in name and
-                              _digest(repo / "scripts/ops" / name) == expected,
+        qualification.require(_digest(repo / "scripts/ops" / name) == expected,
                               "OPERATOR_IDENTITY")
     qualification.require(_digest(repo / "scripts/test-env/common.py") ==
                           pin["common_verifier_sha256"], "IDENTITY")

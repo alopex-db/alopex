@@ -10,8 +10,7 @@ from . import qualification as q
 SOURCE = "1" * 39 + "2"
 TREE = "2" * 39 + "3"
 CONTROLLER = "3" * 39 + "4"
-OPERATORS = {"four_case_supervisor.py": "4" * 63 + "5",
-             "four_case_worker.py": "5" * 63 + "6"}
+OPERATORS = {name: "4" * 63 + "5" for name in q.REQUIRED_OPERATORS}
 JOB = "12345678"
 
 
@@ -30,7 +29,7 @@ def fixture():
                                   "harness": "3" * 63 + "c"},
            "common_verifier_sha256": "4" * 63 + "d",
            "harness_commit": "c" * 39 + "d", "image_lock_sha256": "d" * 63 + "e",
-           "seccomp_sha256": "e" * 63 + "f", "operator_sha256": OPERATORS}
+           "seccomp_sha256": "e" * 63 + "f", "operator_sha256": dict(OPERATORS)}
     lock = {"schema": "alopex.sql-four-case-pins/v1", "pin": pin}
     cases = [{"id": case, "status": "passed", "error_code": None}
              for case in q.CASES]
@@ -113,6 +112,7 @@ class QualificationContractTests(unittest.TestCase):
         lock["schema"] = "alopex.sql-diagnostic-pins/v1"
         with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
             checked(lock, proof, receipt)
+
         for path, value in (("source_commit", "0" * 40),
                             ("source_tree", "0" * 40),
                             ("server_sha256", "0" * 64),
@@ -133,6 +133,12 @@ class QualificationContractTests(unittest.TestCase):
                 checked(lock, proof, receipt)
         lock, proof, receipt = fixture()
         lock["pin"]["unexpected"] = True
+        with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
+            checked(lock, proof, receipt)
+
+    def test_rejects_omitted_operator_pin(self):
+        lock, proof, receipt = fixture()
+        lock["pin"]["operator_sha256"].pop("four_case_diagnostic/entrypoint.py")
         with self.assertRaisesRegex(ValueError, "MISSING_PIN"):
             checked(lock, proof, receipt)
 

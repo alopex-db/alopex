@@ -36,6 +36,13 @@ RECEIPT_FIELDS = frozenset(("job_id", "source_commit", "source_tree",
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 ASSET_ROLES = frozenset(("server", "wheel", "library", "receipt", "harness"))
+REQUIRED_OPERATORS = frozenset({
+    "hosted_test_env_qualification_four_case.py",
+    *(f"four_case_diagnostic/{name}.py" for name in (
+        "__init__", "acquire", "acquisition", "adapter", "attestor", "audit",
+        "entrypoint", "intake", "log_parser", "operation", "oracle",
+        "producer", "qualification", "runner", "supervisor", "worker")),
+})
 
 
 def require(value, code):
@@ -68,7 +75,8 @@ def validate(lock, proof, receipt, *, job_id, expected_source_commit,
             _hex(expected_source_commit, HEX40) and
             _hex(expected_source_tree, HEX40) and
             _hex(expected_controller_commit, HEX40), "MISSING_PIN")
-    require(type(expected_operator_sha256) is dict and expected_operator_sha256 and
+    require(type(expected_operator_sha256) is dict and
+            set(expected_operator_sha256) == REQUIRED_OPERATORS and
             all(type(name) is str and name.endswith(".py") and
                 _hex(value, HEX64) for name, value in expected_operator_sha256.items()),
             "MISSING_PIN")
