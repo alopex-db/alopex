@@ -175,11 +175,26 @@ class ReleaseContractTests(unittest.TestCase):
         release = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
         )
+        producer = release.split("  build-release:", maxsplit=1)[1].split(
+            "  create-release:", maxsplit=1
+        )[0]
+        required_targets = re.findall(
+            r"^\s+target: ([\w-]+)$", producer, re.MULTILINE
+        )
+        self.assertEqual(len(required_targets), len(set(required_targets)))
+        self.assertEqual(len(required_targets), 3)
+
         self.assertIn("Flatten parser artifact payloads", release)
         self.assertIn('test "${#parser_records[@]}" -eq 3', release)
         self.assertIn('test "${#parser_archives[@]}" -eq 3', release)
         self.assertIn('destination="artifacts/$(basename "$asset")"', release)
         self.assertIn('test ! -e "$destination"', release)
+        assembly = release.split(
+            "- name: Assemble and verify parser manifest", maxsplit=1
+        )[1].split("- name: Create Release", maxsplit=1)[0]
+        self.assertIn(
+            f'test "${{#records[@]}}" -eq {len(required_targets)}', assembly
+        )
 
     def test_public_tool_dependencies_are_generated_from_exact_version(self) -> None:
         tools = (ROOT / "crates/alopex-tools/Cargo.toml").read_text(encoding="utf-8")
