@@ -143,11 +143,19 @@ fn fixture_with_sizes(sizes: Option<(i32, i32)>) -> tempfile::NamedTempFile {
 }
 
 fn fixture_with_dictionary(sizes: Option<(i32, i32)>, dictionary: bool) -> tempfile::NamedTempFile {
+    fixture_with_dictionary_and_compression(sizes, dictionary, Compression::SNAPPY)
+}
+
+fn fixture_with_dictionary_and_compression(
+    sizes: Option<(i32, i32)>,
+    dictionary: bool,
+    compression: Compression,
+) -> tempfile::NamedTempFile {
     let file = tempfile::NamedTempFile::with_suffix(".parquet").unwrap();
     let schema = Arc::new(parse_message_type("message fixture { REQUIRED INT64 id; }").unwrap());
     let properties = Arc::new(
         WriterProperties::builder()
-            .set_compression(Compression::SNAPPY)
+            .set_compression(compression)
             .set_dictionary_enabled(dictionary)
             .build(),
     );
@@ -1950,7 +1958,9 @@ fn partial_modern_page_statistics_ignore_malformed_legacy_bounds() {
     use std::io::Cursor;
     use thrift::protocol::TCompactInputProtocol;
 
-    let file = fixture(false);
+    // GZIP uses BoundedPages, which converts page statistics through wire::statistics.
+    let file =
+        fixture_with_dictionary_and_compression(None, false, Compression::GZIP(Default::default()));
     let bytes = std::fs::read(file.path()).unwrap();
     let mut footer = wire_footer(&bytes);
     let footer_size =
