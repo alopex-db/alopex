@@ -5,11 +5,10 @@ This module neither creates a container nor changes its policy or network.
 """
 from __future__ import annotations
 
-import json
 import re
 
-from capture_signed_indexes import inspect_resolver
-from resolve_builder_lock import BASE, LockError
+from offline_closure_lifecycle import inspect_offline_container
+from resolve_builder_lock import LockError
 import resolve_builder_lock
 
 VERSION = re.compile(r"[0-9][0-9A-Za-z.+:~\-]*\Z")
@@ -19,24 +18,21 @@ OPERATORS = frozenset(("<<", "<=", "=", ">=", ">>"))
 class ExactBaseDpkg:
     """Compare Debian versions only inside one verified, running base container."""
 
-    def __init__(self, docker, monitor, identity: str, profile: dict, token: str):
+    def __init__(self, docker, monitor, identity: str, profile: dict,
+                 run_id: str, token: str):
         if not re.fullmatch(r"[0-9a-f]{64}", identity):
             raise LockError("invalid resolver identity")
         self.docker = docker
         self.monitor = monitor
         self.identity = identity
         self.profile = profile
+        self.run_id = run_id
         self.token = token
         self._verify_container()
 
     def _verify_container(self) -> None:
-        live = inspect_resolver(self.docker, self.identity, self.profile, self.token)
-        image = json.loads(self.docker.call("image", "inspect", BASE))[0]
-        if (not live["State"]["Running"] or live["State"].get("Paused") or
-                live["Image"] != image["Id"] or image["Os"] != "linux" or
-                image["Architecture"] != "amd64" or
-                BASE not in image.get("RepoDigests", [])):
-            raise LockError("selected base resolver unavailable")
+        inspect_offline_container(self.docker, self.identity, self.profile,
+                                  self.run_id, self.token, running=True)
 
     def compare(self, actual: str, operator: str, required: str) -> bool:
         if (operator not in OPERATORS or not VERSION.fullmatch(actual) or
@@ -45,7 +41,7 @@ class ExactBaseDpkg:
         # Recheck identity before each exec; never substitute the host's dpkg.
         self._verify_container()
         code, stdout, stderr = self.monitor.run(
-            [*self.docker.prefix, "exec", "--user=root", self.identity,
+            [*self.docker.prefix, "exec", self.identity,
              "/usr/bin/dpkg", "--compare-versions", actual, operator, required],
             timeout=10, capture=True, allow_nonzero=True)
         if code not in (0, 1) or stdout or stderr:

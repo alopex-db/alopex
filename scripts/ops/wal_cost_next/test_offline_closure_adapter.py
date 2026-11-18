@@ -26,30 +26,26 @@ class ExactBaseDpkgTests(unittest.TestCase):
         self.monitor.run.return_value = (0, "", "")
 
     def adapter(self):
-        with patch("offline_closure_adapter.inspect_resolver", return_value=self.live):
-            return ExactBaseDpkg(self.docker, self.monitor, IDENTITY, {}, "token")
+        with patch("offline_closure_adapter.inspect_offline_container", return_value=self.live):
+            return ExactBaseDpkg(self.docker, self.monitor, IDENTITY, {}, "run", "token")
 
     def test_uses_only_exact_base_container_dpkg(self):
         adapter = self.adapter()
-        with patch("offline_closure_adapter.inspect_resolver", return_value=self.live):
+        with patch("offline_closure_adapter.inspect_offline_container", return_value=self.live):
             self.assertTrue(adapter.compare("1:2.39-0ubuntu8.9", ">=", "2.39"))
             self.monitor.run.return_value = (1, "", "")
             self.assertFalse(adapter.compare("1.0~rc1", ">=", "1.0"))
         command = self.monitor.run.call_args_list[0].args[0]
-        self.assertEqual(command, [*self.docker.prefix, "exec", "--user=root",
+        self.assertEqual(command, [*self.docker.prefix, "exec",
                                    IDENTITY, "/usr/bin/dpkg", "--compare-versions",
                                    "1:2.39-0ubuntu8.9", ">=", "2.39"])
         self.assertNotIn("/usr/bin/dpkg", command[:2])
 
-    def test_refuses_stopped_or_different_base(self):
-        for live, image in (({"State": {"Running": False}, "Image": IMAGE_ID}, self.image),
-                            (self.live, {**self.image, "RepoDigests": []}),
-                            ({**self.live, "Image": "sha256:" + "c" * 64}, self.image)):
-            with self.subTest(live=live, image=image):
-                self.docker.call.return_value = json.dumps([image])
-                with patch("offline_closure_adapter.inspect_resolver", return_value=live):
-                    with self.assertRaisesRegex(LockError, "selected base resolver unavailable"):
-                        ExactBaseDpkg(self.docker, self.monitor, IDENTITY, {}, "token")
+    def test_refuses_failed_offline_inspection(self):
+        with patch("offline_closure_adapter.inspect_offline_container",
+                   side_effect=LockError("offline container policy drift")):
+            with self.assertRaisesRegex(LockError, "offline container policy drift"):
+                ExactBaseDpkg(self.docker, self.monitor, IDENTITY, {}, "run", "token")
         self.monitor.run.assert_not_called()
 
     def test_rechecks_identity_and_rejects_failed_comparison(self):
@@ -57,11 +53,11 @@ class ExactBaseDpkgTests(unittest.TestCase):
         for result in ((127, "", ""), (0, "unexpected", ""), (0, "", "error")):
             with self.subTest(result=result):
                 self.monitor.run.return_value = result
-                with patch("offline_closure_adapter.inspect_resolver", return_value=self.live):
+                with patch("offline_closure_adapter.inspect_offline_container", return_value=self.live):
                     with self.assertRaisesRegex(LockError, "comparison failed"):
                         adapter.compare("1.0", "=", "1.0")
-        with patch("offline_closure_adapter.inspect_resolver", return_value={
-                "State": {"Running": False}, "Image": IMAGE_ID}):
+        with patch("offline_closure_adapter.inspect_offline_container",
+                   side_effect=LockError("selected base resolver unavailable")):
             before = self.monitor.run.call_count
             with self.assertRaisesRegex(LockError, "selected base resolver unavailable"):
                 adapter.compare("1.0", "=", "1.0")
@@ -118,7 +114,7 @@ class ExactBaseDpkgTests(unittest.TestCase):
         original = resolve_builder_lock.version_satisfies
         with patch("resolve_builder_lock.APPROVED_PROOF_SHA256", proof), \
              patch("resolve_builder_lock.APPROVED_SIGNERS", frozenset({"D" * 40})), \
-             patch("offline_closure_adapter.inspect_resolver", return_value=self.live):
+             patch("offline_closure_adapter.inspect_offline_container", return_value=self.live):
             lock = make_lock_with_exact_base_dpkg(
                 base, auth, {"noble-main": index}, uris, resolver, adapter)
         self.assertEqual(lock["budgets"]["download_bytes"], 100)
