@@ -22,6 +22,7 @@ def fixture():
            "wheel_sha256": "9" * 63 + "a", "controller_commit": CONTROLLER,
            "controller_digest": "a" * 63 + "b", "asset_run_id": 88,
            "asset_run_head": "b" * 39 + "c", "zip_sha256": "6" * 63 + "7",
+           "asset_zip_size_bytes": 12345,
            "harness_commit": "c" * 39 + "d", "image_lock_sha256": "d" * 63 + "e",
            "seccomp_sha256": "e" * 63 + "f", "operator_sha256": OPERATORS}
     lock = {"schema": "alopex.sql-four-case-pins/v1", "pin": pin}
@@ -41,8 +42,13 @@ def fixture():
                          "storage": {"stop_bytes": 40_000_000_000,
                                      "reserve_bytes": 1_000_000_000,
                                      "poll_seconds": 10}},
-             "acquisition": {"artifact_id": pin["artifact_id"],
+             "acquisition": {"schema": "alopex.sql-four-case-acquisition/v2",
+                             "qualification_job_id": JOB,
+                             "run": pin["asset_run_id"],
+                             "head": pin["asset_run_head"],
+                             "artifact_id": pin["artifact_id"],
                              "zip_sha256": pin["zip_sha256"],
+                             "zip_size_bytes": pin["asset_zip_size_bytes"],
                              "assets_digest": pin["assets_digest"]},
              "product": {"source_commit": SOURCE, "source_tree": TREE,
                          "artifact_sha256": pin["artifact_sha256"],
@@ -133,6 +139,11 @@ class QualificationContractTests(unittest.TestCase):
     def test_rejects_wrong_proof_and_receipt_binding(self):
         for change in (lambda p: p["qualification_public"].update(source_commit="0" * 40),
                        lambda p: p["acquisition"].update(assets_digest="0" * 64),
+                       lambda p: p["acquisition"].update(run=87),
+                       lambda p: p["acquisition"].update(head="0" * 40),
+                       lambda p: p["acquisition"].update(zip_size_bytes=12344),
+                       lambda p: p["acquisition"].update(qualification_job_id="12345677"),
+                       lambda p: p["acquisition"].update(unexpected=True),
                        lambda p: p["accepted_public"].update(image_digest="0" * 64),
                        lambda p: p["profile"]["security"].update(lsm_profile="unconfined")):
             lock, proof, receipt = fixture()

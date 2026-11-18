@@ -1,9 +1,9 @@
 """Pure contract for a new #804 same-job qualification of four-case assets.
 
-The input shapes are those returned by ``attestor_1951.attest_current_job`` and
-``same_job_1951.derive_receipt``. A live attestor must authenticate the files,
-container state, image, and collection before supplying ``proof``. This module
-does not turn a self-reported proof into trusted evidence.
+The four-case acquisition proof uses its own v2 schema, extending the 1951
+receipt with exact ZIP byte size and current qualification job. A live attestor
+must authenticate its private bytes and the container, image, and collection
+before supplying ``proof``. This module does not turn self-report into evidence.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ PIN_FIELDS = frozenset(("source_commit", "source_tree", "artifact_id",
                         "artifact_sha256", "assets_digest", "server_sha256",
                         "wheel_sha256", "controller_commit", "controller_digest",
                         "asset_run_id", "asset_run_head", "zip_sha256",
+                        "asset_zip_size_bytes",
                         "harness_commit", "image_lock_sha256", "seccomp_sha256",
                         "operator_sha256"))
 PROOF_FIELDS = frozenset(("job_id", "qualification_public", "profile",
@@ -79,6 +80,8 @@ def validate(lock, proof, receipt, *, job_id, expected_source_commit,
             pin["operator_sha256"] == expected_operator_sha256 and
             type(pin["artifact_id"]) is int and pin["artifact_id"] > 0 and
             type(pin["asset_run_id"]) is int and pin["asset_run_id"] > 0 and
+            type(pin["asset_zip_size_bytes"]) is int and
+            0 < pin["asset_zip_size_bytes"] < 60_000_000 and
             all(_hex(pin[key], HEX40) for key in ("asset_run_head", "harness_commit")) and
             all(_hex(pin[key], HEX64) for key in
                 ("artifact_sha256", "assets_digest", "server_sha256", "wheel_sha256",
@@ -110,9 +113,14 @@ def validate(lock, proof, receipt, *, job_id, expected_source_commit,
             profile["storage"] == {"stop_bytes": 40_000_000_000,
                                    "reserve_bytes": 1_000_000_000,
                                    "poll_seconds": 10}, "POLICY")
-    require(proof["acquisition"] == {"artifact_id": pin["artifact_id"],
-                                      "zip_sha256": pin["zip_sha256"],
-                                      "assets_digest": pin["assets_digest"]} and
+    require(proof["acquisition"] == {
+                "schema": "alopex.sql-four-case-acquisition/v2",
+                "qualification_job_id": job_id,
+                "run": pin["asset_run_id"], "head": pin["asset_run_head"],
+                "artifact_id": pin["artifact_id"],
+                "zip_sha256": pin["zip_sha256"],
+                "zip_size_bytes": pin["asset_zip_size_bytes"],
+                "assets_digest": pin["assets_digest"]} and
             proof["product"] == {"source_commit": expected_source_commit,
                                   "source_tree": expected_source_tree,
                                   "artifact_sha256": pin["artifact_sha256"],
