@@ -608,6 +608,9 @@ pub(crate) async fn execute_session_statements_with_routing(
 )> {
     let deadline = tokio::time::Instant::now() + timeout;
     let trace_id = sql_timing_id(correlation_id);
+    // Session SQL reuses an open transaction. Keep its acquisition and
+    // bookkeeping stages distinct from non-session begin/commit timings.
+    let setup_started = trace_id.map(|_| Instant::now());
     let operation_started = trace_id.map(|_| Instant::now());
     let handle = match wait_until_deadline(
         deadline,
@@ -710,6 +713,10 @@ pub(crate) async fn execute_session_statements_with_routing(
             Some(CatalogTxnOperation::Read { _guard: catalog })
         }
     };
+    if let Some(started) = setup_started {
+        log_sql_timing(trace_id, "session_setup", started.elapsed());
+    }
+    let plan_started = trace_id.map(|_| Instant::now());
     let routing_plan = match wait_until_deadline(
         deadline,
         route_session_sql(&state, &handle, sql, correlation_id),
@@ -721,6 +728,9 @@ pub(crate) async fn execute_session_statements_with_routing(
             return Err(ServerError::Timeout("query timeout".into()));
         }
     };
+    if let Some(started) = plan_started {
+        log_sql_timing(trace_id, "route_plan", started.elapsed());
+    }
     if let Some(diagnostic) = future_distributed_diagnostic(&routing_plan.diagnostics) {
         return Err(future_distributed_error(diagnostic));
     }
@@ -766,6 +776,7 @@ pub(crate) async fn execute_session_statements_with_routing(
             }
             operation => operation,
         };
+        let execution_started = trace_id.map(|_| Instant::now());
         let execution_outcome = {
             let execution =
                 handle.execute_multi_with_operation_and_trace(&sql, &operation, trace_id);
@@ -786,6 +797,9 @@ pub(crate) async fn execute_session_statements_with_routing(
                 SqlDeadline::Completed(result) => Some((result, false)),
             }
         };
+        if let Some(started) = execution_started {
+            log_sql_timing(trace_id, "execute_multi", started.elapsed());
+        }
         let Some((result, timed_out)) = execution_outcome else {
             if acquired_catalog_writer || retain_catalog_reader {
                 drop(handle.take_catalog_txn_guard(&operation).await);
@@ -794,6 +808,7 @@ pub(crate) async fn execute_session_statements_with_routing(
             return;
         };
 
+        let completion_started = trace_id.map(|_| Instant::now());
         let bookkeeping = statement_effects_after_execution(&state, lifecycle_candidates);
         let completion = match bookkeeping {
             Ok((lifecycle_effects, catalog_rollback_effects)) => {
@@ -815,6 +830,9 @@ pub(crate) async fn execute_session_statements_with_routing(
             Err(err) => Err(err),
         };
 
+        if let Some(started) = completion_started {
+            log_sql_timing(trace_id, "session_completion", started.elapsed());
+        }
         if timed_out {
             if let Err(err) = completion {
                 tracing::error!(error = %err, "timed-out session SQL coordinator failed after responding");
