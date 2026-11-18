@@ -139,7 +139,8 @@ class QualificationContractTests(unittest.TestCase):
     def test_rejects_omitted_operator_pin(self):
         for name in ("four_case_diagnostic/entrypoint.py",
                      "four_case_diagnostic/stage_pair.py",
-                     "four_case_diagnostic/container_pair_entrypoint.py"):
+                     "four_case_diagnostic/container_pair_entrypoint.py",
+                     "four_case_diagnostic/docs_stage.py", "four_case_job.py"):
             with self.subTest(name=name):
                 lock, proof, receipt = fixture()
                 lock["pin"]["operator_sha256"].pop(name)

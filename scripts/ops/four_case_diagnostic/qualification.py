@@ -38,9 +38,10 @@ HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 ASSET_ROLES = frozenset(("server", "wheel", "library", "receipt", "harness"))
 REQUIRED_OPERATORS = frozenset({
     "hosted_test_env_qualification_four_case.py",
+    "four_case_job.py",
     *(f"four_case_diagnostic/{name}.py" for name in (
         "__init__", "acquire", "acquisition", "adapter", "attestor", "audit",
-        "container_pair_entrypoint", "controller",
+        "container_pair_entrypoint", "controller", "docs_stage",
         "entrypoint", "intake", "log_parser", "operation", "oracle",
         "producer", "qualification", "runner", "stage_pair", "supervisor",
         "worker")),
