@@ -76,6 +76,7 @@ original run/attempt and verifier identity.
 | `ci.yml:test` | Development CI | exact-SHA behavior result |
 | `ci.yml:coverage` | Development CI | exact-SHA coverage result |
 | `ci.yml:security-audit` | Development CI | exact-SHA dependency policy result |
+| `trusted-security-audit.yml:trusted-security-audit` | Main PR Verification | base-controlled dependency and RustSec result required independently of PR-controlled CI |
 | `ci.yml:build` | Development CI | exact-SHA cross-platform build result |
 | `ci.yml:v08-release-gate` | Development CI | exact-SHA implementation-surface result |
 | `ci.yml:ci-success` | Development CI | required status-only join |
