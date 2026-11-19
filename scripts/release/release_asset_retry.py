@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import resource
 import subprocess
 import tempfile
@@ -17,18 +18,24 @@ def gh(*args, max_file_size=None):
     return subprocess.run(
         ["gh", *args], check=True, capture_output=True, text=True,
         preexec_fn=limit_file_size if max_file_size is not None else None,
+        timeout=600,
     ).stdout
 
 
 def assets(repo, tag):
     release = json.loads(gh("api", f"repos/{repo}/releases/tags/{tag}"))
+    release_id = release["id"]
     result = {}
-    for asset in release["assets"]:
-        name = asset["name"]
-        if name in result:
-            raise ValueError(f"duplicate release asset: {name}")
-        result[name] = asset
-    return result
+    for page in range(1, 101):
+        batch = json.loads(gh("api", f"repos/{repo}/releases/{release_id}/assets?per_page=100&page={page}"))
+        for asset in batch:
+            name = asset["name"]
+            if name in result:
+                raise ValueError(f"duplicate release asset: {name}")
+            result[name] = asset
+        if len(batch) < 100:
+            return result
+    raise ValueError("release asset pagination exceeded 100 pages")
 
 
 def sha256(path):
@@ -61,6 +68,10 @@ def verify_asset(repo, tag, path, asset):
 
 
 def upload(repo, tag, directory):
+    parts = repo.split("/")
+    if (len(parts) != 2 or any(re.fullmatch(r"[A-Za-z0-9_.-]+", part) is None or part in (".", "..") for part in parts)
+            or re.fullmatch(r"[A-Za-z0-9._-]+", tag) is None or tag in (".", "..")):
+        raise ValueError("invalid release repository or tag")
     entries = list(directory.iterdir())
     if any(path.is_symlink() for path in entries):
         raise ValueError("release assets must not be symlinks")

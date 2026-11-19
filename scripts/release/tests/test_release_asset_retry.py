@@ -20,10 +20,13 @@ class FakeGh:
 
     def __call__(self, *args, max_file_size=None):
         if args[0] == "api":
-            return json.dumps({"assets": [
+            if "/tags/" in args[1]:
+                return json.dumps({"id": 123})
+            page = int(args[1].split("page=")[-1])
+            return json.dumps([
                 {"name": name, "size": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest()}
-                for name, data in self.remote.items()
-            ]})
+                for name, data in list(self.remote.items())[(page - 1) * 100:page * 100]
+            ])
         if args[:2] == ("release", "upload"):
             path = Path(args[3])
             self.uploads.append(path.name)
@@ -65,6 +68,11 @@ class ReleaseAssetRetryTests(unittest.TestCase):
         self.assertEqual(fake.uploads, ["one.whl", "two.tar.gz"])
         self.run_upload(fake)
         self.assertEqual(fake.uploads, ["one.whl", "two.tar.gz"])
+
+    def test_lists_every_release_asset_page(self):
+        fake = FakeGh({f"asset-{index}": b"x" for index in range(101)})
+        with patch.object(retry, "gh", fake):
+            self.assertEqual(len(retry.assets("owner/repo", "v1")), 101)
 
     def test_different_existing_bytes_rejected_before_any_upload(self):
         fake = FakeGh({"one.whl": b"wrong"})
@@ -112,9 +120,9 @@ class ReleaseAssetRetryTests(unittest.TestCase):
 
         def no_digest(*args, max_file_size=None):
             result = fake(*args, max_file_size=max_file_size)
-            if args[0] == "api":
+            if args[0] == "api" and "/assets?" in args[1]:
                 payload = json.loads(result)
-                for asset in payload["assets"]:
+                for asset in payload:
                     asset.pop("digest")
                 return json.dumps(payload)
             if args[:2] == ("release", "download"):
@@ -129,9 +137,9 @@ class ReleaseAssetRetryTests(unittest.TestCase):
 
         def no_digest(*args, max_file_size=None):
             result = fake(*args, max_file_size=max_file_size)
-            if args[0] == "api":
+            if args[0] == "api" and "/assets?" in args[1]:
                 payload = json.loads(result)
-                for asset in payload["assets"]:
+                for asset in payload:
                     asset.pop("digest")
                 return json.dumps(payload)
             return result
