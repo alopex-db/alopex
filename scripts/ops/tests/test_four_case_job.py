@@ -132,8 +132,53 @@ class FourCaseJobTests(unittest.TestCase):
         self.assertFalse((private / "evidence.tar.gz").exists())
         self.assertFalse((self.root / "native-sql-four-case-export/private-evidence.cms").exists())
 
+    def test_passed_matrix_exports_only_strict_verified_cms(self):
+        from four_case_diagnostic import intake
+        private = self.root / job.MATRIX_DIR
+        private.mkdir(mode=0o700)
+        strict = private / "strict-evidence.cms"
+        strict.write_bytes(b"strict cms bytes")
+        strict.chmod(0o600)
+        cert = self.root / "cert.pem"
+        cert.write_bytes(b"test certificate")
+        with patch.object(job, "REPO", self.root), \
+             patch.object(job, "CERT", cert), \
+             patch.object(job, "CERT_SHA256", hashlib.sha256(cert.read_bytes()).hexdigest()), \
+             patch.object(job, "_matrix_outcome", return_value={
+                 "matrix_status": "passed", "matrix_error_code": None}), \
+             patch.object(job, "_capacity_before_seal", return_value={}) as capacity, \
+             patch.object(job.tarfile, "open") as archive, \
+             patch.object(job.subprocess, "run") as encrypt:
+            public = job.seal_job(self.env)
+        self.assertEqual(public["evidence_schema"], intake.SCHEMA)
+        self.assertEqual(public["ciphertext_size"], len(strict.read_bytes()))
+        self.assertEqual(public["ciphertext_sha256"], hashlib.sha256(strict.read_bytes()).hexdigest())
+        self.assertEqual(public["matrix_status"], "passed")
+        self.assertEqual((self.root / "native-sql-four-case-export/private-evidence.cms").read_bytes(),
+                         strict.read_bytes())
+        self.assertEqual(capacity.call_count, 1)
+        archive.assert_not_called()
+        encrypt.assert_not_called()
+
+    def test_passed_matrix_without_strict_evidence_fails_closed(self):
+        private = self.root / job.MATRIX_DIR
+        private.mkdir(mode=0o700)
+        receipt = private / "receipt.public.json"
+        receipt.write_text("{}")
+        receipt.chmod(0o600)
+        cert = self.root / "cert.pem"
+        cert.write_bytes(b"test certificate")
+        with patch.object(job, "REPO", self.root), \
+             patch.object(job, "CERT", cert), \
+             patch.object(job, "CERT_SHA256", hashlib.sha256(cert.read_bytes()).hexdigest()), \
+             patch.object(job, "_matrix_outcome", return_value={
+                 "matrix_status": "passed", "matrix_error_code": None}), \
+             self.assertRaisesRegex(ValueError, "EVIDENCE_BOUND"):
+            job.seal_job(self.env)
+        self.assertFalse((self.root / "native-sql-four-case-export/private-evidence.cms").exists())
+
     def test_run_attests_once_then_stages_docs_once_for_twelve_pairs(self):
-        from four_case_diagnostic import docs_stage
+        from four_case_diagnostic import docs_stage, evidence_assembly
         order = []
         self.env.update({"GITHUB_RUN_ID": JOB, "GITHUB_RUN_ATTEMPT": "1",
                          "GITHUB_ACTIONS": "true",
@@ -157,7 +202,14 @@ class FourCaseJobTests(unittest.TestCase):
             order.append("pair")
             return Run(output)
 
-        with patch.object(job.entrypoint, "attest_current_job", side_effect=attest) as attested, \
+        cert = self.root / "cert.pem"
+        cert.write_bytes(b"test certificate")
+        with patch.object(job, "CERT", cert), \
+             patch.object(job, "CERT_SHA256", hashlib.sha256(cert.read_bytes()).hexdigest()), \
+             patch.object(job, "_capacity_before_seal", return_value={}), \
+             patch.object(evidence_assembly, "seal_runs",
+                          side_effect=lambda *a, **kw: order.append("assemble")) as assembled, \
+             patch.object(job.entrypoint, "attest_current_job", side_effect=attest) as attested, \
              patch.object(job.entrypoint, "controller_operations", return_value={}), \
              patch.object(docs_stage, "stage_docs",
                           side_effect=lambda *a, **kw: order.append("docs")) as staged_docs, \
@@ -168,7 +220,10 @@ class FourCaseJobTests(unittest.TestCase):
             job.run_job(self.env)
         self.assertEqual(attested.call_count, 1)
         self.assertEqual(staged_docs.call_count, 1)
-        self.assertEqual(order, ["attest", "docs", *("pair" for _ in range(12))])
+        self.assertEqual(assembled.call_count, 1)
+        self.assertEqual(len(assembled.call_args.args[0]), 12)
+        self.assertEqual(order, ["attest", "docs", *("pair" for _ in range(12)),
+                                 "assemble"])
 
     def test_failed_attestation_never_stages_docs(self):
         from four_case_diagnostic import docs_stage

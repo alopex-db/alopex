@@ -170,7 +170,7 @@ def verify_public_receipt(output, *, job_id, run_attempt, binding_sha256):
 
 
 def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
-                     environment, output, operations, stage_pair):
+                     environment, output, operations, stage_pair, on_complete=None):
     """Attest #804, then run 12 independently staged owned-server pairs.
 
     ``stage_pair`` comes from the source-pinned wrapper and returns a deleted,
@@ -187,7 +187,8 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
             environment.get("RUNNER_ENVIRONMENT") == "github-hosted" and
             environment.get("RUNNER_TEMP") == str(runner_temp) and
             environment.get("ALOPEX_FOUR_CASE_LOCK_SHA256") == manifest["lock_sha256"] and
-            callable(stage_pair), "SAME_JOB")
+            callable(stage_pair) and
+            (on_complete is None or callable(on_complete)), "SAME_JOB")
     runner_temp = Path(runner_temp)
     lock_dir = runner_temp / "alopex-712-lock"
     lock_path = lock_dir / "lock.json"
@@ -216,6 +217,7 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
               "profile": "release"}
     output = _owned_directory(output)
     results = []
+    runs = {}
     run_roots = set()
     for case in adapter.CASES:
         for trial in range(3):
@@ -239,7 +241,10 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
             require(report["status"] == "passed" and
                     report["collection_verified"] is True and
                     report["owned_resources_cleaned"] is True, "PAIR_FAILED")
+            runs[(case, trial)] = run
             results.append({"case": case, "trial": trial, "status": "passed"})
+    if on_complete is not None:
+        on_complete(runs, lock, manifest, proof, receipt, job_id)
     private = {"schema": SCHEMA, "status": "passed", "job_id": job_id,
                "run_attempt": run_attempt,
                "source_commit": pin["source_commit"],
@@ -261,14 +266,14 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
 
 
 def run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
-                    environment, output, operations, stage_pair):
+                    environment, output, operations, stage_pair, on_complete=None):
     """Run the matrix and emit a fixed-code public failure when it cannot pass."""
     try:
         _invalidate_receipts(output)
         return _run_current_job(
             manifest_path, manifest_digest, repo=repo, runner_temp=runner_temp,
             environment=environment, output=output, operations=operations,
-            stage_pair=stage_pair)
+            stage_pair=stage_pair, on_complete=on_complete)
     except BaseException as error:
         code = error.args[0] if type(error) is ValueError and error.args else "INTERNAL"
         allowed = {"MISSING_PIN", "PRIVATE_MANIFEST", "SAME_JOB", "QUALIFICATION",

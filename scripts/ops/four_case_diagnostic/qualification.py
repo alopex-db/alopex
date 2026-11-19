@@ -41,7 +41,7 @@ REQUIRED_OPERATORS = frozenset({
     "four_case_job.py",
     *(f"four_case_diagnostic/{name}.py" for name in (
         "__init__", "acquire", "acquisition", "adapter", "attestor", "audit",
-        "container_pair_entrypoint", "controller", "docs_stage",
+        "container_pair_entrypoint", "controller", "docs_stage", "evidence_assembly",
         "entrypoint", "intake", "log_parser", "operation", "oracle",
         "producer", "qualification", "runner", "stage_pair", "supervisor",
         "worker")),

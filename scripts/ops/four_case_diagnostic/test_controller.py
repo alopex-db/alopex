@@ -50,11 +50,11 @@ class ControllerTests(unittest.TestCase):
         self.manifest_path.chmod(0o600)
         return hashlib.sha256(data).hexdigest()
 
-    def invoke(self, digest, stage):
+    def invoke(self, digest, stage, on_complete=None):
         return controller.run_current_job(
             self.manifest_path, digest, repo=self.root, runner_temp=self.root,
             environment=self.env, output=self.output, operations={},
-            stage_pair=stage)
+            stage_pair=stage, on_complete=on_complete)
 
     def staged(self, output):
         class Run:
@@ -123,6 +123,33 @@ class ControllerTests(unittest.TestCase):
             controller.verify_public_receipt(
                 self.output, job_id=JOB, run_attempt="2",
                 binding_sha256=self.receipt["binding_sha256"])
+
+    def test_completion_receives_all_verified_runs_before_success_receipt(self):
+        digest = self.save()
+        observed = []
+
+        def complete(runs, lock, manifest, proof, receipt, job_id):
+            observed.append((set(runs), lock, manifest, proof, receipt, job_id))
+            self.assertFalse((self.output / "receipt.public.json").exists())
+            raise ValueError("EVIDENCE_INCOMPLETE")
+
+        with patch.object(controller.entrypoint, "attest_current_job",
+                          return_value=(self.proof, self.receipt)), \
+             patch.object(controller.supervisor, "run_collected_pair",
+                          return_value={"status": "passed",
+                                        "collection_verified": True,
+                                        "owned_resources_cleaned": True}) as pair:
+            with self.assertRaisesRegex(ValueError, "EVIDENCE_INCOMPLETE"):
+                self.invoke(digest, lambda config, output, *args: self.staged(output),
+                            complete)
+        self.assertEqual(pair.call_count, 12)
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0][0],
+                         {(case, trial) for case in adapter.CASES for trial in range(3)})
+        self.assertEqual(observed[0][1:], (self.lock, self.manifest,
+                                          self.proof, self.receipt, JOB))
+        self.assertEqual(json.loads((self.output / "receipt.public.json").read_text())
+                         ["status"], "failed")
 
     def test_invalid_attempt_fails_closed_before_attestation(self):
         digest = self.save()

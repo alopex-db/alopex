@@ -114,7 +114,7 @@ def run_job(environment):
     require(manifest["lock_sha256"] == environment["ALOPEX_FOUR_CASE_LOCK_SHA256"],
             "MISSING_PIN")
     operations = entrypoint.controller_operations(REPO, lock)
-    from four_case_diagnostic import docs_stage
+    from four_case_diagnostic import docs_stage, intake
     launch = stage_pair.make_stage_pair(manifest, REPO, root, operations)
     docs_ready = False
 
@@ -126,10 +126,22 @@ def run_job(environment):
             docs_ready = True
         return launch(config, output, proof, receipt)
 
+    def complete(runs, reviewed_lock, reviewed_manifest, proof, receipt, job_id):
+        from four_case_diagnostic import evidence_assembly
+        require(CERT.is_file() and _digest(CERT.read_bytes()) == CERT_SHA256,
+                "EVIDENCE_BOUND")
+        _capacity_before_seal(root, intake.MAX_CMS + 10_000_000)
+        evidence_assembly.seal_runs(
+            runs, lock=reviewed_lock, manifest=reviewed_manifest,
+            proof=proof, receipt=receipt, job_id=job_id,
+            recipient_certificate=CERT,
+            output_path=root / MATRIX_DIR / "strict-evidence.cms")
+
     return controller.run_current_job(
         manifest_path, environment["ALOPEX_FOUR_CASE_MANIFEST_SHA256"],
         repo=REPO, runner_temp=root, environment=environment,
-        output=root / MATRIX_DIR, operations=operations, stage_pair=staged)
+        output=root / MATRIX_DIR, operations=operations, stage_pair=staged,
+        on_complete=complete)
 
 
 def _capacity_before_seal(root, additional_bytes):
@@ -218,6 +230,26 @@ def seal_job(environment):
     ciphertext = export / "private-evidence.cms"
     require(not archive.exists() and not pending.exists() and
             not ciphertext.exists(), "EVIDENCE_STATE")
+    matrix = _matrix_outcome(private, environment)
+    if matrix["matrix_status"] == "passed":
+        from four_case_diagnostic import intake, supervisor
+        strict = private / "strict-evidence.cms"
+        encrypted = supervisor._private_file(strict, intake.MAX_CMS)
+        require(encrypted, "EVIDENCE_BOUND")
+        _capacity_before_seal(root, len(encrypted) + 10_000_000)
+        try:
+            _write_private(pending, encrypted)
+            pending.replace(ciphertext)
+        finally:
+            pending.unlink(missing_ok=True)
+        public = {"schema": "alopex.sql-four-case-export/v1", "status": "sealed",
+                  "evidence_schema": intake.SCHEMA,
+                  "performance_qualification": False,
+                  "ciphertext_sha256": _digest(encrypted),
+                  "ciphertext_size": len(encrypted), **matrix}
+        _write_private(export / "public.json",
+                       (json.dumps(public, sort_keys=True) + "\n").encode())
+        return public
     source_bytes = sum(path.stat().st_size for path in members)
     storage = _capacity_before_seal(root, 2 * source_bytes + 10_000_000)
     try:
@@ -243,7 +275,7 @@ def seal_job(environment):
     public = {"schema": "alopex.sql-four-case-export/v1", "status": "sealed",
               "performance_qualification": False,
               "ciphertext_sha256": _digest(ciphertext.read_bytes())}
-    public.update(_matrix_outcome(private, environment))
+    public.update(matrix)
     _write_private(export / "public.json",
                    (json.dumps(public, sort_keys=True) + "\n").encode())
     return public
