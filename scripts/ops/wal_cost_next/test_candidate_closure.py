@@ -110,6 +110,14 @@ class CandidateClosureTests(unittest.TestCase):
                               {"noble-main": index}, bad_uris, self.resolver,
                               Mock(return_value=True))
 
+        wrong_url = uris.replace("gcc_14.2_amd64.deb' ",
+                                 "gcc_14.3_amd64.deb' ")
+        auth["apt_uris_sha256"] = self.sha(wrong_url.encode())
+        with self.assertRaisesRegex(LockError, "missing/ambiguous signed package"):
+            candidate_closure(self.base, auth, self.sha(self.canonical(auth)),
+                              {"noble-main": index}, wrong_url, self.resolver,
+                              Mock(return_value=True))
+
 
 if __name__ == "__main__":
     unittest.main()
