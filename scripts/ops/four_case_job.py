@@ -114,17 +114,22 @@ def run_job(environment):
     require(manifest["lock_sha256"] == environment["ALOPEX_FOUR_CASE_LOCK_SHA256"],
             "MISSING_PIN")
     operations = entrypoint.controller_operations(REPO, lock)
-    entrypoint.attest_current_job(
-        lock, job_id=environment["GITHUB_RUN_ID"], repo=REPO,
-        runner_temp=root, environment=environment, operations=operations)
     from four_case_diagnostic import docs_stage
-    docs_stage.stage_docs(root / "alopex-804-candidate", root,
-                          pin=lock["pin"], docs_files=manifest["docs_files"])
-    callback = stage_pair.make_stage_pair(manifest, REPO, root, operations)
+    launch = stage_pair.make_stage_pair(manifest, REPO, root, operations)
+    docs_ready = False
+
+    def staged(config, output, proof, receipt):
+        nonlocal docs_ready
+        if not docs_ready:
+            docs_stage.stage_docs(root / "alopex-804-candidate", root,
+                                  pin=lock["pin"], docs_files=manifest["docs_files"])
+            docs_ready = True
+        return launch(config, output, proof, receipt)
+
     return controller.run_current_job(
         manifest_path, environment["ALOPEX_FOUR_CASE_MANIFEST_SHA256"],
         repo=REPO, runner_temp=root, environment=environment,
-        output=root / MATRIX_DIR, operations=operations, stage_pair=callback)
+        output=root / MATRIX_DIR, operations=operations, stage_pair=staged)
 
 
 def _capacity_before_seal(root, additional_bytes):
@@ -141,6 +146,49 @@ def _capacity_before_seal(root, additional_bytes):
         require(vfs.f_bavail * vfs.f_frsize > additional_bytes,
                 "CAPACITY")
     return storage
+
+
+def _matrix_outcome(private, environment):
+    """Reduce the controller receipt to fixed public status for this attempt."""
+    fallback = {"matrix_status": "failed", "matrix_error_code": "INCOMPLETE"}
+    path = private / "receipt.public.json"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
+                    stat.S_IMODE(info.st_mode) == 0o600 and
+                    0 < info.st_size <= 4096, "RECEIPT_IDENTITY")
+            raw = os.read(fd, 4097)
+            require(len(raw) == info.st_size, "RECEIPT_IDENTITY")
+        finally:
+            os.close(fd)
+        receipt = json.loads(raw,
+                             object_pairs_hook=entrypoint.acquire.acquisition._unique_pairs)
+        require(type(receipt) is dict and
+                receipt.get("schema") == controller.SCHEMA and
+                receipt.get("performance_qualification") is False and
+                receipt.get("run_attempt") == environment.get("GITHUB_RUN_ATTEMPT"),
+                "RECEIPT_IDENTITY")
+        if receipt.get("status") == "passed":
+            require(receipt.get("job_id") == environment.get("GITHUB_RUN_ID") and
+                    type(receipt.get("qualification_binding_sha256")) is str and
+                    HEX64.fullmatch(receipt["qualification_binding_sha256"]),
+                    "RECEIPT_IDENTITY")
+            controller.verify_public_receipt(
+                private, job_id=environment["GITHUB_RUN_ID"],
+                run_attempt=environment["GITHUB_RUN_ATTEMPT"],
+                binding_sha256=receipt["qualification_binding_sha256"])
+            return {"matrix_status": "passed", "matrix_error_code": None}
+        allowed = {"MISSING_PIN", "PRIVATE_MANIFEST", "SAME_JOB", "QUALIFICATION",
+                   "QUALIFICATION_BINDING", "POLICY", "CLEANUP", "IDENTITY",
+                   "OPERATOR_IDENTITY", "OUTPUT_STATE", "PAIR_STAGE", "PAIR_FAILED"}
+        if receipt.get("status") == "failed" and receipt.get("error_code") in allowed:
+            return {"matrix_status": "failed",
+                    "matrix_error_code": receipt["error_code"]}
+    except (OSError, ValueError, UnicodeError, KeyError, TypeError):
+        pass
+    return fallback
 
 
 def seal_job(environment):
@@ -195,6 +243,7 @@ def seal_job(environment):
     public = {"schema": "alopex.sql-four-case-export/v1", "status": "sealed",
               "performance_qualification": False,
               "ciphertext_sha256": _digest(ciphertext.read_bytes())}
+    public.update(_matrix_outcome(private, environment))
     _write_private(export / "public.json",
                    (json.dumps(public, sort_keys=True) + "\n").encode())
     return public

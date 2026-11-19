@@ -12,7 +12,7 @@ from unittest.mock import patch
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "scripts/ops"))
 import four_case_job as job
-from four_case_diagnostic.test_qualification import fixture
+from four_case_diagnostic.test_qualification import fixture, JOB
 
 
 class FourCaseJobTests(unittest.TestCase):
@@ -107,29 +107,95 @@ class FourCaseJobTests(unittest.TestCase):
              patch.object(job.subprocess, "run", side_effect=encrypt):
             public = job.seal_job(self.env)
         self.assertEqual(public["status"], "sealed")
+        self.assertEqual(public["matrix_status"], "failed")
+        self.assertEqual(public["matrix_error_code"], "INCOMPLETE")
         self.assertEqual(len(checks), 3)
         self.assertTrue((self.root / "native-sql-four-case-export/private-evidence.cms").is_file())
         self.assertFalse((private / "evidence.tar.gz").exists())
 
-    def test_run_attests_before_docs_stage_and_controller(self):
+    def test_run_attests_once_then_stages_docs_once_for_twelve_pairs(self):
         from four_case_diagnostic import docs_stage
         order = []
-        self.env["GITHUB_RUN_ID"] = "12345678"
-        manifest = {"lock_sha256": self.lock_sha, "docs_files": {
-            "subject_identity.py": "c" * 64, "sql_resources.py": "d" * 64}}
-        with patch.object(job.controller, "load_manifest", return_value=manifest), \
-             patch.object(job.entrypoint, "load_reviewed_lock",
-                          return_value={"pin": {"assets_digest": "a" * 64}}), \
+        self.env.update({"GITHUB_RUN_ID": JOB, "GITHUB_RUN_ATTEMPT": "1",
+                         "GITHUB_ACTIONS": "true",
+                         "RUNNER_ENVIRONMENT": "github-hosted"})
+        job.install_inputs(self.env)
+        _, proof, receipt = fixture()
+
+        class Run:
+            def __init__(self, output):
+                self.root = output
+                self.record = {"phase": "deleted"}
+
+            def verify_collection(self):
+                pass
+
+        def attest(*args, **kwargs):
+            order.append("attest")
+            return proof, receipt
+
+        def launch(config, output, proof, receipt):
+            order.append("pair")
+            return Run(output)
+
+        with patch.object(job.entrypoint, "attest_current_job", side_effect=attest) as attested, \
              patch.object(job.entrypoint, "controller_operations", return_value={}), \
-             patch.object(job.entrypoint, "attest_current_job",
-                          side_effect=lambda *a, **kw: order.append("attest")), \
              patch.object(docs_stage, "stage_docs",
-                          side_effect=lambda *a, **kw: order.append("docs")), \
-             patch.object(job.stage_pair, "make_stage_pair", return_value=lambda *a: None), \
-             patch.object(job.controller, "run_current_job",
-                          side_effect=lambda *a, **kw: order.append("matrix")):
+                          side_effect=lambda *a, **kw: order.append("docs")) as staged_docs, \
+             patch.object(job.stage_pair, "make_stage_pair", return_value=launch), \
+             patch.object(job.controller.supervisor, "run_collected_pair",
+                          return_value={"status": "passed", "collection_verified": True,
+                                        "owned_resources_cleaned": True}):
             job.run_job(self.env)
-        self.assertEqual(order, ["attest", "docs", "matrix"])
+        self.assertEqual(attested.call_count, 1)
+        self.assertEqual(staged_docs.call_count, 1)
+        self.assertEqual(order, ["attest", "docs", *("pair" for _ in range(12))])
+
+    def test_failed_attestation_never_stages_docs(self):
+        from four_case_diagnostic import docs_stage
+        self.env.update({"GITHUB_RUN_ID": JOB, "GITHUB_RUN_ATTEMPT": "1",
+                         "GITHUB_ACTIONS": "true",
+                         "RUNNER_ENVIRONMENT": "github-hosted"})
+        job.install_inputs(self.env)
+        with patch.object(job.entrypoint, "controller_operations", return_value={}), \
+             patch.object(job.entrypoint, "attest_current_job",
+                          side_effect=ValueError("QUALIFICATION")) as attested, \
+             patch.object(docs_stage, "stage_docs") as staged_docs:
+            with self.assertRaisesRegex(ValueError, "QUALIFICATION"):
+                job.run_job(self.env)
+        self.assertEqual(attested.call_count, 1)
+        staged_docs.assert_not_called()
+
+    def test_export_status_validates_current_attempt_and_fixed_error(self):
+        private = self.root / job.MATRIX_DIR
+        private.mkdir(mode=0o700)
+        self.env.update({"GITHUB_RUN_ID": JOB, "GITHUB_RUN_ATTEMPT": "2"})
+        path = private / "receipt.public.json"
+
+        def save(value):
+            path.write_text(json.dumps(value))
+            path.chmod(0o600)
+
+        save({"schema": job.controller.SCHEMA, "status": "passed",
+              "performance_qualification": False, "job_id": JOB,
+              "run_attempt": "2", "qualification_binding_sha256": "a" * 64})
+        with patch.object(job.controller, "verify_public_receipt") as verified:
+            self.assertEqual(job._matrix_outcome(private, self.env), {
+                "matrix_status": "passed", "matrix_error_code": None})
+        self.assertEqual(verified.call_count, 1)
+        self.env["GITHUB_RUN_ATTEMPT"] = "3"
+        self.assertEqual(job._matrix_outcome(private, self.env), {
+            "matrix_status": "failed", "matrix_error_code": "INCOMPLETE"})
+        save({"schema": job.controller.SCHEMA, "status": "failed",
+              "performance_qualification": False, "run_attempt": "3",
+              "error_code": "PAIR_FAILED"})
+        self.assertEqual(job._matrix_outcome(private, self.env), {
+            "matrix_status": "failed", "matrix_error_code": "PAIR_FAILED"})
+        save({"schema": job.controller.SCHEMA, "status": "failed",
+              "performance_qualification": False, "run_attempt": "3",
+              "error_code": "private detail"})
+        self.assertEqual(job._matrix_outcome(private, self.env), {
+            "matrix_status": "failed", "matrix_error_code": "INCOMPLETE"})
 
 
 if __name__ == "__main__":
