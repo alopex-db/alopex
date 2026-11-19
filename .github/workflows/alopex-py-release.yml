@@ -608,15 +608,17 @@ jobs:
       - name: Flatten dist directory
         env:
           GH_TOKEN: ${{ github.token }}
+          CORE_TAG: ${{ inputs.core_tag }}
         run: |
           set -euo pipefail
           mkdir -p wheels
           find dist -name "*.whl" -exec cp {} wheels/ \;
           find dist -name "*.tar.gz" -exec cp {} wheels/ \;
-          test -n "${{ inputs.core_tag }}"
+          test -n "${CORE_TAG}"
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
           python3 scripts/release/primary_distributions.py --version "$version" --directory wheels
-          gh release upload --repo "${GITHUB_REPOSITORY}" "${{ inputs.core_tag }}" wheels/* --clobber
+          python3 scripts/release/release_asset_retry.py \
+            --repo "${GITHUB_REPOSITORY}" --tag "${CORE_TAG}" --directory wheels
 
   publish-pypi:
     name: publish-pypi
