@@ -81,7 +81,9 @@ class AdmissionContract(unittest.TestCase):
             self.assertEqual(receipt.read_text(), original)
 
     def facts(self):
-        return {'context': 'local', 'dmi': 'machine', 'kernel': 'kernel', 'lsm': 'lsm',
+        return {'context': 'local',
+                'boot_id': {'status': 'read', 'value': '12345678-1234-4234-8234-123456789abc\n'},
+                'kernel': 'kernel', 'lsm': 'lsm',
                 'apparmor': 'enabled', 'root_metadata': [{'dev': 1, 'ino': 2}],
                 'temp_snapshot': [], 'cpus': [0, 1], 'storage': {'roots': ['/root']},
                 'docker_info': {'DockerRootDir': '/docker', 'ServerVersion': '28.0.4',
@@ -94,6 +96,10 @@ class AdmissionContract(unittest.TestCase):
         wrapper.same_host(prior, current)
         current['docker_info']['DockerRootDir'] = '/other'
         with self.assertRaisesRegex(RuntimeError, 'runtime identity changed'):
+            wrapper.same_host(prior, current)
+        current = self.facts()
+        current['boot_id'] = {'status': 'read', 'value': '22345678-1234-4234-8234-123456789abc\n'}
+        with self.assertRaisesRegex(RuntimeError, 'host identity changed: boot_id'):
             wrapper.same_host(prior, current)
 
     def test_qualification_requires_complete_same_job_proof(self):

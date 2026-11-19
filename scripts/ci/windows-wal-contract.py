@@ -133,7 +133,7 @@ for name, command in commands:
             raise SystemExit(f"{name}: expected native tests did not run")
         if name == "hnsw-cosine-kernel" and re.findall(r"^HNSW_COSINE_KERNEL=(avx|scalar)$", contents, re.M) not in (["avx"], ["scalar"]):
             raise SystemExit(f"{name}: runtime kernel evidence missing")
-    required = {"readonly-recovery": "3 passed; 0 failed", "lowlevel-writer": "35 passed; 0 failed",
+    required = {"readonly-recovery": "3 passed; 0 failed", "lowlevel-writer": "36 passed; 0 failed",
                 "spool-codec": "29 passed; 0 failed; 0 ignored",
                 "windows-publication": "5 passed; 0 failed", "lsm-publication": "12 passed; 0 failed",
                 "container-fence": "10 passed; 0 failed", "directory-publication": "8 passed; 0 failed",
@@ -154,6 +154,6 @@ for name, command in commands:
                 "hnsw-savepoint-cache": "13 passed; 0 failed; 0 ignored",
                 "hnsw-begin-cache": "11 passed; 0 failed; 0 ignored",
                 "hnsw-copy-on-write": "10 passed; 0 failed; 0 ignored",
-                "hnsw-dirty-writes": "15 passed; 0 failed; 0 ignored"}
+                "hnsw-dirty-writes": "17 passed; 0 failed; 0 ignored"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")

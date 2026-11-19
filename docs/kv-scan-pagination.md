@@ -34,13 +34,15 @@ existing raw-key contract. Glob/regex search response budgets retain their
 existing fail-on-overflow behavior; the partial-byte-page change applies to
 prefix/range scans.
 
-Async complete scans collect through bounded pages on the handle's owner thread
-and yield event-loop control between pages. Each individual native page call is
-synchronous. Use `iter_prefix/iter_range` to consume pages incrementally without
-collecting a full result, and do not modify the same transaction concurrently
-with a scan. The async stubs match these arguments, including the optional total
-budget; a focused signature test detects drift across runtime, async stub and
-synchronous stub.
+Async complete `scan_prefix/scan_range` calls use one synchronous native
+collection on the handle's owner thread. They do not yield to another coroutine
+between pages, so other tasks on the same event loop cannot interleave writes
+with one complete scan. This call blocks the event loop until collection ends.
+Use `iter_prefix/iter_range` to consume pages incrementally and yield event-loop
+control between pages; do not modify the same transaction concurrently with
+those iterators if a stable result is required. The async stubs match these
+arguments, including the optional total budget; a focused signature test
+detects drift across runtime, async stub and synchronous stub.
 
 The regression script `scripts/repro/v0816-followups/f2_kv_large_values.py` uses
 three two-byte values and a four-byte page budget. It exercises the original

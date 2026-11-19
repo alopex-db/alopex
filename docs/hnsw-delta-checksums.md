@@ -12,7 +12,10 @@ All arithmetic is wrapping u32 arithmetic. The previous header yields the node
 checksum sum. For each changed slot, persistence subtracts the old node CRC and
 adds the new node CRC. It then adds the new header CRC. Before-images come from
 the transaction snapshot already retained for rollback; no additional full
-snapshot is introduced by this change.
+snapshot is introduced by this change. Before writing a delta, the collector
+compares each touched slot's persisted bytes with that snapshot's serialized
+bytes. It hashes the verified persisted bytes. A mismatch uses a full save,
+which replaces the inconsistent stored records in the same KV transaction.
 
 The incremental path requires a known persisted header matching the target KV
 transaction, and a clean before-image with the same header. A snapshot containing
@@ -23,14 +26,24 @@ Direct compaction without a staged before-image also takes this fallback.
 An unchanged flush needs no node serialization or node/key scan.
 
 The before-image remains stable across a partially failed flush. Retrying in
-the same KV transaction therefore computes the same checksum even when some
-new node records have already been buffered. Dirty tracking and its baseline
-are updated only after all writes, including the header, succeed.
+the same KV transaction may see buffered new node records instead of its
+before-image and use a full save. Dirty tracking and its baseline are updated
+only after all writes, including the header, succeed.
 
 Removed key mappings are identified from changed slots' before-images. A key
 removed and reinserted into a different slot in the same staged group retains
-its current mapping. Routine delta flushes do not scrub unrelated orphan key
-records; the full-save fallback retains the complete prefix replacement.
+its current mapping. Routine delta flushes do not scan the key prefix, so an
+unrelated orphan `hnsw:key:` record already in the store remains until a full
+save replaces that prefix. This bounds normal delta work by touched slots; the
+orphan is ignored when the graph is loaded from node records. A focused test
+records both the residue and its cleanup after full save.
+
+Synchronous full save holds the graph's write lock through its KV writes and
+prefix cleanup. A search on another handle sharing that graph can pause for
+the duration of the full save. A delta flush can also take this path when its
+persisted header or touched-node before-image differs. This is an accepted
+latency tradeoff; full-save performance and search latency remain part of #681's
+separate final measurement.
 
 Tests compare every stored KV byte and reopened graph with full format-v1
 serialization. Two bounded property tests cover up to eight keys and sixteen

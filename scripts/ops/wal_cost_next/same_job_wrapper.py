@@ -55,7 +55,7 @@ def load_qualification_module(repo):
 
 def same_host(previous, current):
     """Bind later phases without #804's 1 GB admission-to-acquisition delta."""
-    for key in ('context', 'dmi', 'kernel', 'lsm', 'apparmor', 'root_metadata',
+    for key in ('context', 'boot_id', 'kernel', 'lsm', 'apparmor', 'root_metadata',
                 'temp_snapshot', 'cpus'):
         require(previous[key] == current[key], f'host identity changed: {key}')
     for key in ('DockerRootDir', 'ServerVersion', 'Architecture', 'CgroupVersion',

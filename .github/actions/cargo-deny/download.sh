@@ -6,7 +6,11 @@ url=$1
 expected_sha=$2
 expected_size=$3
 output=$4
-case "$url" in https://api.github.com/repos/*/releases/assets/*) ;; *) exit 64 ;; esac
+case "$url" in
+    https://api.github.com/repos/*/releases/assets/*) ;;
+    https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz) ;;
+    *) exit 64 ;;
+esac
 case "$expected_sha" in *[!0-9a-f]*|'') exit 64 ;; esac
 [ "${#expected_sha}" -eq 64 ] || exit 64
 case "$expected_size" in *[!0-9]*|'') exit 64 ;; esac

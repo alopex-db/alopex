@@ -1165,6 +1165,42 @@ fn knn_query_options_reject_bad_bound_types_and_report_parameter_index() {
 }
 
 #[test]
+fn knn_query_option_errors_do_not_echo_large_bound_literals() {
+    use alopex_sql::storage::SqlValue;
+    let (_executor, catalog) =
+        run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");
+    let guard = catalog.read().unwrap();
+    let large_literal = "private-value".repeat(10_000);
+    for option in ["ef_search", "enable_hnsw"] {
+        let sql = format!(
+            "SELECT id FROM items ORDER BY vector_distance(embedding, ?, 'l2') LIMIT 1 WITH ({option} = ?)"
+        );
+        let stmt = Parser::parse_sql(&AlopexDialect, &sql)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let values = [
+            SqlValue::Vector(vec![0.0, 0.0]),
+            SqlValue::Text(large_literal.clone()),
+        ];
+        let error = Planner::with_parameters(&*guard, &values)
+            .plan(&stmt)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(option) && error.contains("?2"), "{error}");
+        assert!(
+            !error.contains("private-value"),
+            "literal leaked into error"
+        );
+        assert!(
+            error.len() < 512,
+            "error grew with literal: {} bytes",
+            error.len()
+        );
+    }
+}
+
+#[test]
 fn knn_query_options_keep_duplicate_and_unknown_rejection() {
     let (_executor, catalog) =
         run_sql("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(2, L2));");

@@ -1,12 +1,12 @@
 //! Native WAL v3 references and streaming spool recovery.
 //!
-//! These are low-level primitives, not activation of overflow in `LsmKV`.
+//! These low-level primitives are used by the opt-in `LsmKV` overflow path.
 //! The caller must exclusively own the WAL and spool directory, allocate strictly
 //! increasing LSNs, and keep recovered state private until recovery succeeds.
-//! A database integration must also fence its container before activating v3.
+//! The database integration fences its container before activating v3.
 //! Windows publishes synced files using write-through moves in existing durable
-//! directories. LSM activation remains gated until its other files and directory
-//! creation use a durable publication protocol too.
+//! directories; the LSM integration also uses durable publication for its
+//! other files and directory creation.
 
 #[cfg(windows)]
 use crate::storage::publication::windows as windows_publication;
@@ -125,6 +125,23 @@ fn spool_path(directory: &Path, identity: SpoolIdentity) -> PathBuf {
         .map(|b| format!("{b:02x}"))
         .collect();
     directory.join(format!("{transaction}-{:016x}.spool", identity.lsn()))
+}
+
+/// A repaired torn WAL tail may leave a sealed spool (or an interrupted
+/// temporary spool) whose LSN will be issued again. The owner must skip that
+/// identity before opening a new spool; preserved crash evidence is never
+/// overwritten or removed to make room for a commit.
+pub(crate) fn spool_identity_conflicts(directory: &Path, identity: SpoolIdentity) -> Result<bool> {
+    let sealed = spool_path(directory, identity);
+    let temporary = sealed.with_extension("tmp");
+    for path in [&sealed, &temporary] {
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn directory_usage(directory: &Path) -> Result<u64> {

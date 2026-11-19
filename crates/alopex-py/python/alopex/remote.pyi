@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 SqlResult = Union[List[Dict[str, Any]], int, None]
 
@@ -78,6 +78,7 @@ class RemoteDatabase:
         retries: int = 0,
         keep_alive: bool = True,
         idle_reconnect_seconds: Optional[float] = ...,
+        sql_timing_sink: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ) -> None: ...
     @classmethod
     def connect(cls, url: str, **options: Any) -> "RemoteDatabase": ...
