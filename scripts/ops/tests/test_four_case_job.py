@@ -113,6 +113,25 @@ class FourCaseJobTests(unittest.TestCase):
         self.assertTrue((self.root / "native-sql-four-case-export/private-evidence.cms").is_file())
         self.assertFalse((private / "evidence.tar.gz").exists())
 
+    def test_seal_removes_plaintext_when_archive_creation_fails(self):
+        private = self.root / job.MATRIX_DIR
+        private.mkdir(mode=0o700)
+        member = private / "receipt.private.json"
+        member.write_text("{}")
+        member.chmod(0o600)
+        cert = self.root / "cert.pem"
+        cert.write_bytes(b"test certificate")
+
+        with patch.object(job, "REPO", self.root), \
+             patch.object(job, "CERT", cert), \
+             patch.object(job, "CERT_SHA256", hashlib.sha256(cert.read_bytes()).hexdigest()), \
+             patch.object(job, "_capacity_before_seal", return_value={}), \
+             patch.object(job.tarfile.TarFile, "add", side_effect=OSError("archive write failed")), \
+             self.assertRaisesRegex(OSError, "archive write failed"):
+            job.seal_job(self.env)
+        self.assertFalse((private / "evidence.tar.gz").exists())
+        self.assertFalse((self.root / "native-sql-four-case-export/private-evidence.cms").exists())
+
     def test_run_attests_once_then_stages_docs_once_for_twelve_pairs(self):
         from four_case_diagnostic import docs_stage
         order = []

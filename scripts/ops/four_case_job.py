@@ -220,10 +220,10 @@ def seal_job(environment):
             not ciphertext.exists(), "EVIDENCE_STATE")
     source_bytes = sum(path.stat().st_size for path in members)
     storage = _capacity_before_seal(root, 2 * source_bytes + 10_000_000)
-    with tarfile.open(archive, "w:gz") as bundle:
-        for path in members:
-            bundle.add(path, arcname=str(path.relative_to(private)), recursive=False)
     try:
+        with tarfile.open(archive, "w:gz") as bundle:
+            for path in members:
+                bundle.add(path, arcname=str(path.relative_to(private)), recursive=False)
         require(0 < archive.stat().st_size <= MAX_PRIVATE_BYTES, "EVIDENCE_BOUND")
         require(_capacity_before_seal(root, archive.stat().st_size +
                                       source_bytes + 10_000_000) == storage,
