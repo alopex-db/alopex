@@ -189,6 +189,15 @@ class ReleaseAssetRetryTests(unittest.TestCase):
         self.assertEqual(workflow.count("gh release upload"), 1)
         self.assertIn('gh release upload "${RELEASE_TAG_NAME}" "${manifest}"', workflow)
 
+    def test_python_stable_release_reuses_existing_bytes(self):
+        workflow = Path(".github/workflows/alopex-py-release.yml").read_text()
+        block = workflow.split("  github-release:", 1)[1].split("  final-release-join:", 1)[0]
+        self.assertIn("Checkout tagged source", block)
+        self.assertIn("Attach immutable Python release assets", block)
+        self.assertIn("release_asset_retry.py", block)
+        self.assertIn("overwrite_files: false", block)
+        self.assertNotIn("files: wheels/*", block)
+
 
 if __name__ == "__main__":
     unittest.main()

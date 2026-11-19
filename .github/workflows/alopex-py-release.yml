@@ -656,6 +656,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref }}
       - name: Download qualified candidate artifacts
         env:
           GH_TOKEN: ${{ github.token }}
@@ -674,8 +678,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.source_ref || github.ref_name }}
-          files: wheels/*
           make_latest: "false"
+          overwrite_files: false
+      - name: Attach immutable Python release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON_RELEASE_TAG: ${{ inputs.source_ref || github.ref_name }}
+        run: |
+          python3 scripts/release/release_asset_retry.py \
+            --repo "${GITHUB_REPOSITORY}" --tag "${PYTHON_RELEASE_TAG}" \
+            --directory wheels
 
   final-release-join:
     name: final-release-join
