@@ -88,6 +88,28 @@ class CandidateClosureTests(unittest.TestCase):
         with self.assertRaisesRegex(LockError, "APT output proof"):
             self.candidate(auth=auth)
 
+    def test_epoch_in_apt_filename_is_bound_to_signed_version(self):
+        index = self.index.replace(b"Version: 14.2", b"Version: 1:14.2")
+        uris = self.uris.replace("gcc_14.2_amd64.deb 100",
+                                 "gcc_1%3a14.2_amd64.deb 100")
+        auth = copy.deepcopy(self.auth)
+        auth["apt_uris_sha256"] = self.sha(uris.encode())
+        auth["indexes"][0]["packages_sha256"] = self.sha(index)
+        result = candidate_closure(self.base, auth, self.sha(self.canonical(auth)),
+                                   {"noble-main": index}, uris, self.resolver,
+                                   Mock(return_value=True))
+        self.assertEqual(result["packages"][0]["version"], "1:14.2")
+        self.assertEqual(result["packages"][0]["filename"],
+                         "pool/main/g/gcc/gcc_14.2_amd64.deb")
+
+        bad_uris = uris.replace("gcc_1%3a14.2_amd64.deb 100",
+                                "gcc_2%3a14.2_amd64.deb 100")
+        auth["apt_uris_sha256"] = self.sha(bad_uris.encode())
+        with self.assertRaisesRegex(LockError, "APT filename/version"):
+            candidate_closure(self.base, auth, self.sha(self.canonical(auth)),
+                              {"noble-main": index}, bad_uris, self.resolver,
+                              Mock(return_value=True))
+
 
 if __name__ == "__main__":
     unittest.main()

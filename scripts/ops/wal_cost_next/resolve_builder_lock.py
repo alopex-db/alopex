@@ -188,7 +188,7 @@ def resolve_packages(base: dict, authentication: dict, indexes: dict[str, bytes]
              not parsed.fragment and not parsed.query, "APT URI host/scheme")
         need(re.fullmatch(r"[A-Za-z0-9+.%:_~-]+\.deb", filename) is not None and
              safe_relative_path(filename) and safe_relative_path(parsed.path.lstrip("/")) and
-             filename not in used and unquote(filename) == unquote(parsed.path.rsplit("/", 1)[-1]),
+             filename not in used,
              "APT filename")
         used.add(filename)
         name = filename.split("_", 1)[0]
@@ -211,6 +211,11 @@ def resolve_packages(base: dict, authentication: dict, indexes: dict[str, bytes]
              int(row["Installed-Size"]) > 0 and int(size_raw) > 0 and
              row.get("Version") and NAME.fullmatch(row["Package"]) is not None,
              "package metadata")
+        # APT's local filename includes a URL-encoded Debian epoch, while the
+        # signed pool Filename (and therefore the download URL) omits it.
+        need(unquote(filename) ==
+             f'{row["Package"]}_{row["Version"]}_{row["Architecture"]}.deb',
+             "APT filename/version")
         selected[name] = row
         files.append({"name": name, "version": row["Version"],
                       "architecture": row["Architecture"], "filename": row["Filename"],
