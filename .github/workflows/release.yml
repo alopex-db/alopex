@@ -276,7 +276,7 @@ jobs:
           manifest="artifacts/parser-vendor-manifest-v${version}.json"
           envelope="artifacts/parser-assets-v${version}.json"
           mapfile -t records < <(find artifacts -maxdepth 1 -name 'alopex-parser-*.json' -type f | sort)
-          test "${#records[@]}" -eq 4
+          test "${#records[@]}" -eq 3
           args=()
           for record in "${records[@]}"; do args+=(--record "$record"); done
           python scripts/release/parser_asset_manifest.py assemble-manifest \

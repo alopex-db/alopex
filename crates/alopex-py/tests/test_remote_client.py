@@ -300,9 +300,42 @@ def test_opt_in_sql_timing_preserves_rows_and_correlates_each_request(stub):
         assert all(timing[key] >= 0 for key in (
             "bind_ns", "transport_ns", "parse_ns", "rows_ns", "residual_ns"
         ))
+        assert set(timing) == {
+            "bind_ns", "transport_ns", "parse_ns", "rows_ns", "residual_ns",
+            "response_chars", "result_rows", "trace_id", "schema", "total_ns",
+        }
+        assert timing["schema"] == "alopex.sql-client-timing/v1"
         encoded = json.dumps(timing)
         assert "private_table" not in encoded
         assert "17125" not in encoded
+        assert stub.url not in encoded
+
+
+@pytest.mark.parametrize("sink", [lambda _timing: (_ for _ in ()).throw(RuntimeError("sink failed")), 42])
+def test_sql_timing_sink_failure_does_not_replace_successful_result(stub, sink):
+    stub.body = _query_body(["secret"], [[{"Text": "private-row-value"}]])
+    with RemoteDatabase(stub.url, sql_timing_sink=sink) as db:
+        assert db.execute_sql("SELECT 'private-sql-text'") == [
+            {"secret": "private-row-value"}
+        ]
+    assert len(stub.requests) == 1
+
+
+def test_sql_timing_sink_runs_only_after_successful_nonblank_sql(stub):
+    timings = []
+    with RemoteDatabase(stub.url, sql_timing_sink=timings.append) as db:
+        assert db.execute_sql("   ") is None
+        assert timings == []
+        stub.status = 500
+        stub.body = {"error": {"code": "INTERNAL", "message": "failed"}}
+        with pytest.raises(AlopexError):
+            db.execute_sql("SELECT 1")
+        assert timings == []
+        stub.status = 200
+        stub.raw_body = "not json"
+        with pytest.raises(AlopexError):
+            db.execute_sql("SELECT 1")
+        assert timings == []
 
 
 def test_default_sql_calls_do_not_add_diagnostic_correlation(stub):

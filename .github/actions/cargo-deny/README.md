@@ -5,8 +5,9 @@
 under the included MIT license. The container base digest, cargo-deny 0.20.2,
 input arguments and entrypoint remain unchanged.
 
-The Docker build fetches the same release archive through its public GitHub
-asset API and checks its byte length and SHA256 before extraction. This avoids
+The Docker build fetches the pinned release archive through its canonical
+GitHub release URL and checks its byte length and SHA256 before extraction.
+This avoids the unauthenticated asset API's HTTP 403 response in CI without
 passing a download error response to tar. No credentials are supplied.
 
 `download.sh` is also used for the pinned TLC JAR. It limits transfer size and

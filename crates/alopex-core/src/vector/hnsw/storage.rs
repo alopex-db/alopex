@@ -188,13 +188,33 @@ impl HnswStorage {
             bincode::serialize(&previous).map_err(|e| Error::InvalidFormat(e.to_string()))?;
         let mut all_node_checksums = previous_checksum.wrapping_sub(hash(&previous_header));
 
+        // The previous checksum covers persisted bytes, not a reconstructed
+        // graph. Verify every touched before-image before writing any delta.
+        // This also handles a retry after a partially buffered failed flush.
+        let mut before_images = Vec::with_capacity(changed.len());
         for &node_id in &changed {
             let old_node = baseline
                 .and_then(|before| before.nodes.get(node_id as usize).and_then(Option::as_ref));
+            let expected_old = old_node
+                .map(|node| {
+                    bincode::serialize(&Self::node_to_data(node))
+                        .map_err(|e| Error::InvalidFormat(e.to_string()))
+                })
+                .transpose()?;
+            let persisted_old = txn.get(&self.node_key(node_id))?;
+            if persisted_old != expected_old {
+                return self.save(txn, graph);
+            }
+            before_images.push((node_id, persisted_old));
+        }
+
+        for (node_id, persisted_old) in before_images {
+            if let Some(old_bytes) = persisted_old.as_deref() {
+                all_node_checksums = all_node_checksums.wrapping_sub(hash(old_bytes));
+            }
+            let old_node = baseline
+                .and_then(|before| before.nodes.get(node_id as usize).and_then(Option::as_ref));
             if let Some(old_node) = old_node {
-                let old_bytes = bincode::serialize(&Self::node_to_data(old_node))
-                    .map_err(|e| Error::InvalidFormat(e.to_string()))?;
-                all_node_checksums = all_node_checksums.wrapping_sub(hash(&old_bytes));
                 // A removed key may have been reinserted into another slot in
                 // the same batch; that current mapping must not be deleted.
                 if !graph.key_to_node.contains_key(&old_node.key) {

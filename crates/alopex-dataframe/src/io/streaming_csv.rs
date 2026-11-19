@@ -805,9 +805,9 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(24))]
         #[test]
         fn buffered_framing_matches_byte_reference(
-            bytes in proptest::collection::vec(prop::sample::select(vec![b'a', b'b', b'"', b'\n', b'\r', b',']), 0..49),
-            fragment in 1usize..9, cap in 1usize..25, rows in 1usize..4,
-            quoted in any::<bool>(), fault in any::<bool>(), fault_index in 0usize..49,
+            bytes in proptest::collection::vec(prop::sample::select(vec![b'a', b'b', b'"', b'\n', b'\r', b',']), 0..193),
+            fragment in 1usize..129, cap in 1usize..129, rows in 1usize..4,
+            quoted in any::<bool>(), fault in any::<bool>(), fault_index in 0usize..193,
         ) {
             let quote = quoted.then_some(b'"');
             let fail_at = fault.then_some(fault_index.min(bytes.len()));
@@ -827,6 +827,39 @@ mod tests {
                 if matches!(observed, Ok(None)) { exhausted = true; break; }
             }
             prop_assert!(exhausted, "bounded input must reach EOF");
+        }
+
+        #[test]
+        fn fast_framing_matches_byte_reference_across_record_edges(
+            prefix_len in 64usize..129,
+            tail in prop::sample::select(vec![
+                b"\r\nnext\r\n".to_vec(),
+                b"\nlast-without-newline".to_vec(),
+                b"\n\"quoted\nfield\",tail\nend\n".to_vec(),
+                b"\nnext\nthird\n".to_vec(),
+            ]),
+            cap in 64usize..193,
+            rows in 1usize..4,
+        ) {
+            // The first fill_buf slice has 64 quote-free bytes, so this case
+            // actually executes the bulk memchr branch before any later quote.
+            let mut bytes = vec![b'a'; prefix_len];
+            bytes.extend_from_slice(&tail);
+            let mut actual = fragmented(&bytes, 64, cap, Some(b'"'), None);
+            let mut reference = fragmented(&bytes, 64, cap, Some(b'"'), None);
+            let actual_context = BatchOpenContext::new(options(4096, rows));
+            let reference_context = BatchOpenContext::new(options(4096, rows));
+            let mut exhausted = false;
+            for _ in 0..bytes.len()+3 {
+                let observed = frame_snapshot(actual.next_frame(rows, &actual_context), &actual_context, cap);
+                let expected = frame_snapshot(reference_next_frame(&mut reference, rows, &reference_context), &reference_context, cap);
+                prop_assert_eq!(&observed, &expected);
+                prop_assert_eq!(actual.eof, reference.eof);
+                prop_assert_eq!(actual.reader.buffer(), reference.reader.buffer());
+                prop_assert_eq!(actual.reader.get_ref().inner.position(), reference.reader.get_ref().inner.position());
+                if matches!(observed, Ok(None)) { exhausted = true; break; }
+            }
+            prop_assert!(exhausted, "bounded input must reach EOF after overflow drain");
         }
     }
 

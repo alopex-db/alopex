@@ -285,6 +285,61 @@ fn partial_node_write_failure_can_retry_in_same_transaction() {
 }
 
 #[test]
+fn changed_node_with_unexpected_persisted_bytes_uses_full_save() {
+    let kv = MemoryKV::new();
+    let mut index = index();
+    for id in 0..4u8 {
+        index.upsert(&[id], &[id as f32, 1.0], &[]).unwrap();
+    }
+    save(&index, &kv);
+
+    let storage = HnswStorage::new("dirty");
+    let node_id = index.graph.read().unwrap().find_node_id(&[0]).unwrap();
+    let node_key = storage.node_key(node_id);
+    let mut tx = kv.begin(TxnMode::ReadWrite).unwrap();
+    let mut bytes = tx.get(&node_key).unwrap().unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    tx.put(node_key, bytes).unwrap();
+    tx.commit_self().unwrap();
+
+    let mut state = HnswTransactionState::default();
+    index
+        .upsert_staged(&[0], &[9.0, 1.0], &[], &mut state)
+        .unwrap();
+    commit(&mut index, &mut state, &kv);
+}
+
+#[test]
+fn unrelated_orphan_key_mapping_remains_until_full_save() {
+    let kv = MemoryKV::new();
+    let mut index = index();
+    index.upsert(b"a", &[1.0, 0.0], &[]).unwrap();
+    save(&index, &kv);
+
+    let storage = HnswStorage::new("dirty");
+    let orphan_key = storage.key_index_key(b"orphan");
+    let mut tx = kv.begin(TxnMode::ReadWrite).unwrap();
+    tx.put(orphan_key.clone(), 99u32.to_le_bytes().to_vec())
+        .unwrap();
+    tx.commit_self().unwrap();
+
+    let mut state = HnswTransactionState::default();
+    index
+        .upsert_staged(b"b", &[2.0, 0.0], &[], &mut state)
+        .unwrap();
+    let mut tx = kv.begin(TxnMode::ReadWrite).unwrap();
+    index.commit_staged(&mut tx, &mut state).unwrap();
+    tx.commit_self().unwrap();
+    let mut read = kv.begin(TxnMode::ReadOnly).unwrap();
+    assert!(read.get(&orphan_key).unwrap().is_some());
+    HnswIndex::load("dirty", &mut read).unwrap();
+    drop(read);
+
+    save(&index, &kv);
+    assert_stored(&index, &kv);
+}
+
+#[test]
 fn staged_batch_preserves_pruned_neighbors_after_reopen() {
     let kv = MemoryKV::new();
     let mut index = index();

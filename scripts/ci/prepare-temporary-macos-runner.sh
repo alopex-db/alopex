@@ -5,7 +5,7 @@ set -euo pipefail
 # watchdog. A missing operator configuration must fail before any build.
 [[ "${RUNNER_OS:-}" == 'macOS' ]] || exit 1
 [[ "${GITHUB_EVENT_NAME:-}" == 'push' ]] || exit 1
-[[ "${GITHUB_REF:-}" == 'refs/heads/integration/v0.8.16-candidate' ]] || exit 1
+[[ "${GITHUB_REF:-}" == 'refs/heads/integration/v0.8.17-candidate' ]] || exit 1
 : "${ALOPEX_RUNNER_SHARED_TARGET:?operator must configure the shared target}"
 : "${ALOPEX_RUNNER_ADMITTED_SHA:?operator admission hook must approve the job}"
 [[ "${GITHUB_SHA}" == "${ALOPEX_RUNNER_ADMITTED_SHA}" ]] || exit 1

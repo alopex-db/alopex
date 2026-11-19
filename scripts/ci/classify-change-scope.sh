@@ -13,7 +13,7 @@ done
 
 changed_paths="$(mktemp)"
 trap 'rm -f "${changed_paths}"' EXIT
-if ! git diff --name-only -z "${base_sha}" "${head_sha}" >"${changed_paths}"; then
+if ! git diff --no-renames --name-only -z "${base_sha}" "${head_sha}" >"${changed_paths}"; then
   printf 'production=true\nsecurity=true\n'
   exit 0
 fi
@@ -24,8 +24,12 @@ changed=0
 while IFS= read -r -d '' path; do
   changed=$((changed + 1))
   case "${path}" in
-    .github/workflows/ci.yml) security=true ;;
-    .github/workflows/*|scripts/release/*|scripts/parity/*|formal/release-report/*) ;;
+    .github/workflows/*) security=true ;;
+    .github/actions/*|scripts/ci/*|deny.toml|Cargo.lock)
+      production=true
+      security=true
+      ;;
+    scripts/release/*|scripts/parity/*|formal/release-report/*) ;;
     *) production=true ;;
   esac
 done <"${changed_paths}"
