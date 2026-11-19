@@ -24,7 +24,8 @@ class FakeGh:
                 return json.dumps({"id": 123})
             page = int(args[1].split("page=")[-1])
             return json.dumps([
-                {"name": name, "size": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest()}
+                {"name": name, "size": len(data), "state": "uploaded",
+                 "digest": "sha256:" + hashlib.sha256(data).hexdigest()}
                 for name, data in list(self.remote.items())[(page - 1) * 100:page * 100]
             ])
         if args[:2] == ("release", "upload"):
@@ -101,6 +102,29 @@ class ReleaseAssetRetryTests(unittest.TestCase):
             self.run_upload(fake)
         self.assertEqual(fake.uploads, [])
 
+    def test_asset_name_with_glob_syntax_is_rejected(self):
+        (self.directory / "[other].whl").write_bytes(b"third")
+        fake = FakeGh()
+        with self.assertRaisesRegex(ValueError, "asset name"):
+            self.run_upload(fake)
+        self.assertEqual(fake.uploads, [])
+
+    def test_incomplete_remote_asset_is_rejected(self):
+        fake = FakeGh({"one.whl": b"one"})
+
+        def incomplete(*args, max_file_size=None):
+            result = fake(*args, max_file_size=max_file_size)
+            if args[0] == "api" and "/assets?" in args[1]:
+                payload = json.loads(result)
+                for asset in payload:
+                    asset["state"] = "new"
+                return json.dumps(payload)
+            return result
+
+        with self.assertRaisesRegex(ValueError, "not uploaded"):
+            self.run_upload(incomplete)
+        self.assertEqual(fake.uploads, [])
+
     def test_concurrent_identical_name_is_accepted(self):
         fake = FakeGh(conflict="one.whl")
         fake.conflict_bytes = b"one"
@@ -154,6 +178,16 @@ class ReleaseAssetRetryTests(unittest.TestCase):
         self.assertLess(block.index("primary_distributions.py"), block.index("release_asset_retry.py"))
         self.assertNotIn("--clobber", block)
         self.assertIn("CORE_TAG: ${{ inputs.core_tag }}", block)
+
+    def test_core_workflow_uses_guard_for_rc_and_stable_assets(self):
+        workflow = Path(".github/workflows/release.yml").read_text()
+        self.assertEqual(workflow.count("release_asset_retry.py"), 3)
+        self.assertIn("Attach immutable RC assets", workflow)
+        self.assertIn("Attach qualified crate archives", workflow)
+        self.assertIn("Attach immutable stable assets", workflow)
+        self.assertEqual(workflow.count("overwrite_files: false"), 2)
+        self.assertEqual(workflow.count("gh release upload"), 1)
+        self.assertIn('gh release upload "${RELEASE_TAG_NAME}" "${manifest}"', workflow)
 
 
 if __name__ == "__main__":

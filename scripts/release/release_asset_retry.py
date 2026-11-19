@@ -48,6 +48,8 @@ def sha256(path):
 
 def verify_asset(repo, tag, path, asset):
     size = path.stat().st_size
+    if asset.get("state") != "uploaded":
+        raise ValueError(f"release asset is not uploaded: {path.name}")
     if asset["size"] != size:
         raise ValueError(f"release asset differs in size: {path.name}")
     expected = sha256(path)
@@ -78,6 +80,8 @@ def upload(repo, tag, directory):
     paths = sorted(path for path in entries if path.is_file())
     if not paths or any(path.stat().st_size == 0 for path in paths):
         raise ValueError("release assets must be nonempty regular files")
+    if any(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", path.name) is None for path in paths):
+        raise ValueError("invalid release asset name")
     remote = assets(repo, tag)
     # Finish the entire preflight before changing the release.
     for path in paths:

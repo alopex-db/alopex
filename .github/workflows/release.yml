@@ -292,11 +292,18 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG_NAME }}
-          files: artifacts/*
           generate_release_notes: true
           prerelease: true
+          overwrite_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attach immutable RC assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/release/release_asset_retry.py \
+            --repo "${GITHUB_REPOSITORY}" --tag "${RELEASE_TAG_NAME}" \
+            --directory artifacts
 
   package-crates:
     name: Package qualified crate archives
@@ -420,7 +427,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: gh release upload "${RELEASE_TAG_NAME}" "${CRATE_ASSETS}"/* --clobber
+        run: |
+          python scripts/release/release_asset_retry.py \
+            --repo "${GITHUB_REPOSITORY}" --tag "${RELEASE_TAG_NAME}" \
+            --directory "${CRATE_ASSETS}"
 
       - name: Retain qualified crate archives before cleanup
         if: always()
@@ -704,11 +714,18 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG_NAME }}
-          files: ${{ runner.temp }}/alopex-candidate-assets/*
           generate_release_notes: true
           make_latest: "true"
+          overwrite_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attach immutable stable assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/release/release_asset_retry.py \
+            --repo "${GITHUB_REPOSITORY}" --tag "${RELEASE_TAG_NAME}" \
+            --directory "${RUNNER_TEMP}/alopex-candidate-assets"
 
   dispatch-python-release:
     name: Publish Python and require public demos
