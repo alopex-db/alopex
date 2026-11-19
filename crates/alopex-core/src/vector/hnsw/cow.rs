@@ -215,6 +215,7 @@ impl<'a, T> IntoIterator for &'a PagedVec<T> {
 
 type KeyShard = Arc<HashMap<Vec<u8>, u32>>;
 /// A random shard hash is stable across snapshots, but is not serialized.
+/// Empty graphs allocate the shard directory only on their first insertion.
 #[derive(Clone)]
 pub(crate) struct KeyMap {
     shards: Arc<Vec<Option<KeyShard>>>,
@@ -223,7 +224,7 @@ pub(crate) struct KeyMap {
 impl Default for KeyMap {
     fn default() -> Self {
         Self {
-            shards: Arc::new(vec![None; KEY_SHARDS]),
+            shards: Arc::new(Vec::new()),
             hash: RandomState::new(),
         }
     }
@@ -233,7 +234,7 @@ impl KeyMap {
         self.hash.hash_one(key) as usize % KEY_SHARDS
     }
     pub(crate) fn get(&self, key: &[u8]) -> Option<&u32> {
-        self.shards[self.shard(key)].as_ref()?.get(key)
+        self.shards.get(self.shard(key))?.as_ref()?.get(key)
     }
     pub(crate) fn contains_key(&self, key: &[u8]) -> bool {
         self.get(key).is_some()
@@ -241,12 +242,15 @@ impl KeyMap {
     pub(crate) fn insert(&mut self, key: Vec<u8>, value: u32) -> Option<u32> {
         let shard = self.shard(&key);
         let shards = Arc::make_mut(&mut self.shards);
+        if shards.is_empty() {
+            shards.resize_with(KEY_SHARDS, || None);
+        }
         let map = shards[shard].get_or_insert_with(|| Arc::new(HashMap::new()));
         Arc::make_mut(map).insert(key, value)
     }
     pub(crate) fn remove(&mut self, key: &[u8]) -> Option<u32> {
         let shard = self.shard(key);
-        if !self.shards[shard].as_ref()?.contains_key(key) {
+        if !self.shards.get(shard)?.as_ref()?.contains_key(key) {
             return None;
         }
         let shards = Arc::make_mut(&mut self.shards);
@@ -460,6 +464,37 @@ mod tests {
         assert!(actual[PAGE_SIZE * 2].is_some());
         drop(actual);
         assert_eq!(Arc::strong_count(&value), 1);
+    }
+
+    #[test]
+    fn empty_key_snapshots_allocate_no_directory_until_insertion() {
+        let mut original = KeyMap::default();
+        let mut fork = original.clone();
+        for map in [&mut original, &mut fork] {
+            assert_eq!(map.shards.capacity(), 0);
+            assert_eq!(map.get(b"first"), None);
+            assert!(!map.contains_key(b"first"));
+            assert_eq!(map.remove(b"first"), None);
+            assert_eq!(map.shards.capacity(), 0);
+        }
+        assert!(Arc::ptr_eq(&original.shards, &fork.shards));
+
+        assert_eq!(fork.insert(b"first".to_vec(), 7), None);
+        assert_eq!(fork.get(b"first"), Some(&7));
+        assert_eq!(original.get(b"first"), None);
+        assert_eq!(original.shards.capacity(), 0);
+        assert_eq!(original.insert(b"second".to_vec(), 9), None);
+        assert_eq!(fork.get(b"second"), None);
+        assert_eq!(original.get(b"second"), Some(&9));
+
+        let saved = fork.clone();
+        assert_eq!(fork.remove(b"first"), Some(7));
+        assert_eq!(fork.get(b"first"), None);
+        assert_eq!(saved.get(b"first"), Some(&7));
+        assert_eq!(fork.insert(b"first".to_vec(), 11), None);
+        assert_eq!(fork.insert(b"first".to_vec(), 13), Some(11));
+        assert_eq!(fork.get(b"first"), Some(&13));
+        assert_eq!(saved.get(b"first"), Some(&7));
     }
 
     #[test]
