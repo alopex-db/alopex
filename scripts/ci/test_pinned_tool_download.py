@@ -66,6 +66,20 @@ raise SystemExit(int(os.environ.get('FAKE_CODE', '0')))
         self.assertIn('Accept: application/octet-stream', args)
         self.assertFalse(any('Authorization' in arg for arg in args))
 
+    def test_canonical_cargo_deny_url_publishes_only_verified_bytes(self):
+        url = ('https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/'
+               'cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz')
+        result = self.run_download(url=url)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.output.read_bytes(), self.payload.read_bytes())
+        self.assertIn(url, (self.root / 'arguments').read_text().splitlines())
+
+        for digest, size in (('0' * 64, self.size), (self.digest, self.size + 1)):
+            with self.subTest(digest=digest, size=size):
+                self.output.write_bytes(b'previous verified bytes')
+                self.assert_rejected_without_replacing_output(
+                    self.run_download(digest=digest, size=size, url=url))
+
     def test_http_error_after_partial_write_is_never_published(self):
         self.output.write_bytes(b'previous verified bytes')
         self.env['FAKE_CODE'] = '22'

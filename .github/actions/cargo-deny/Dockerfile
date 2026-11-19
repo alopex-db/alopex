@@ -7,7 +7,7 @@ RUN set -eux; \
     apk update; \
     apk add bash curl git tar openssh; \
     sh /download.sh \
-      https://api.github.com/repos/EmbarkStudios/cargo-deny/releases/assets/471598214 \
+      https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz \
       9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f \
       4936832 /tmp/cargo-deny.tar.gz; \
     tar -xzvf /tmp/cargo-deny.tar.gz -C /usr/bin --strip-components=1; \
