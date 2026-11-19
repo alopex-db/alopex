@@ -61,6 +61,33 @@ fn limits() -> OverflowLimits {
 }
 
 #[test]
+fn spool_identity_conflicts_with_sealed_and_temporary_files() {
+    let fixture = Fixture::new();
+    let identity = id(1);
+    let sealed = spool_path(&fixture.spools, identity);
+    let temporary = sealed.with_extension("tmp");
+    assert!(!spool_identity_conflicts(&fixture.spools, identity).unwrap());
+    fs::write(&sealed, b"preserved sealed spool").unwrap();
+    assert!(spool_identity_conflicts(&fixture.spools, identity).unwrap());
+    fs::remove_file(&sealed).unwrap();
+    fs::write(&temporary, b"preserved temporary spool").unwrap();
+    assert!(spool_identity_conflicts(&fixture.spools, identity).unwrap());
+    fs::remove_file(&temporary).unwrap();
+    assert!(!spool_identity_conflicts(&fixture.spools, identity).unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn spool_identity_conflict_probe_propagates_filesystem_errors() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let loop_path = fixture.dir.path().join("loop");
+    symlink("loop", &loop_path).unwrap();
+    assert!(spool_identity_conflicts(&loop_path, id(1)).is_err());
+}
+
+#[test]
 fn inline_synced_forces_durability_for_every_sync_mode() {
     for mode in [
         SyncMode::EveryWrite,

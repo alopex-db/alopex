@@ -18,6 +18,8 @@ WIRE_FILES = {
     "crates/alopex-sql/nim-sql-parser/src/parser.nim",
     "crates/alopex-sql/nim-sql-parser/src/lexer.nim",
     "crates/alopex-sql/nim-sql-parser/src/promql_ast.nim",
+    "crates/alopex-sql/nim-sql-parser/src/promql_parser.nim",
+    "crates/alopex-sql/nim-sql-parser/src/promql_lexer.nim",
     "crates/alopex-sql/src/nim_bridge.rs",
 }
 WIRE_PREFIX = "crates/alopex-sql/src/ast/"

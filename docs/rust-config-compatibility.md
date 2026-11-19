@@ -3,6 +3,10 @@
 This policy applies to v0.8.17 and tracks
 [#696](https://github.com/alopex-db/alopex/issues/696). Runtime/database compatibility
 and Rust source compatibility are separate contracts.
+The unchanged Rust configuration source compatibility guarantee starts at
+**v0.8.16**. Earlier versions are not covered by that guarantee: in particular,
+an unchanged v0.8.15 four-field `EmbeddedConfig` literal does not compile against
+v0.8.17. Use the constructor migration below for that source code.
 
 ## Supported clients
 

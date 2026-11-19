@@ -123,6 +123,25 @@ fn newer_version_is_rejected() {
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
+fn version_0_3_is_rejected_above_max_supported() {
+    let (_dir, path) = generate_v0_1_test_file();
+    let bumped = mutate_version(&path, FileVersion::new(0, 3, 0));
+    let err = match AlopexFileReader::open(FileSource::Path(bumped)) {
+        Ok(_) => panic!("0.3.0 must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        err,
+        FormatError::IncompatibleVersion {
+            file: FileVersion::new(0, 3, 0),
+            reader: FileVersion::MAX_SUPPORTED,
+        }
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
 fn roundtrip_with_requested_compression() {
     let alg = compression_from_env();
     if !compression_available(alg) {
@@ -178,5 +197,21 @@ mod wasm {
             FormatError::IncompatibleVersion { file, reader } => assert!(file > reader),
             other => panic!("unexpected error: {:?}", other),
         }
+    }
+
+    #[wasm_bindgen_test]
+    fn version_0_3_is_rejected_above_max_supported() {
+        let bumped = mutate_version_bytes(generate_v0_1_test_bytes(), FileVersion::new(0, 3, 0));
+        let err = match AlopexFileReader::open(FileSource::Buffer(bumped)) {
+            Ok(_) => panic!("0.3.0 must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            err,
+            FormatError::IncompatibleVersion {
+                file: FileVersion::new(0, 3, 0),
+                reader: FileVersion::MAX_SUPPORTED,
+            }
+        );
     }
 }

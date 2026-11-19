@@ -7,6 +7,11 @@ Create a dedicated Linux VM using the parameterized procedure in
 Image construction is offline and acceptance containers have no external
 network. Keep VM parameters, execution profiles and detailed evidence private.
 
+The image grants the non-root `alopex` user passwordless **container-local** sudo
+for the #804 test contract. It is a disposable test image, not a production
+runtime or a distribution artifact. Do not publish it or reuse it for product
+services; keep the prescribed container isolation and cleanup when running it.
+
 ## Inputs
 
 Copy `examples/run-profile.template.json` into a private directory and fill the

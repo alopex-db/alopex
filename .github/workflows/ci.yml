@@ -42,7 +42,7 @@ jobs:
       - name: Verify change scope classifier
         run: |
           bash scripts/ci/test_classify_change_scope.sh
-          python3 -m unittest scripts.ci.test_check_parser_wire_contract scripts.ci.test_pinned_tool_download
+          python3 -m unittest scripts.ci.test_check_parser_wire_contract scripts.ci.test_pinned_tool_download scripts.ci.test_candidate_macos_runner_contract
       - name: Verify parser source contract guard
         run: python3 scripts/ci/test_parser_source_contract.py
       - name: Verify read-only S04 peer pidfd lifecycle on Linux
@@ -155,9 +155,9 @@ jobs:
   test:
     name: Test Suite (${{ matrix.os }}, ${{ matrix.rust }})
     needs: [scope]
-    if: needs.scope.outputs.production == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted')
+    if: needs.scope.outputs.production == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.17-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted')
     # Opt in only for trusted candidate pushes; PRs retain hosted runners.
-    runs-on: ${{ matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted' && 'alopex-v0816-macos' || matrix.os }}
+    runs-on: ${{ matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.17-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted' && 'alopex-v0816-macos' || matrix.os }}
     env:
       ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
       NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
@@ -414,8 +414,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Enforce dependency duplication policy
-        # Preserve the upstream container and arguments; verify fixed asset bytes.
-        uses: ./.github/actions/cargo-deny
+        # Execute reviewed controller bytes, not the PR checkout's local action.
+        uses: alopex-db/alopex/.github/actions/cargo-deny@1ac106371815254e11fd6ac20add3494edd3a52f
         with:
           command: check bans
           arguments: --all-features --locked
@@ -447,9 +447,9 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     needs: [scope]
-    if: needs.scope.outputs.production == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted')
+    if: needs.scope.outputs.production == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.17-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted')
     # Opt in only for trusted candidate pushes; PRs retain hosted runners.
-    runs-on: ${{ matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted' && 'alopex-v0816-macos' || matrix.os }}
+    runs-on: ${{ matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.17-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted' && 'alopex-v0816-macos' || matrix.os }}
     env:
       PYO3_PYTHON: python
       PYTHON_SYS_EXECUTABLE: python

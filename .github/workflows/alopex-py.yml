@@ -93,7 +93,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_BUILD_JOBS: "2"
     # Opt in only for trusted candidate pushes; PRs retain hosted runners.
-    runs-on: ${{ matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.16-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted' && 'alopex-v0816-macos' || matrix.os }}
+    runs-on: ${{ matrix.os == 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/integration/v0.8.17-candidate' && vars.ALOPEX_V0816_MACOS_RUNNER == 'self-hosted' && 'alopex-v0816-macos' || matrix.os }}
     strategy:
       fail-fast: false
       matrix:

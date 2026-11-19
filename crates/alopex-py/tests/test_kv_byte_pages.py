@@ -86,7 +86,7 @@ def test_search_cursor_binds_pattern(txn, mode, pattern, other):
 
 
 @pytest.mark.parametrize("kind,args", [("prefix", (b"p",)), ("range", (b"p", b"q"))])
-def test_async_scan_yields_between_byte_pages_and_checks_total(kind, args):
+def test_async_complete_scan_is_atomic_and_matches_sync_total_budget(kind, args):
     async def run():
         db = await AsyncDatabase.new(thread_mode="single")
         async with await db.begin(TxnMode.READ_WRITE) as txn:
@@ -103,12 +103,27 @@ def test_async_scan_yields_between_byte_pages_and_checks_total(kind, args):
 
             task = asyncio.create_task(heartbeat())
             scan = getattr(txn, f"scan_{kind}")
+            sync_scan = getattr(txn._handle, f"scan_{kind}")
             try:
-                assert len(list(await scan(*args, max_bytes=4, max_total_bytes=None))) == 3
-                assert ticks >= 3
+                expected = [(b"p0", b"vv"), (b"p1", b"vv"), (b"p2", b"vv")]
+                assert list(await scan(*args, max_bytes=4, max_total_bytes=None)) == expected
+                assert ticks == 0
+                assert list(await scan(*args, max_bytes=4, max_total_bytes=12)) == expected
+                assert list(await scan(*args, max_bytes=4, max_total_bytes=13)) == expected
                 with pytest.raises(AlopexError, match="limit=11, requested=12"):
                     await scan(*args, max_bytes=4, max_total_bytes=11)
-                assert len(list(await scan(*args, max_bytes=4, max_total_bytes=12))) == 3
+                for budget in (0, -1):
+                    with pytest.raises(Exception) as sync_error:
+                        sync_scan(*args, max_bytes=4, max_total_bytes=budget)
+                    with pytest.raises(type(sync_error.value)) as async_error:
+                        await scan(*args, max_bytes=4, max_total_bytes=budget)
+                    if isinstance(sync_error.value, AlopexError):
+                        assert async_error.value.code == sync_error.value.code
+                entries = []
+                async for entry in getattr(txn, f"iter_{kind}")(*args, max_bytes=4):
+                    entries.append(entry)
+                assert entries == expected
+                assert ticks >= 3
             finally:
                 finished = True
                 await task
