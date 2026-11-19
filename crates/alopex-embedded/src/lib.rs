@@ -859,6 +859,9 @@ impl Database {
         entries: &HashMap<String, alopex_sql::storage::HnswTxnEntry>,
         visit: impl FnOnce(&mut dyn FnMut(&[u8])) -> bool,
     ) -> Vec<(String, HnswIndex)> {
+        if !entries.values().any(|entry| entry.is_unmodified_load()) {
+            return Vec::new();
+        }
         let mut has_writes = false;
         if !visit(&mut |_| has_writes = true) || has_writes {
             return Vec::new();
@@ -2711,6 +2714,55 @@ mod tests {
         .unwrap();
         index.upsert(b"row", &vec![1.0; dimension], b"").unwrap();
         index
+    }
+
+    #[test]
+    fn empty_hnsw_loads_skip_write_set_visit() {
+        let entries = HashMap::new();
+        let reusable = Database::reusable_hnsw_loads(&entries, |_| {
+            panic!("no HNSW loads require no write-set visit")
+        });
+        assert!(reusable.is_empty());
+    }
+
+    #[test]
+    fn cached_hnsw_reads_skip_write_set_visit() {
+        let entries = HashMap::from([(
+            "cached".to_owned(),
+            alopex_sql::storage::HnswTxnEntry::cached_read(cached_test_index("cached", 2)),
+        )]);
+        let reusable = Database::reusable_hnsw_loads(&entries, |_| {
+            panic!("cached HNSW reads require no write-set visit")
+        });
+        assert!(reusable.is_empty());
+    }
+
+    #[test]
+    fn owned_rollback_reuses_unmodified_cold_hnsw_load() {
+        let db = Arc::new(Database::new());
+        db.execute_sql(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, e VECTOR(2, L2));
+             CREATE INDEX ih ON items (e) USING HNSW;
+             INSERT INTO items VALUES (1, [0,0]);",
+        )
+        .unwrap();
+        db.set_hnsw_cache_limit(0);
+        db.set_hnsw_cache_limit(256 * 1024 * 1024);
+        assert_eq!(db.hnsw_cache_stats().entries, 0);
+
+        let mut tx = db
+            .clone()
+            .begin_owned_embedded_transaction(TxnMode::ReadOnly)
+            .unwrap();
+        tx.execute_sql(
+            "SELECT id FROM items ORDER BY vector_distance(e,[0,0],'l2') LIMIT 1 \
+             WITH (enable_hnsw=true,ef_search=16)",
+        )
+        .unwrap();
+        assert!(tx.sql_hnsw.contains_key("ih"), "query must load HNSW graph");
+        assert_eq!(db.hnsw_cache_stats().entries, 0);
+        tx.rollback().unwrap();
+        assert_eq!(db.hnsw_cache_stats().entries, 1);
     }
 
     #[test]
