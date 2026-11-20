@@ -98,6 +98,19 @@ class CaptureProofTests(unittest.TestCase):
         with self.assertRaisesRegex(ProofError, "invalid signed hash entry"):
             signed_hashes(self.irelease.read_bytes())
 
+    def test_rejects_keyring_drift_before_signature_verification(self):
+        (self.capture / "trusted-keyring.gpg").write_bytes(b"replacement keyring")
+        with self.assertRaisesRegex(ProofError, "trusted keyring drift"):
+            self.check()
+
+    def test_signature_failure_propagates_through_full_proof(self):
+        class Failed:
+            returncode = 1
+            stdout = "[GNUPG:] BADSIG synthetic"
+        with patch("verify_captured_indexes.subprocess.run", return_value=Failed()):
+            with self.assertRaisesRegex(ProofError, "signature verification failed"):
+                prove(self.capture, self.script)
+
     def test_rejects_index_hash_mismatch(self):
         (self.capture / "packages" / self.index).write_bytes(self.package + b"tamper")
         with self.assertRaisesRegex(ProofError, "signed hash mismatch"):
