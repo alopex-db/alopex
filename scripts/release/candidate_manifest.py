@@ -101,7 +101,12 @@ def write_manifest(path: Path, manifest: dict[str, Any]) -> None:
 
 
 def verify_manifest(
-    *, manifest_path: Path, artifact_dir: Path, stable_tag: str, stable_sha: str
+    *,
+    manifest_path: Path,
+    artifact_dir: Path,
+    stable_tag: str,
+    stable_sha: str,
+    rc_tag: str | None = None,
 ) -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
@@ -118,6 +123,8 @@ def verify_manifest(
     if manifest["schema"] != SCHEMA:
         raise ValueError("candidate manifest schema mismatch")
     _identity(manifest["version"], manifest["rc_tag"], manifest["commit_sha"])
+    if rc_tag is not None and manifest["rc_tag"] != rc_tag:
+        raise ValueError("candidate manifest RC tag does not match the release")
     if stable_tag != f"v{manifest['version']}":
         raise ValueError("stable tag does not match candidate version")
     if stable_sha != manifest["commit_sha"]:
@@ -163,6 +170,7 @@ def main() -> None:
     verify.add_argument("--artifact-dir", required=True, type=Path)
     verify.add_argument("--stable-tag", required=True)
     verify.add_argument("--stable-sha", required=True)
+    verify.add_argument("--rc-tag")
     args = parser.parse_args()
     if args.command == "build":
         manifest = build_manifest(
@@ -179,6 +187,7 @@ def main() -> None:
             artifact_dir=args.artifact_dir,
             stable_tag=args.stable_tag,
             stable_sha=args.stable_sha,
+            rc_tag=args.rc_tag,
         )
 
 
