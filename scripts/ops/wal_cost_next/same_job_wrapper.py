@@ -179,6 +179,49 @@ def monitor_comparator(repo, config_path, module, prior, private, env):
         require(original_error is None and cleanup_error is None, 'comparator or collection failed')
 
 
+def run_closure_candidate(profile, prior, private, module, signed_receipt):
+    """Record a separate unapproved diagnostic after the frozen WAL measurement."""
+    from offline_closure_lifecycle import run_candidate_lifecycle, closure_mismatch
+    from lifecycle import Run
+    receipt = private / 'closure-phase.private.json'
+    try:
+        candidate = run_candidate_lifecycle(profile, prior, private, module,
+                                            signed_receipt)
+        error = None
+    except BaseException as exc:
+        candidate, error = None, exc
+    status = 'candidate' if error is None else 'guard_failed'
+    try:
+        run = Run(profile['private_output'], profile['run_id'] + '-trace-lock').load()
+        run.verify_collection()
+        final = read(run.root / 'final-result.private.json')
+        require(run.record['phase'] == 'deleted' and
+                final['schema'] == 'alopex.trace-closure-final/v1' and
+                final['proof_sha256'] == signed_receipt['proof_sha256'],
+                'closure cleanup or identity incomplete')
+        if error is None:
+            require(final['status'] == 'candidate' and final['error_code'] is None and
+                    candidate['approval'] == 'unapproved' and
+                    candidate['formal_lock'] is False, 'closure candidate incomplete')
+        elif (closure_mismatch(error) and final['status'] == 'failed' and
+              final['error_code'] == 'CLOSURE_MISMATCH'):
+            status = 'mismatch'
+        else:
+            require(False, 'closure guard failure')
+    except BaseException:
+        status = 'guard_failed'
+    payload = {'schema': 'alopex.trace-closure-phase/v1', 'case': 'TRACE_CLOSURE_682',
+               'status': status, 'approval': 'unapproved', 'formal_lock': False,
+               'run_id': profile['run_id'] + '-trace-lock',
+               'proof_sha256': signed_receipt['proof_sha256']}
+    with receipt.open('x', encoding='utf-8') as output:
+        json.dump(payload, output, sort_keys=True)
+        output.write('\n')
+    receipt.chmod(0o600)
+    require(status != 'guard_failed', 'closure guard failure')
+    return payload
+
+
 def run(args):
     require(os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and
             os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted' and
@@ -230,6 +273,12 @@ def run(args):
         raise
     environment['WAL_COST_CONFIG'] = base64.b64encode(args.config.read_bytes()).decode('ascii')
     monitor_comparator(args.frozen_checkout, config, module, prior, private, environment)
+    try:
+        run_closure_candidate(read(private / 'profile.json'), prior, private, module,
+                              signed_receipt)
+    except BaseException as error:
+        error.wrapper_phase = 'closure_candidate'
+        raise
 
 
 def seal_wrapper_failure(error):
