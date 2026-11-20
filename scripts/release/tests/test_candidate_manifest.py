@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -137,6 +140,92 @@ class CandidateManifestTests(unittest.TestCase):
                 commit_sha="a" * 40,
                 artifact_dir=self.artifacts,
                 verification_path=self.verification,
+            )
+
+    def test_record_workflow_reuses_published_bytes_and_rejects_changed_assets(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        step = workflow.split("      - name: Bind candidate assets and source evidence\n", 1)[1]
+        step = step.split("        run: |\n", 1)[1].split("\n  promote-release:", 1)[0]
+        script = textwrap.dedent(step)
+        remote = self.root / "remote"
+        remote.mkdir()
+        (remote / "alopex-linux-x86_64").write_bytes(b"binary")
+        uploads = self.root / "uploads"
+        uploads.mkdir()
+        mock_bin = self.root / "bin"
+        mock_bin.mkdir()
+        gh = mock_bin / "gh"
+        gh.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, pathlib, shutil, sys\n"
+            "args = sys.argv[1:]\n"
+            "remote = pathlib.Path(os.environ['MOCK_REMOTE'])\n"
+            "if args[:2] == ['release', 'download']:\n"
+            "    dest = pathlib.Path(args[args.index('--dir') + 1])\n"
+            "    for file in remote.iterdir(): shutil.copy2(file, dest / file.name)\n"
+            "elif args[:2] == ['run', 'list']:\n"
+            "    print(os.environ['MOCK_CI_RUN'])\n"
+            "elif args[:2] == ['release', 'upload']:\n"
+            "    source = pathlib.Path(args[3])\n"
+            "    shutil.copy2(source, remote / source.name)\n"
+            "    marker = pathlib.Path(os.environ['MOCK_UPLOADS']) / source.name\n"
+            "    marker.write_text((marker.read_text() if marker.exists() else '') + 'x')\n"
+            "else: sys.exit(2)\n",
+            encoding="utf-8",
+        )
+        gh.chmod(0o755)
+        env = os.environ | {
+            "PATH": f"{mock_bin}:{os.environ['PATH']}",
+            "RUNNER_TEMP": str(self.root),
+            "RELEASE_TAG_NAME": "v0.8.12-rc.1",
+            "RELEASE_TARGET_SHA": "a" * 40,
+            "GITHUB_REPOSITORY": "alopex-db/alopex",
+            "MOCK_REMOTE": str(remote),
+            "MOCK_UPLOADS": str(uploads),
+            "MOCK_CI_RUN": "42",
+        }
+
+        def run() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["bash", "-c", script], cwd=ROOT, env=env,
+                capture_output=True, text=True, check=False,
+            )
+
+        first = run()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        manifest = remote / "candidate-manifest-v0.8.12.json"
+        published_bytes = manifest.read_bytes()
+        upload_marker = uploads / manifest.name
+        self.assertEqual(upload_marker.read_text(), "x")
+
+        env["MOCK_CI_RUN"] = "43"
+        retry = run()
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        self.assertEqual(manifest.read_bytes(), published_bytes)
+        self.assertEqual(upload_marker.read_text(), "x")
+
+        (remote / "alopex-linux-x86_64").write_bytes(b"change")
+        changed = run()
+        self.assertNotEqual(changed.returncode, 0)
+        self.assertIn("digest mismatch", changed.stderr)
+        self.assertEqual(manifest.read_bytes(), published_bytes)
+        self.assertEqual(upload_marker.read_text(), "x")
+
+    def test_verify_rejects_different_rc_tag(self) -> None:
+        manifest_path = self.root / "candidate-manifest.json"
+        self.module.write_manifest(
+            manifest_path,
+            self.module.build_manifest(
+                version="0.8.12", rc_tag="v0.8.12-rc.1",
+                commit_sha="a" * 40, artifact_dir=self.artifacts,
+                verification_path=self.verification,
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "RC tag"):
+            self.module.verify_manifest(
+                manifest_path=manifest_path, artifact_dir=self.artifacts,
+                stable_tag="v0.8.12", stable_sha="a" * 40,
+                rc_tag="v0.8.12-rc.2",
             )
 
 

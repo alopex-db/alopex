@@ -292,11 +292,18 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG_NAME }}
-          files: artifacts/*
           generate_release_notes: true
           prerelease: true
+          overwrite_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attach immutable RC assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/release/release_asset_retry.py \
+            --repo "${GITHUB_REPOSITORY}" --tag "${RELEASE_TAG_NAME}" \
+            --directory artifacts
 
   package-crates:
     name: Package qualified crate archives
@@ -420,7 +427,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: gh release upload "${RELEASE_TAG_NAME}" "${CRATE_ASSETS}"/* --clobber
+        run: |
+          python scripts/release/release_asset_retry.py \
+            --repo "${GITHUB_REPOSITORY}" --tag "${RELEASE_TAG_NAME}" \
+            --directory "${CRATE_ASSETS}"
 
       - name: Retain qualified crate archives before cleanup
         if: always()
@@ -532,14 +542,25 @@ jobs:
               )
           PY
           manifest="${RUNNER_TEMP}/candidate-manifest-v${version}.json"
-          python scripts/release/candidate_manifest.py build \
-            --version "${version}" --rc-tag "${RELEASE_TAG_NAME}" \
-            --commit-sha "${RELEASE_TARGET_SHA}" --artifact-dir "${candidate_dir}" \
-            --verification "${verification}" --output "${manifest}"
+          published_manifest="${candidate_dir}/candidate-manifest-v${version}.json"
+          publish_manifest=true
+          if [[ -e "${published_manifest}" ]]; then
+            # Preserve the published bytes; the rerun's CI run ID may differ.
+            mv "${published_manifest}" "${manifest}"
+            publish_manifest=false
+          else
+            python scripts/release/candidate_manifest.py build \
+              --version "${version}" --rc-tag "${RELEASE_TAG_NAME}" \
+              --commit-sha "${RELEASE_TARGET_SHA}" --artifact-dir "${candidate_dir}" \
+              --verification "${verification}" --output "${manifest}"
+          fi
           python scripts/release/candidate_manifest.py verify \
             --manifest "${manifest}" --artifact-dir "${candidate_dir}" \
-            --stable-tag "v${version}" --stable-sha "${RELEASE_TARGET_SHA}"
-          gh release upload "${RELEASE_TAG_NAME}" "${manifest}" --clobber
+            --stable-tag "v${version}" --stable-sha "${RELEASE_TARGET_SHA}" \
+            --rc-tag "${RELEASE_TAG_NAME}"
+          if [[ "${publish_manifest}" == true ]]; then
+            gh release upload "${RELEASE_TAG_NAME}" "${manifest}"
+          fi
 
   promote-release:
     name: Promote qualified candidate artifacts
@@ -576,7 +597,8 @@ jobs:
           mv "${candidate_dir}/${manifest_name}" "${manifest}"
           python scripts/release/candidate_manifest.py verify \
             --manifest "${manifest}" --artifact-dir "${candidate_dir}" \
-            --stable-tag "${RELEASE_TAG_NAME}" --stable-sha "${RELEASE_TARGET_SHA}"
+            --stable-tag "${RELEASE_TAG_NAME}" --stable-sha "${RELEASE_TARGET_SHA}" \
+            --rc-tag "${rc_tag}"
           mv "${manifest}" "${candidate_dir}/${manifest_name}"
           echo "rc_tag=${rc_tag}" >> "${GITHUB_OUTPUT}"
   publish-crate:
@@ -685,17 +707,25 @@ jobs:
           mv "${candidate_dir}/${manifest_name}" "${manifest}"
           python scripts/release/candidate_manifest.py verify \
             --manifest "${manifest}" --artifact-dir "${candidate_dir}" \
-            --stable-tag "${RELEASE_TAG_NAME}" --stable-sha "${RELEASE_TARGET_SHA}"
+            --stable-tag "${RELEASE_TAG_NAME}" --stable-sha "${RELEASE_TARGET_SHA}" \
+            --rc-tag "${RC_TAG}"
           mv "${manifest}" "${candidate_dir}/${manifest_name}"
       - name: Create stable GitHub Release from qualified bytes
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG_NAME }}
-          files: ${{ runner.temp }}/alopex-candidate-assets/*
           generate_release_notes: true
           make_latest: "true"
+          overwrite_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attach immutable stable assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/release/release_asset_retry.py \
+            --repo "${GITHUB_REPOSITORY}" --tag "${RELEASE_TAG_NAME}" \
+            --directory "${RUNNER_TEMP}/alopex-candidate-assets"
 
   dispatch-python-release:
     name: Publish Python and require public demos
