@@ -2773,41 +2773,42 @@ mod tests {
         )
         .await;
         assert!(response.status().is_success(), "session SQL response");
-        let captured = events.lock().expect("timing event lock");
-        let mut stages = BTreeMap::<String, usize>::new();
-        for event in captured.iter() {
-            let stage = event.0.get("stage").expect("stage field");
-            *stages
-                .entry(stage.trim_matches('"').to_string())
-                .or_default() += 1;
+        {
+            let captured = events.lock().expect("timing event lock");
+            let mut stages = BTreeMap::<String, usize>::new();
+            for event in captured.iter() {
+                let stage = event.0.get("stage").expect("stage field");
+                *stages
+                    .entry(stage.trim_matches('"').to_string())
+                    .or_default() += 1;
+                assert_eq!(
+                    event.0.get("trace_id").map(|value| value.trim_matches('"')),
+                    Some("550e8400-e29b-41d4-a716-446655440000")
+                );
+                assert_eq!(
+                    event.0.keys().map(String::as_str).collect::<Vec<_>>(),
+                    ["duration_ns", "message", "stage", "trace_id"]
+                );
+                let payload = format!("{:?}", event.0);
+                assert!(
+                    !payload.contains("private_sql_marker"),
+                    "SQL leaked into timing event"
+                );
+                assert!(!payload.contains("/sql"), "URL leaked into timing event");
+            }
             assert_eq!(
-                event.0.get("trace_id").map(|value| value.trim_matches('"')),
-                Some("550e8400-e29b-41d4-a716-446655440000")
+                stages,
+                BTreeMap::from([
+                    ("execute_and_map".into(), 1),
+                    ("execute_multi".into(), 1),
+                    ("response_build".into(), 1),
+                    ("result_map".into(), 1),
+                    ("route_plan".into(), 1),
+                    ("session_completion".into(), 1),
+                    ("session_setup".into(), 1),
+                ])
             );
-            assert_eq!(
-                event.0.keys().map(String::as_str).collect::<Vec<_>>(),
-                ["duration_ns", "message", "stage", "trace_id"]
-            );
-            let payload = format!("{:?}", event.0);
-            assert!(
-                !payload.contains("private_sql_marker"),
-                "SQL leaked into timing event"
-            );
-            assert!(!payload.contains("/sql"), "URL leaked into timing event");
         }
-        assert_eq!(
-            stages,
-            BTreeMap::from([
-                ("execute_and_map".into(), 1),
-                ("execute_multi".into(), 1),
-                ("response_build".into(), 1),
-                ("result_map".into(), 1),
-                ("route_plan".into(), 1),
-                ("session_completion".into(), 1),
-                ("session_setup".into(), 1),
-            ])
-        );
-        drop(captured);
 
         for (enabled, correlation_id) in [(false, diagnostic_id), (true, "ordinary-request")] {
             SQL_TIMING_TEST_OVERRIDE.with(|override_| override_.set(Some(enabled)));
