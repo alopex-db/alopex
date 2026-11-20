@@ -22,7 +22,7 @@ sys.path.insert(0, str(HERE))
 from four_case_diagnostic import acquire, acquisition, entrypoint, qualification  # noqa: E402
 
 BASE_PATH = HERE / "hosted_test_env_qualification.py"
-BASE_SHA256 = "4a41875530a8a4c6efaa5b90ba1e2976619324a750c3e792621369f696fbf3af"
+BASE_SHA256 = "bb52019771e059475a3fe8f9db1493849094dd39699d0b3fffb0b5a69cc9051d"
 LOCK_RELATIVE = Path("alopex-712-lock/lock.json")
 
 
