@@ -42,8 +42,10 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn("inputs.issue_number == '682'", workflow)
         self.assertIn('!inputs.sql_four_case_mode && !inputs.wal_cost_mode', workflow)
         order = ['Bound checkout before source acquisition',
-                 'Stage current #804 controller', 'Stage frozen #682 comparator',
-                 'Qualify and measure on the same runner', 'Seal wrapper evidence',
+                 'Stage current #804 controller in measured workspace',
+                 'Stage frozen #682 comparator in measured workspace',
+                 'Qualify, capture signed indexes, and measure on the same runner',
+                 'Seal signed Ubuntu indexes', 'Seal wrapper evidence',
                  'Preserve encrypted and allowlisted evidence']
         cost_job = workflow.split('  wal_cost_682:\n', 1)[1]
         self.assertEqual([cost_job.index(value) for value in order],
