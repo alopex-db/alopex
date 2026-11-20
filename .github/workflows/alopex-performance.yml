@@ -46,6 +46,22 @@ on:
         description: Exact controller commit for qualification mode
         required: false
         type: string
+      four_case_lock_sha256:
+        description: Independently reviewed SHA-256 of the #712 private lock
+        required: false
+        type: string
+      four_case_lock_base64:
+        description: Base64 of the exact #712 private lock bytes
+        required: false
+        type: string
+      four_case_manifest_sha256:
+        description: Independently reviewed SHA-256 of the #712 static manifest
+        required: false
+        type: string
+      four_case_manifest_base64:
+        description: Base64 of the exact #712 static manifest bytes
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -405,15 +421,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+      - name: Install independently pinned four-case inputs
+        if: inputs.sql_four_case_mode
+        env:
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+          ALOPEX_FOUR_CASE_LOCK_B64: ${{ inputs.four_case_lock_base64 }}
+          ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
+          ALOPEX_FOUR_CASE_MANIFEST_B64: ${{ inputs.four_case_manifest_base64 }}
+        run: python3 -B scripts/ops/four_case_job.py install
       - name: Admit this runner before candidate acquisition
-        if: ${{ !inputs.sql_diagnostic_mode }}
+        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --admission-only
       - name: Retrieve exact candidate assets
-        if: ${{ !inputs.sql_diagnostic_mode }}
+        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -421,7 +445,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --acquire-assets
       - name: Qualify on this runner
-        if: ${{ !inputs.sql_diagnostic_mode }}
+        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
@@ -449,6 +473,31 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
         run: python3 -B scripts/ops/hosted_test_env_qualification_1951.py --execute
+      - name: Admit runner for source-pinned four-case qualification
+        if: inputs.sql_four_case_mode
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+        run: python3 -B scripts/ops/hosted_test_env_qualification_four_case.py --admission-only
+      - name: Acquire source-pinned four-case assets
+        if: inputs.sql_four_case_mode
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/ops/hosted_test_env_qualification_four_case.py --acquire-assets
+      - name: Qualify source-pinned four-case assets on this runner
+        if: inputs.sql_four_case_mode
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+        run: python3 -B scripts/ops/hosted_test_env_qualification_four_case.py --execute
       - name: Preserve encrypted qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -492,14 +541,23 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
-          GH_TOKEN: ${{ github.token }}
-        run: python3 -B scripts/ops/same_job_four_case.py
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+          ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
+        run: python3 -B scripts/ops/four_case_job.py run
+      - name: Seal private four-case evidence
+        if: always() && inputs.sql_four_case_mode && steps.matrix.outcome != 'skipped'
+        env:
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+          ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
+        run: python3 -B scripts/ops/four_case_job.py seal
       - name: Preserve encrypted four-case evidence
         if: always() && inputs.sql_four_case_mode && steps.matrix.outcome != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: native-sql-four-case-matrix
-          path: native-sql-four-case-export/
+          path: |
+            native-sql-four-case-export/private-evidence.cms
+            native-sql-four-case-export/public.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 7

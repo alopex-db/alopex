@@ -38,7 +38,7 @@ class WorkflowContract(unittest.TestCase):
         qualification = workflow.split('  qualification:\n', 1)[1].split('  wal_cost_682:\n', 1)[0]
         self.assertIn("inputs.issue_number == '804'", qualification)
         self.assertIn("inputs.issue_number == '712'", qualification)
-        self.assertIn('scripts/ops/same_job_four_case.py', qualification)
+        self.assertIn('scripts/ops/four_case_job.py run', qualification)
         self.assertIn('wal_cost_mode:', workflow)
         self.assertIn("inputs.issue_number == '682'", workflow)
         self.assertIn('!inputs.sql_four_case_mode && !inputs.wal_cost_mode', workflow)
