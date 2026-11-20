@@ -9,6 +9,7 @@ output=$4
 case "$url" in
     https://api.github.com/repos/*/releases/assets/*) ;;
     https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz) ;;
+    https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar) ;;
     *) exit 64 ;;
 esac
 case "$expected_sha" in *[!0-9a-f]*|'') exit 64 ;; esac

@@ -15,7 +15,7 @@ from common import atomic_json
 from orchestrate import (QUALIFICATION_CASES, SOURCE_COMMIT, SOURCE_TREE,
                          commit, digest, plan, require, sha256)
 
-LOCK_SHA256 = "37d2499475142c5f5341296c3ce90e5a2d7b4d95a803375ee56dacf7932b50f7"
+LOCK_SHA256 = "5135a640122ec13bd61fb9ef29371a9b45f020f7395dfc16719a4a1fe945c00b"
 SECCOMP_SHA256 = "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74"
 PIN_FIELDS = {"source_commit", "source_tree", "artifact_id", "artifact_sha256",
               "assets_digest", "server_sha256", "wheel_sha256", "controller_commit",
