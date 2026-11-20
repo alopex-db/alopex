@@ -203,3 +203,66 @@ python3 -B -m unittest discover -s scripts/ops/wal_cost_next -p 'test_*.py'
 The historical PEM fixture under `scripts/ops/tests/fixtures` is public test
 input only, never a production trust source. Keep it fixed when rotating the
 active certificate so expiry-boundary tests remain deterministic.
+
+
+## Recurring operation and private acceptance tool
+
+Proposed recurring policy and the explicit approval request are in
+[the operator decision record](native-evidence-operation-approval-20261121.md).
+They are not approved policy until the owner accepts that record.
+
+`native-evidence-expiry.yml` checks the selected candidate and the frozen WAL
+recipient daily at 00:17 UTC (09:17 JST). It derives the frozen ref and hash from
+the candidate workflow, so changing the approved comparator does not leave a
+second stale hard-coded monitor target. Either recipient with 14 days or less
+remaining fails the job. Failure of the current check does not skip the frozen
+check. Notification delivery must be tested under the owner's Actions
+notification settings; an unsuccessful run alone is not proof of receipt.
+GitHub schedules require the workflow to exist on the default branch. This
+candidate-targeted draft does not activate monitoring. Activation requires a
+separate reviewed default-branch deployment after the candidate tool is merged,
+a manual normal/expiry notification drill, and explicit owner approval. Future
+release branch changes require updating the monitor target with the release
+handover; missing branches/scripts are failures, not silent success.
+
+`verify_evidence_rotation.py` runs on the approved private Linux host, outside
+Actions. It requires independent ledger hashes for the old/new public PEM,
+old ciphertext and decrypted archive bytes. It checks key/certificate pairs,
+rejects key reuse, enforces at least 14 days on the new certificate, verifies the
+old archive hash before decryption, checks decrypted byte equality, confirms
+that the new key cannot decrypt the old archive, and round-trips a synthetic
+receipt with the new recipient. A successful result contains only fixed status
+and public certificate identities. It does not publish, issue, install, select
+an archive destination or alter a repository.
+
+Input private key files must be regular files owned by the invoking user with
+mode 0600. For an encrypted key vault, the custodian materializes a temporary
+unencrypted PEM on the approved encrypted local filesystem and removes it after
+verification; no passphrase is accepted via command line, environment or log.
+The containing directory and TMPDIR must be owner-only on that filesystem.
+Temporary decrypted bytes are removed on success and handled failure; removal
+is not a secure-erasure guarantee and abrupt power loss requires custodian
+cleanup. Never run this verifier with production keys on a hosted CI runner.
+Restore each backup to a separate owner-only path and repeat the check before
+recording backup recoverability as passed.
+
+Example structure (replace paths privately; do not paste real paths/keys into
+an Issue). Hash inputs must come from the approved private ledger, not be
+computed from an untrusted archive and immediately accepted as their own proof:
+
+```sh
+python3 -B scripts/ops/verify_evidence_rotation.py \
+  --old-certificate /private/old/cert.pem --old-key /private/old/key.pem \
+  --new-certificate /private/new/cert.pem --new-key /private/new/key.pem \
+  --archived-cms /private/archive/evidence.cms \
+  --old-certificate-sha256 OLD_REVIEWED_PEM_SHA256 \
+  --new-certificate-sha256 NEW_REVIEWED_PEM_SHA256 \
+  --ciphertext-sha256 ORIGINAL_CIPHERTEXT_SHA256 \
+  --plaintext-sha256 ORIGINAL_ARCHIVE_SHA256
+```
+
+If the historical plaintext digest was never recorded, do not invent one or
+mark byte-equality verification complete. The custodian must instead approve a
+receipt-level validation against the original run/source/schema and independent
+acceptance records, preserving that limitation. This tool's strict digest mode
+will remain blocked until an independently established expected digest exists.
