@@ -27,13 +27,15 @@ def assignments(source):
 
 
 class DiagnosticQualificationCopyTests(unittest.TestCase):
-    def test_frozen_security_execution_and_current_controller(self):
+    def test_frozen_security_execution_and_pinned_diagnostic_controller(self):
         base, copied = BASE.read_text(), COPY.read_text()
         old, new = assignments(base), assignments(copied)
         pin = json.loads(LOCK.read_text())["pin"]
         for key in ("HARNESS", "LOCK_DIGEST", "POLICY_DIGEST",
-                    "EXPECTED_DOCKER_VERSION", "CONTROLLER_DIGEST"):
+                    "EXPECTED_DOCKER_VERSION"):
             self.assertEqual(new[key], old[key], key)
+        # The diagnostic source lock remains frozen while the selected #804
+        # controller pin follows current scripts/test-env bytes.
         self.assertEqual(new["CONTROLLER_DIGEST"], pin["controller_digest"])
         old_functions, new_functions = definitions(base), definitions(copied)
         for name in ("create_profile", "execute", "encrypt_evidence", "main",

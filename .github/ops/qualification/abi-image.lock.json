@@ -283,7 +283,7 @@
           "path": "deps/locales_2.39-0ubuntu8.9_all.deb",
           "sha256": "f8310ef4ba442845cf5d44a5ce3d5d7accb659bae96b3a0999002132209cd367",
           "size": 4231704,
-          "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/locales_2.39-0ubuntu8.9_all.deb"
+          "url": "https://snapshot.ubuntu.com/ubuntu/20261101T000000Z/pool/main/g/glibc/locales_2.39-0ubuntu8.9_all.deb"
         },
         {
           "path": "deps/python3-pkg-resources_68.1.2-2ubuntu1.2_all.deb",

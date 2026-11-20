@@ -179,10 +179,19 @@ enum TableLifecycleCandidate {
 // This diagnostic is disabled unless the dedicated private lane opts in.
 // A parsed UUID cannot carry SQL, row values, a URL or a machine path into logs.
 fn sql_timing_id(correlation_id: &str) -> Option<Uuid> {
+    #[cfg(test)]
+    if let Some(enabled) = SQL_TIMING_TEST_OVERRIDE.with(|override_| override_.get()) {
+        return sql_timing_id_when(enabled, correlation_id);
+    }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let enabled = *ENABLED
         .get_or_init(|| matches!(std::env::var("ALOPEX_SQL_TIMING"), Ok(value) if value == "1"));
     sql_timing_id_when(enabled, correlation_id)
+}
+
+#[cfg(test)]
+thread_local! {
+    static SQL_TIMING_TEST_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 fn sql_timing_id_when(enabled: bool, correlation_id: &str) -> Option<Uuid> {
@@ -608,6 +617,9 @@ pub(crate) async fn execute_session_statements_with_routing(
 )> {
     let deadline = tokio::time::Instant::now() + timeout;
     let trace_id = sql_timing_id(correlation_id);
+    // Session SQL reuses an open transaction. Keep its acquisition and
+    // bookkeeping stages distinct from non-session begin/commit timings.
+    let setup_started = trace_id.map(|_| Instant::now());
     let operation_started = trace_id.map(|_| Instant::now());
     let handle = match wait_until_deadline(
         deadline,
@@ -710,6 +722,10 @@ pub(crate) async fn execute_session_statements_with_routing(
             Some(CatalogTxnOperation::Read { _guard: catalog })
         }
     };
+    if let Some(started) = setup_started {
+        log_sql_timing(trace_id, "session_setup", started.elapsed());
+    }
+    let plan_started = trace_id.map(|_| Instant::now());
     let routing_plan = match wait_until_deadline(
         deadline,
         route_session_sql(&state, &handle, sql, correlation_id),
@@ -721,6 +737,9 @@ pub(crate) async fn execute_session_statements_with_routing(
             return Err(ServerError::Timeout("query timeout".into()));
         }
     };
+    if let Some(started) = plan_started {
+        log_sql_timing(trace_id, "route_plan", started.elapsed());
+    }
     if let Some(diagnostic) = future_distributed_diagnostic(&routing_plan.diagnostics) {
         return Err(future_distributed_error(diagnostic));
     }
@@ -766,6 +785,7 @@ pub(crate) async fn execute_session_statements_with_routing(
             }
             operation => operation,
         };
+        let execution_started = trace_id.map(|_| Instant::now());
         let execution_outcome = {
             let execution =
                 handle.execute_multi_with_operation_and_trace(&sql, &operation, trace_id);
@@ -786,6 +806,9 @@ pub(crate) async fn execute_session_statements_with_routing(
                 SqlDeadline::Completed(result) => Some((result, false)),
             }
         };
+        if let Some(started) = execution_started {
+            log_sql_timing(trace_id, "execute_multi", started.elapsed());
+        }
         let Some((result, timed_out)) = execution_outcome else {
             if acquired_catalog_writer || retain_catalog_reader {
                 drop(handle.take_catalog_txn_guard(&operation).await);
@@ -794,6 +817,7 @@ pub(crate) async fn execute_session_statements_with_routing(
             return;
         };
 
+        let completion_started = trace_id.map(|_| Instant::now());
         let bookkeeping = statement_effects_after_execution(&state, lifecycle_candidates);
         let completion = match bookkeeping {
             Ok((lifecycle_effects, catalog_rollback_effects)) => {
@@ -815,6 +839,9 @@ pub(crate) async fn execute_session_statements_with_routing(
             Err(err) => Err(err),
         };
 
+        if let Some(started) = completion_started {
+            log_sql_timing(trace_id, "session_completion", started.elapsed());
+        }
         if timed_out {
             if let Err(err) = completion {
                 tracing::error!(error = %err, "timed-out session SQL coordinator failed after responding");
@@ -2572,6 +2599,46 @@ fn is_write_sql(sql: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+
+    struct TimingFields(BTreeMap<String, String>);
+
+    impl Visit for TimingFields {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    struct PrivateTimingEvents(Arc<Mutex<Vec<TimingFields>>>);
+
+    struct TimingOverrideReset;
+
+    impl Drop for TimingOverrideReset {
+        fn drop(&mut self) {
+            SQL_TIMING_TEST_OVERRIDE.with(|override_| override_.set(None));
+        }
+    }
+
+    impl<S: Subscriber> Layer<S> for PrivateTimingEvents {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            if event.metadata().target() != "alopex_sql_private_timing" {
+                return;
+            }
+            let mut fields = TimingFields(BTreeMap::new());
+            event.record(&mut fields);
+            self.0.lock().expect("timing event lock").push(fields);
+        }
+    }
 
     fn done_stream_item() -> StreamItem {
         StreamItem {
@@ -2670,6 +2737,97 @@ mod tests {
         })
         .expect("server");
         (temp_dir, server.state)
+    }
+
+    #[tokio::test]
+    async fn session_sql_http_route_emits_seven_private_stages_only_when_enabled() {
+        let (_temp_dir, state) = catalog_guard_test_server();
+        let session_id = state
+            .session_manager
+            .create_session()
+            .await
+            .expect("session");
+        state
+            .session_manager
+            .begin_transaction(&session_id)
+            .await
+            .expect("transaction");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(PrivateTimingEvents(events.clone()));
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let sql = "SELECT 1 AS private_sql_marker";
+        let diagnostic_id = "diag-550e8400-e29b-41d4-a716-446655440000";
+        let _override_reset = TimingOverrideReset;
+        SQL_TIMING_TEST_OVERRIDE.with(|override_| override_.set(Some(true)));
+        let response = handle(
+            Extension(state.clone()),
+            Extension(RequestContext {
+                correlation_id: diagnostic_id.into(),
+                actor: None,
+            }),
+            Json(SqlRequest {
+                sql: sql.into(),
+                session_id: Some(session_id.to_string()),
+                streaming: false,
+            }),
+        )
+        .await;
+        assert!(response.status().is_success(), "session SQL response");
+        {
+            let captured = events.lock().expect("timing event lock");
+            let mut stages = BTreeMap::<String, usize>::new();
+            for event in captured.iter() {
+                let stage = event.0.get("stage").expect("stage field");
+                *stages
+                    .entry(stage.trim_matches('"').to_string())
+                    .or_default() += 1;
+                assert_eq!(
+                    event.0.get("trace_id").map(|value| value.trim_matches('"')),
+                    Some("550e8400-e29b-41d4-a716-446655440000")
+                );
+                assert_eq!(
+                    event.0.keys().map(String::as_str).collect::<Vec<_>>(),
+                    ["duration_ns", "message", "stage", "trace_id"]
+                );
+                let payload = format!("{:?}", event.0);
+                assert!(
+                    !payload.contains("private_sql_marker"),
+                    "SQL leaked into timing event"
+                );
+                assert!(!payload.contains("/sql"), "URL leaked into timing event");
+            }
+            assert_eq!(
+                stages,
+                BTreeMap::from([
+                    ("execute_and_map".into(), 1),
+                    ("execute_multi".into(), 1),
+                    ("response_build".into(), 1),
+                    ("result_map".into(), 1),
+                    ("route_plan".into(), 1),
+                    ("session_completion".into(), 1),
+                    ("session_setup".into(), 1),
+                ])
+            );
+        }
+
+        for (enabled, correlation_id) in [(false, diagnostic_id), (true, "ordinary-request")] {
+            SQL_TIMING_TEST_OVERRIDE.with(|override_| override_.set(Some(enabled)));
+            let response = handle(
+                Extension(state.clone()),
+                Extension(RequestContext {
+                    correlation_id: correlation_id.into(),
+                    actor: None,
+                }),
+                Json(SqlRequest {
+                    sql: sql.into(),
+                    session_id: Some(session_id.to_string()),
+                    streaming: false,
+                }),
+            )
+            .await;
+            assert!(response.status().is_success(), "session SQL response");
+            assert_eq!(events.lock().expect("timing event lock").len(), 7);
+        }
     }
 
     #[tokio::test]

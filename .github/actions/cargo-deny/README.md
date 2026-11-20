@@ -10,6 +10,7 @@ GitHub release URL and checks its byte length and SHA256 before extraction.
 This avoids the unauthenticated asset API's HTTP 403 response in CI without
 passing a download error response to tar. No credentials are supplied.
 
-`download.sh` is also used for the pinned TLC JAR. It limits transfer size and
-retry time, verifies bytes in a temporary file, and only then replaces the
-destination. Failed downloads remove their temporary file.
+`download.sh` is also used for the pinned TLC 1.7.4 JAR. Its canonical release
+URL avoids the same unauthenticated asset API failure. The script limits transfer
+size and retry time, verifies bytes in a temporary file, and only then replaces
+the destination. Failed downloads remove their temporary file.
