@@ -141,6 +141,15 @@ check_release_workflow_contract() {
     local ci_workflow="${PROJECT_ROOT}/.github/workflows/ci.yml"
     local release_workflow="${PROJECT_ROOT}/.github/workflows/release.yml"
     local py_release_workflow="${PROJECT_ROOT}/.github/workflows/alopex-py-release.yml"
+    local release_version major minor patch
+    release_version="$(sed -n 's/^version = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' "${PROJECT_ROOT}/Cargo.toml" | head -1)"
+    if [[ ! "${release_version}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        log_error "Workspace release version is invalid"
+        exit 1
+    fi
+    major=$((10#${BASH_REMATCH[1]}))
+    minor=$((10#${BASH_REMATCH[2]}))
+    patch=$((10#${BASH_REMATCH[3]}))
 
     require_file_not_contains "${ci_workflow}" "scripts/release/v07_gate\\.sh" \
         "normal CI does not nest the historical v0.7 gate"
@@ -152,8 +161,10 @@ check_release_workflow_contract() {
         "release workflow accepts repository release tags"
     require_file_contains "${release_workflow}" "alopex-linux-x86_64" \
         "release workflow publishes Linux CLI artifact"
-    require_file_contains "${release_workflow}" "alopex-macos-x86_64" \
-        "release workflow publishes macOS x86_64 CLI artifact"
+    if (( major == 0 && (minor < 8 || (minor == 8 && patch < 17)) )); then
+        require_file_contains "${release_workflow}" "alopex-macos-x86_64" \
+            "legacy release workflow publishes macOS x86_64 CLI artifact"
+    fi
     require_file_contains "${release_workflow}" "alopex-macos-aarch64" \
         "release workflow publishes macOS aarch64 CLI artifact"
     require_file_contains "${release_workflow}" "alopex-windows-x86_64\\.exe" \
