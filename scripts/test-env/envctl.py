@@ -112,7 +112,8 @@ def fetch(profile, docker, budget):
             except (TimeoutError, urllib.error.URLError) as error:
                 timed_out = isinstance(error, TimeoutError) or isinstance(
                     getattr(error, "reason", None), TimeoutError)
-                if not timed_out or attempt == 2:
+                unavailable = isinstance(error, urllib.error.HTTPError) and error.code == 503
+                if not (timed_out or unavailable) or attempt == 2:
                     raise
                 budget.check()
                 time.sleep(1 << attempt)

@@ -57,6 +57,7 @@ class AdmissionContract(unittest.TestCase):
                         patch.object(wrapper, 'verify_frozen_checkout',
                                      side_effect=RuntimeError(reason) if failure == 'identity'
                                      else None), \
+                        patch.object(wrapper, 'verify_product_artifacts'), \
                         patch.object(wrapper, 'head', return_value=sha), \
                         patch.object(wrapper, 'load_qualification_module', return_value=module), \
                         redirect_stdout(stdout):
@@ -127,10 +128,50 @@ class AdmissionContract(unittest.TestCase):
         config_path = HERE / 'exact-a415-wal-cost-input.private.json'
         config = json.loads(config_path.read_text())
         self.assertEqual(wrapper.sha(config_path),
-                         '24c31ed86f5643edfef6789b345e12d610e71d05c1c3a905d84e17c3771c055b')
+                         '6cfd541fee14812b6ecda2a51c839e1048116ea023b7124be84e4292d5b34d66')
         self.assertEqual(config['stage_seconds'], 5400)
         self.assertEqual(config['cell_seconds'], 30)
         self.assertEqual(set(config['products']), {'before', 'candidate'})
+
+    def test_artifact_preflight_rejects_missing_or_changed_baseline(self):
+        products = {name: {'run': number, 'controller': name + '-head',
+                           'artifact_name': name + '-assets', 'artifact_id': number + 1,
+                           'artifact_digest': name + '-digest'}
+                    for name, number in (('before', 10), ('candidate', 20))}
+
+        def response(command, **_):
+            endpoint = command[-1]
+            name = 'before' if '/10' in endpoint else 'candidate'
+            producer = products[name]
+            if endpoint.endswith('/artifacts'):
+                payload = {'artifacts': [{'name': producer['artifact_name'],
+                                          'id': producer['artifact_id'],
+                                          'expired': state['expired'] == name,
+                                          'digest': producer['artifact_digest'],
+                                          'size_in_bytes': 100}]}
+                if state['missing'] == name:
+                    payload['artifacts'] = []
+                elif state['changed'] == name:
+                    payload['artifacts'][0]['digest'] = 'changed'
+            else:
+                payload = {'head_sha': producer['controller'], 'status': 'completed',
+                           'conclusion': 'success', 'event': 'workflow_dispatch',
+                           'head_repository': {'full_name': 'alopex-db/alopex'}}
+            return types.SimpleNamespace(stdout=json.dumps(payload))
+
+        state = {'missing': None, 'changed': None, 'expired': None}
+        with patch.object(wrapper.subprocess, 'run', side_effect=response) as call:
+            wrapper.verify_product_artifacts({'products': products})
+            self.assertEqual(call.call_count, 4)
+            state['missing'] = 'before'
+            with self.assertRaisesRegex(RuntimeError, 'artifact differs: before'):
+                wrapper.verify_product_artifacts({'products': products})
+            state['missing'], state['changed'] = None, 'candidate'
+            with self.assertRaisesRegex(RuntimeError, 'artifact differs: candidate'):
+                wrapper.verify_product_artifacts({'products': products})
+            state['changed'], state['expired'] = None, 'before'
+            with self.assertRaisesRegex(RuntimeError, 'artifact differs: before'):
+                wrapper.verify_product_artifacts({'products': products})
 
 
 if __name__ == '__main__':

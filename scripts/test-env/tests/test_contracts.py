@@ -29,7 +29,7 @@ class Fixture(unittest.TestCase):
 
 
 class LockedFetch(Fixture):
-    def test_only_transport_timeout_retries_pinned_bytes(self):
+    def test_timeout_or_service_unavailable_retries_pinned_bytes(self):
         import envctl
         body = b"verified package"
         item = {"path": "deps/package.deb", "url": "https://archive.ubuntu.com/package.deb",
@@ -44,6 +44,17 @@ class LockedFetch(Fixture):
              patch.object(envctl.urllib.request, "build_opener", return_value=opener), \
              patch.object(envctl.time, "sleep") as sleep:
             opener.open.side_effect = [urllib.error.URLError(TimeoutError("handshake")),
+                                       io.BytesIO(body)]
+            envctl.fetch(profile, docker, budget)
+            self.assertEqual(opener.open.call_count, 2)
+            sleep.assert_called_once_with(1)
+            self.assertEqual((self.root / "cache/deps/package.deb").read_bytes(), body)
+            self.assertFalse((self.root / "cache/deps/package.deb.pending").exists())
+            (self.root / "cache/deps/package.deb").unlink()
+            opener.reset_mock()
+            sleep.reset_mock()
+            opener.open.side_effect = [urllib.error.HTTPError(item["url"], 503,
+                                                              "unavailable", None, None),
                                        io.BytesIO(body)]
             envctl.fetch(profile, docker, budget)
             self.assertEqual(opener.open.call_count, 2)
@@ -71,6 +82,15 @@ class LockedFetch(Fixture):
                 envctl.fetch(profile, docker, budget)
             self.assertEqual(opener.open.call_count, 3)
             self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+            opener.reset_mock()
+            sleep.reset_mock()
+            opener.open.side_effect = [urllib.error.HTTPError(item["url"], 503,
+                                                               "unavailable", None, None)] * 3
+            with self.assertRaises(urllib.error.HTTPError):
+                envctl.fetch(profile, docker, budget)
+            self.assertEqual(opener.open.call_count, 3)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+            self.assertFalse((self.root / "cache/deps/package.deb.pending").exists())
 
 
 class ExecutionMode(unittest.TestCase):

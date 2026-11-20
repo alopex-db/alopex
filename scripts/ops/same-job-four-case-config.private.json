@@ -2,7 +2,7 @@
   "candidate_commit": "a4158b873963dd79c7844953d64a8b511ee75fde",
   "candidate_tree": "99de240db970a91057ea60852bd2688c1d879fc8",
   "docs_harness_digest": "9012c7ead25e606fbe945298b435cdae2a02a6d293a946c44fd07dbc69c60b37",
-  "image_lock_sha256": "37d2499475142c5f5341296c3ce90e5a2d7b4d95a803375ee56dacf7932b50f7",
+  "image_lock_sha256": "5135a640122ec13bd61fb9ef29371a9b45f020f7395dfc16719a4a1fe945c00b",
   "limits": {
     "case_seconds": 300,
     "run_seconds": 420
