@@ -80,6 +80,17 @@ raise SystemExit(int(os.environ.get('FAKE_CODE', '0')))
                 self.assert_rejected_without_replacing_output(
                     self.run_download(digest=digest, size=size, url=url))
 
+    def test_canonical_tlc_url_publishes_only_verified_bytes(self):
+        url = 'https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar'
+        result = self.run_download(url=url)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.output.read_bytes(), self.payload.read_bytes())
+        self.assertIn(url, (self.root / 'arguments').read_text().splitlines())
+
+        self.output.write_bytes(b'previous verified bytes')
+        self.assert_rejected_without_replacing_output(
+            self.run_download(digest='0' * 64, url=url))
+
     def test_http_error_after_partial_write_is_never_published(self):
         self.output.write_bytes(b'previous verified bytes')
         self.env['FAKE_CODE'] = '22'

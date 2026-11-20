@@ -50,6 +50,13 @@ jobs:
           python3 -B -m unittest discover -s scripts/ops/tests \
             -p test_s04_wire_preflight.py \
             -k test_real_unix_peer_pidfd_tracks_exit_without_docker -v
+      - name: Verify signed-index capture and WAL controller contracts
+        env:
+          PYTHONPATH: scripts/test-env:scripts/ops
+        run: |
+          python3 -B -m unittest discover -s scripts/ops/wal_cost_next -p 'test_*.py' -v
+          python3 -B -m unittest discover -s scripts/ops/tests -p 'test_wal_cost_next*.py' -v
+          python3 -B scripts/ops/tests/test_sql_diagnostic_qualification_copy.py -v
       - name: Classify production and release-process changes
         id: classify
         shell: bash
@@ -97,7 +104,7 @@ jobs:
         shell: bash
         run: |
           bash .github/actions/cargo-deny/download.sh \
-            https://api.github.com/repos/tlaplus/tlaplus/releases/assets/184694200 \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar \
             936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88 \
             2274532 "${RUNNER_TEMP}/tla2tools.jar"
           echo "bee4a54f3ee3d4afc347c3240ec2d9e93b075104  ${RUNNER_TEMP}/tla2tools.jar" | sha1sum -c -

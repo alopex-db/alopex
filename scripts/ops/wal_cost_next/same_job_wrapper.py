@@ -77,6 +77,31 @@ def verify_frozen_checkout(repo, config, expected_sha):
             'frozen limits differ')
 
 
+def verify_product_artifacts(config):
+    """Reject missing pinned wheels before the costly same-run qualification."""
+    for subject in ('before', 'candidate'):
+        producer = config['products'][subject]
+        endpoint = 'repos/alopex-db/alopex/actions/runs/' + str(producer['run'])
+        run = subprocess.run(['gh', 'api', endpoint], stdin=subprocess.DEVNULL,
+                             capture_output=True, text=True, timeout=30, check=True)
+        record = json.loads(run.stdout)
+        require(record['head_sha'] == producer['controller'] and
+                record['status'] == 'completed' and record['conclusion'] == 'success' and
+                record['event'] == 'workflow_dispatch' and
+                record['head_repository']['full_name'] == 'alopex-db/alopex',
+                f'producer differs: {subject}')
+        response = subprocess.run(['gh', 'api', endpoint + '/artifacts'],
+                                  stdin=subprocess.DEVNULL, capture_output=True,
+                                  text=True, timeout=30, check=True)
+        matches = [item for item in json.loads(response.stdout)['artifacts']
+                   if item['name'] == producer['artifact_name']]
+        require(len(matches) == 1 and matches[0]['id'] == producer['artifact_id'] and
+                not matches[0]['expired'] and
+                matches[0]['digest'] == producer['artifact_digest'] and
+                0 < matches[0]['size_in_bytes'] < 64_000_000,
+                f'artifact differs: {subject}')
+
+
 def verify_qualification(public, private, module, run_id, facts):
     require(public['schema'] == 'alopex.hosted-test-env-qualification/v1' and
             public['case'] == 'HOST_QUALIFICATION' and public['outcome'] == 'passed' and
@@ -164,6 +189,7 @@ def run(args):
     verify_frozen_checkout(args.frozen_checkout, config, config['sources']['scripts/ops/wal_cost_contract.py'])
     require(head(args.qualification_checkout) == os.environ['GITHUB_SHA'] ==
             os.environ['EXPECTED_CONTROLLER_SHA'], '#804 source checkout differs')
+    verify_product_artifacts(config)
     module = load_qualification_module(args.qualification_checkout)
     module.verified_controller()
     private = Path(os.environ['RUNNER_TEMP']) / 'alopex-804-qualification'
@@ -184,6 +210,24 @@ def run(args):
         run_phase(args.qualification_checkout, flag, environment)
     public = read(args.qualification_checkout / 'native-qualification-export/public.json')
     prior = verify_qualification(public, private, module, os.environ['GITHUB_RUN_ID'], module.admission_facts())
+    from capture_signed_indexes import capture
+    from seal_signed_indexes import seal as seal_indexes
+    same_host(prior, module.admission_facts())
+    try:
+        capture(module, prior, private)
+    except BaseException as error:
+        error.wrapper_phase = 'capture_signed_indexes'
+        raise
+    try:
+        signed_receipt = seal_indexes(
+            private,
+            args.qualification_checkout / '.github/ops/native-evidence-cert.pem',
+            Path(os.environ['GITHUB_WORKSPACE']) / 'signed-index-export')
+        require(signed_receipt is not None and signed_receipt.get('outcome') == 'passed',
+                'signed index evidence incomplete')
+    except BaseException as error:
+        error.wrapper_phase = 'seal_signed_indexes'
+        raise
     environment['WAL_COST_CONFIG'] = base64.b64encode(args.config.read_bytes()).decode('ascii')
     monitor_comparator(args.frozen_checkout, config, module, prior, private, environment)
 
@@ -198,6 +242,23 @@ def seal_wrapper_failure(error):
         return  # Preserve the comparator's original error and cleanup result.
     payload = {'run_id': os.environ.get('GITHUB_RUN_ID'),
                'pre_comparator_error': True, 'original_error': repr(error)[:4096],
+               'wrapper_phase': getattr(error, 'wrapper_phase', None),
+               'capture_stage': (getattr(error, 'capture_stage', None)
+                                 if getattr(error, 'capture_stage', None) in (
+                                     'capture_admission', 'capture_prerequisites',
+                                     'capture_monitor_start', 'capture_image',
+                                     'capture_file_budget', 'capture_bootstrap_budget',
+                                     'capture_container_create', 'capture_container_budget',
+                                     'capture_container_stage', 'capture_resolver',
+                                     'capture_collect', 'capture_proof',
+                                     'capture_final_budget') else None),
+               'capacity_gate': (error.detail if getattr(error, 'code', None) == 'CAPACITY' and
+                                 getattr(error, 'detail', None) in (
+                                     'capture_original_allowance', 'capture_host_stop',
+                                     'capture_free_space', 'capture_planned_budget',
+                                     'capture_collected_size',
+                                     'host_stop', 'host_growth', 'capture_stage_growth')
+                                 else None),
                'cleanup_error': None, 'comparator_exit': None,
                'all_owned_children_waited': False}
     with receipt.open('x', encoding='utf-8') as output:

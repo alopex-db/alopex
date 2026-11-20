@@ -20,14 +20,14 @@
     },
     "before": {
       "run": 42432889541,
-      "artifact_id": 13598092686,
-      "artifact_digest": "sha256:baac0f36215a58584b5c61539074f1b938a97db72b50044d6aa407a1be05ab26",
+      "artifact_id": 14241221158,
+      "artifact_digest": "sha256:7dc3879bff20c7c0732aa47dc1ea2f21c631a2cc058870b8e23c0d167ee9be01",
       "controller": "80ed56af2914fb710427f281ee6c7ff902deb8c3",
       "artifact_name": "native-wheel-assets",
-      "manifest_sha256": "90473c8dae546c1c40b2359f0ead2144db12c57a5e1d3b969b45a280c824239c",
+      "manifest_sha256": "bcaa0ce8af08a52e1d4858efd98f900fae67eaeffa715a33deb3ddc4ff6955c4",
       "source_commit": "d995c550152e734ce821eb3de93180b533aad2f7",
       "source_tree": "09a42bade3400f91836a59ba3104a3dd907704b3",
-      "wheel_sha256": "47d96fa46b34d61aaa4198ca82887eabf2923f5a5eacb6e879ff676ccea2f507",
+      "wheel_sha256": "c7a11d871447cb3b88fd18b311cb55dd25400cd571870956d095929e3dc823db",
       "native_sha256": "2c837432a658f0bd629de719a033b2190e2217000e3e5eb16b4fbaaca841ab08"
     }
   },
