@@ -369,7 +369,7 @@ fn existing_container_copy_respects_exact_temporary_budget() {
         }
         let before = fs::read(&path).unwrap();
         let mut options = limits();
-        options.container_fence_bytes = before.len() as u64 - extra;
+        options.container_fence_bytes = Some(before.len() as u64 - extra);
         let result = LsmKV::open_with_overflow(&data, config(), options);
         if extra == 0 {
             assert!(result.is_ok());

@@ -135,14 +135,23 @@ fn windows_fenced_retry_requires_publication_and_keeps_bytes_on_sharing_failure(
 
 #[cfg(windows)]
 #[test]
-fn windows_fenced_retry_respects_copy_budget() {
+fn windows_fenced_retry_ignores_first_fence_copy_budget() {
     let (dir, path, original) = fixture();
     fence_container(&path, dir.path(), 0, original.len() as u64).unwrap();
     let fenced = fs::read(&path).unwrap();
-    assert!(matches!(
-        fence_container(&path, dir.path(), 0, original.len() as u64 - 1),
-        Err(Error::WalCapacityExceeded { .. })
-    ));
+    fence_container(&path, dir.path(), 0, 0).unwrap();
     assert_eq!(fs::read(&path).unwrap(), fenced);
     assert!(!path.with_extension("overflow-fence").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_fenced_retry_reclaims_redundant_staging_with_small_budget() {
+    let (dir, path, original) = fixture();
+    fence_container(&path, dir.path(), 0, original.len() as u64).unwrap();
+    let fenced = fs::read(&path).unwrap();
+    fs::write(path.with_extension("overflow-fence"), &original).unwrap();
+    fence_container(&path, dir.path(), 0, 0).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), fenced);
+    assert_fenced(&path);
 }
