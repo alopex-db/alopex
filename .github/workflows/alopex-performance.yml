@@ -256,6 +256,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+      - name: Check evidence recipient validity before work
+        run: python3 -B scripts/ops/check_evidence_certificate.py --minimum-seconds 86400
       - name: Collect encrypted read-only host inventory
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -421,6 +423,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+      - name: Check evidence recipient validity before work
+        run: python3 -B scripts/ops/check_evidence_certificate.py --minimum-seconds 86400
       - name: Install independently pinned four-case inputs
         if: inputs.sql_four_case_mode
         env:
@@ -731,12 +735,16 @@ jobs:
         with:
           fetch-depth: 1
           path: qualification-controller
+      - name: Check evidence recipient validity before work
+        run: python3 -B qualification-controller/scripts/ops/check_evidence_certificate.py --minimum-seconds 86400
       - name: Stage frozen #682 comparator in measured workspace
         uses: actions/checkout@v4
         with:
           ref: 490f002dfb2c7f509a2444891808d9704fe6b001
           fetch-depth: 1
           path: frozen-wal-controller
+      - name: Check evidence recipient validity before work
+        run: python3 -B qualification-controller/scripts/ops/check_evidence_certificate.py --certificate frozen-wal-controller/.github/ops/native-evidence-cert.pem --expected-sha256 d33a612dab2f76986e0dc6ba0ba45be15265ceccd2d56b07c14f9f696259f6b2 --minimum-seconds 86400
       - name: Qualify, capture signed indexes, measure WAL, and check candidate closure
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
@@ -880,6 +888,8 @@ jobs:
           ref: ${{ inputs.expected_controller_sha }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Check evidence recipient validity before work
+        run: python3 -B scripts/ops/check_evidence_certificate.py --minimum-seconds 86400
       - name: Inspect selected Docker context read-only
         id: inspect
         run: |

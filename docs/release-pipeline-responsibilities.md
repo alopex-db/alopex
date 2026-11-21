@@ -82,6 +82,7 @@ job's owner.
 | `parity-harness.yml:contract` | Development CI | benchmark harness contract result |
 | `parity-performance.yml:performance` | Extended Verification | exact-SHA canonical benchmark JSON/Markdown and raw evidence |
 | `parity-performance.yml:retain-run-outcome` | Extended Verification | runner-independent exact-SHA terminal run outcome |
+| `native-evidence-expiry.yml:recipients` | Extended Verification | scheduled read-only recipient certificate renewal-deadline check for candidate and frozen comparator |
 | `public-release-verification.yml:verify` | Stable Delivery | package reachability and minimal import |
 | `public-release-verification.yml:publish` | Stable Delivery | immutable public run report |
 | `public-release-verification.yml:publish-vector-benchmark` | Stable Delivery | validated projection of retained exact-SHA evidence into public docs |
