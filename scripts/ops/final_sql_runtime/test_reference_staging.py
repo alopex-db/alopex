@@ -93,6 +93,23 @@ class ReferenceStagingTest(unittest.TestCase):
         self.lock["originals"]["before"]["basename"] = "before\n.zip"
         self.rejects("LOCK_PIN")
 
+    def test_handoff_gate_requires_exact_private_empty_file(self):
+        gate = Path(self.temp.name) / "ready"
+        with self.assertRaisesRegex(ValueError, "^GATE_TIMEOUT$"):
+            staging.wait_for_handoff_gate(gate, timeout_seconds=1)
+        gate.write_bytes(b"ready")
+        gate.chmod(0o400)
+        with self.assertRaisesRegex(ValueError, "^GATE_PRIVACY$"):
+            staging.wait_for_handoff_gate(gate)
+        gate.chmod(0o600)
+        gate.write_bytes(b"")
+        gate.chmod(0o400)
+        staging.wait_for_handoff_gate(gate)
+        gate.unlink()
+        gate.symlink_to(self.directory)
+        with self.assertRaisesRegex(ValueError, "^GATE_PRIVACY$"):
+            staging.wait_for_handoff_gate(gate)
+
 
 if __name__ == "__main__":
     unittest.main()

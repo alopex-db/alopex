@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import time
 
 
 SUBJECTS = frozenset(("before", "published", "postgresql"))
@@ -19,6 +20,7 @@ MAX_ORIGINAL_BYTES = 1_000_000_000
 CHUNK = 1024 * 1024
 LOCK = Path(__file__).with_name("reference-originals.lock.json")
 ORIGINAL_NAME = re.compile(r"[a-z][a-z0-9-]{0,95}\.zip")
+MAX_GATE_WAIT_SECONDS = 900
 
 
 def _require(condition: bool, code: str) -> None:
@@ -68,6 +70,30 @@ def _identity(run: dict, expected: dict) -> None:
              run["repository_id"] == expected["repository_id"] and
              type(run["workflow_id"]) is int and
              run["workflow_id"] == expected["workflow_id"], "WORKFLOW_IDENTITY")
+
+
+def wait_for_handoff_gate(path: Path, *, timeout_seconds: int = 600) -> None:
+    """Wait for the host's completion marker before reading staged ZIPs.
+
+    The marker is a readiness signal, not authorization: the host must first
+    verify the assigned job through the independent Actions API, then copy
+    the originals. ``verify_staging`` still checks every file after the gate.
+    """
+    _require(isinstance(path, Path) and path.is_absolute() and
+             type(timeout_seconds) is int and
+             0 < timeout_seconds <= MAX_GATE_WAIT_SECONDS, "GATE_INPUT")
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            _require(time.monotonic() < deadline, "GATE_TIMEOUT")
+            time.sleep(min(1, max(0, deadline - time.monotonic())))
+            continue
+        _require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and
+                 stat.S_IMODE(info.st_mode) == 0o400 and info.st_size == 0,
+                 "GATE_PRIVACY")
+        return
 
 
 def verify_staging(directory: Path, *, run: dict, expected: dict, lock: dict) -> dict:
@@ -131,8 +157,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--head-sha", required=True)
     parser.add_argument("--repository-id", type=int, required=True)
     parser.add_argument("--workflow-id", type=int, required=True)
+    parser.add_argument("--gate-file", type=Path)
+    parser.add_argument("--gate-wait-seconds", type=int, default=600)
     args = parser.parse_args(argv)
     try:
+        if args.gate_file is not None:
+            wait_for_handoff_gate(args.gate_file,
+                                  timeout_seconds=args.gate_wait_seconds)
         lock = json.loads(LOCK.read_text(encoding="utf-8"))
         result = verify_staging(args.directory,
                                 run={"run_id": args.run_id, "run_attempt": args.run_attempt,
