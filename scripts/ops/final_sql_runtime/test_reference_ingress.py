@@ -119,6 +119,10 @@ class ReferenceIngressTest(unittest.TestCase):
         self.pins["before"]["zip_sha256"] = "0" * 64
         self.assert_rejected("ORIGINAL_BYTES")
 
+    def test_later_original_failure_removes_earlier_extraction(self):
+        self.pins["published"]["zip_sha256"] = "0" * 64
+        self.assert_rejected("ORIGINAL_BYTES")
+
     def test_extra_duplicate_traversal_and_symlink_member(self):
         for entries, code in (
             ([("before.zip", b"x", 0o100600), ("extra", b"y", 0o100600)], "WRAPPER_MEMBERS"),
