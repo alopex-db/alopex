@@ -133,3 +133,28 @@ def fetch_and_verify(*, repository: str, expected: dict, token: str | None = Non
         transport, f"{base}/actions/runners/{runner_id}", token, deadline)
     return verify_assignment(expected=expected, run=run,
                              attempt_jobs=jobs, runner=runner)
+
+
+def wait_for_assignment(*, repository: str, expected: dict, token: str | None = None,
+                        timeout_seconds: int = 600, poll_seconds: int = 5,
+                        fetch=fetch_and_verify) -> dict:
+    """Bound the host's read-only wait; never reinterpret a mismatch as pending.
+
+    The returned identity is admission for the *next* independent transfer
+    gate, not proof that any bytes have been copied or uploaded.
+    """
+    _review_expected(expected)
+    _require(type(timeout_seconds) is int and 0 < timeout_seconds <= 900 and
+             type(poll_seconds) is int and 0 < poll_seconds <= 30,
+             "HANDOFF_POLL_INPUT")
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        _require(remaining > 0, "HANDOFF_TIMEOUT")
+        result = fetch(repository=repository, expected=expected, token=token,
+                       timeout_seconds=max(1, min(30, int(remaining))))
+        if result is not None:
+            return result
+        remaining = deadline - time.monotonic()
+        _require(remaining > 0, "HANDOFF_TIMEOUT")
+        time.sleep(min(poll_seconds, remaining))

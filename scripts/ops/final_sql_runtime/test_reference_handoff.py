@@ -3,7 +3,7 @@ from contextlib import contextmanager
 import json
 import unittest
 
-from .reference_handoff import fetch_and_verify, verify_assignment
+from .reference_handoff import fetch_and_verify, verify_assignment, wait_for_assignment
 
 
 class JsonResponse:
@@ -108,6 +108,24 @@ class ReferenceHandoffTest(unittest.TestCase):
             "/actions/runners/29"])
         self.assertTrue(all(item[1]["Authorization"] == "Bearer test-token"
                             for item in seen))
+
+    def test_poll_returns_only_after_assignment_and_propagates_mismatch(self):
+        answers = [None, {"job_id": 37}]
+
+        def fetch(**kwargs):
+            return answers.pop(0)
+
+        self.assertEqual(wait_for_assignment(repository="alopex-db/alopex",
+                                             expected=self.expected, token="test-token",
+                                             timeout_seconds=2, poll_seconds=1,
+                                             fetch=fetch), {"job_id": 37})
+
+        def mismatch(**kwargs):
+            raise ValueError("HANDOFF_RUNNER_OCCUPIED")
+
+        with self.assertRaisesRegex(ValueError, "^HANDOFF_RUNNER_OCCUPIED$"):
+            wait_for_assignment(repository="alopex-db/alopex", expected=self.expected,
+                                token="test-token", fetch=mismatch)
 
 
 if __name__ == "__main__":
