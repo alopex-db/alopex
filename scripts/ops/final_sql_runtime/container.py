@@ -29,6 +29,16 @@ def _runtime():
     return common, capacity, docker_backend, envctl, lifecycle
 
 
+def owned_run_id(kind, config):
+    """Separate four preflight runs from the same coordinates in the matrix."""
+    if kind not in ("preflight", "cell") or type(config) is not dict:
+        raise ValueError("INPUT")
+    coordinate = config.get("id")
+    if type(coordinate) is not str or not coordinate.startswith("sql-") or len(coordinate) > 36:
+        raise ValueError("INPUT")
+    return kind + "-" + coordinate
+
+
 def verify_collected(run, config, kind, assets_digest, *, common):
     """Accept only a complete, hash-bound SQL report from an owned collection."""
     run.verify_collection()
@@ -106,6 +116,7 @@ class ContainerCallbacks:
         profile_path = Path(self.profile_for(kind, config)).resolve(strict=True)
         profile = copy.deepcopy(common.load_profile(profile_path))
         common.require(Path(profile["assets"]).resolve(strict=True) == staged, "IDENTITY")
+        common.require(profile["run_id"] == owned_run_id(kind, config), "IDENTITY")
         common.require(Path(profile["private_output"]).is_dir() and
                        profile["limits"]["case_seconds"] >= worker_timeout_seconds and
                        profile["limits"]["run_seconds"] >= run_timeout_seconds, "POLICY")

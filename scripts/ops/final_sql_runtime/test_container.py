@@ -110,6 +110,15 @@ class CollectedTests(unittest.TestCase):
 
 
 class CallbackTests(unittest.TestCase):
+    def test_preflight_and_matrix_run_ids_are_distinct(self):
+        config = {"id": "sql-select-all-0-published"}
+        self.assertEqual(container.owned_run_id("preflight", config),
+                         "preflight-sql-select-all-0-published")
+        self.assertEqual(container.owned_run_id("cell", config),
+                         "cell-sql-select-all-0-published")
+        with self.assertRaises(ValueError):
+            container.owned_run_id("other", config)
+
     def test_cleanup_collects_before_owned_deletion(self):
         events = []
         class Run:
@@ -148,7 +157,8 @@ class CallbackTests(unittest.TestCase):
             config = {"id": "sql-select-all-0-published", "phase": "preflight"}
             write_json(root / "measurement.json", config)
             write_json(profile_path, {"schema": "profile"})
-            profile = {"assets": str(staged), "private_output": str(root), "run_id": "sql-test",
+            profile = {"assets": str(staged), "private_output": str(root),
+                       "run_id": "preflight-sql-select-all-0-published",
                        "platform": "linux/amd64", "limits": {"case_seconds": 300,
                        "run_seconds": 420}, "storage": {}}
             calls = []
@@ -175,7 +185,7 @@ class CallbackTests(unittest.TestCase):
                                                       runtime=runtime)
             result = callbacks.execute(staged, config,
                 kind="preflight", worker_timeout_seconds=100.5, run_timeout_seconds=120.5)
-            self.assertEqual(result, "sql-test")
+            self.assertEqual(result, "preflight-sql-select-all-0-published")
             self.assertEqual(calls[0][0]["limits"]["case_seconds"], 101)
             self.assertEqual(calls[0][0]["limits"]["run_seconds"], 121)
             self.assertEqual(calls[0][1][-4:], ["python3", "image", "-B", "/input/controller.py"])
