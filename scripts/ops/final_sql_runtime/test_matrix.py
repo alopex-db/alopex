@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import io
+import stat
 import tarfile
 import tempfile
 from pathlib import Path
@@ -62,6 +63,7 @@ class MatrixTests(unittest.TestCase):
                 records[name] = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
             result = matrix.compose_harness(docs, product, records, root / "bundle.tar")
             self.assertEqual(len(result["docs_files"]), 3)
+            self.assertEqual(stat.S_IMODE((root / "bundle.tar").stat().st_mode), 0o600)
             (product / "parity_v0811_measure.py").write_text("changed")
             with self.assertRaises(ValueError):
                 matrix.compose_harness(docs, product, records, root / "bad.tar")

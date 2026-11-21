@@ -39,7 +39,11 @@ def _inventory(items, code):
     require(keys == expected and len(set(keys)) == 48, code)
 
 
-def _read(path):
+def _read(path, *, allow_bytes=False):
+    if allow_bytes:
+        require(type(path) is bytes and 0 < len(path) < 4_000_000,
+                "PRIVATE_FILE")
+        return path
     require(isinstance(path, Path) and path.is_absolute() and not path.is_symlink()
             and path.is_file(), "PRIVATE_FILE")
     return path.read_bytes()
@@ -134,7 +138,7 @@ def audit_completed(operation_result, collections, receipts, pins, authenticate_
             if name in ("measurement", "raw"):
                 require(path not in seen_private, "DUPLICATE_PRIVATE_FILE")
                 seen_private.add(path)
-            data[name] = _read(path)
+            data[name] = _read(path, allow_bytes=name == "harness")
             require(hashlib.sha256(data[name]).hexdigest() == hashes[name],
                     "STALE_OR_SUBSTITUTED_FILE")
         try:

@@ -47,6 +47,9 @@ class AuditBridgeTests(unittest.TestCase):
                         "worker": WORKER, "harness": HARNESS}
             paths = {}
             for name, data in contents.items():
+                if name == "harness":
+                    paths[name] = data
+                    continue
                 path = root / f"{index}-{name}"
                 path.write_bytes(data)
                 paths[name] = path

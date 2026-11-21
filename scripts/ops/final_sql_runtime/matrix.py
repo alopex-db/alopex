@@ -5,6 +5,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 from pathlib import Path, PurePosixPath
 import shutil
 import statistics
@@ -76,6 +77,7 @@ def compose_harness(docs_archive, product_root, product_files, destination):
             item = tarfile.TarInfo(name)
             item.size, item.mode, item.mtime, item.uid, item.gid = len(data), 0o644, 0, 0, 0
             output.addfile(item, io.BytesIO(data))
+    os.chmod(destination, 0o600)
     return {"docs_subdirectory": "docs", "product_subdirectory": "product",
             "docs_files": docs_files, "product_files": product_hashes,
             "sha256": hashlib.sha256(destination.read_bytes()).hexdigest()}
