@@ -51,7 +51,8 @@ class ReferenceIngressTest(unittest.TestCase):
             path = self.root / f"wrapper-{subject}.zip"
             path.write_bytes(payload)
             self.wrappers[subject] = path
-            self.pins[subject] = {"zip_sha256": sha(original), "zip_size_bytes": len(original)}
+            self.pins[subject] = {"zip_sha256": sha(original), "zip_size_bytes": len(original),
+                                  "basename": subject + ".zip"}
             self.descriptors[subject] = {
                 "run_id": 42, "head_sha": "a" * 40,
                 "repository_id": 7, "workflow_id": 8, "artifact_id": number,
@@ -122,6 +123,10 @@ class ReferenceIngressTest(unittest.TestCase):
     def test_later_original_failure_removes_earlier_extraction(self):
         self.pins["published"]["zip_sha256"] = "0" * 64
         self.assert_rejected("ORIGINAL_BYTES")
+
+    def test_descriptor_requires_reviewed_original_basename(self):
+        self.descriptors["before"]["inner_name"] = "other.zip"
+        self.assert_rejected("STAGING_DESCRIPTOR")
 
     def test_extra_duplicate_traversal_and_symlink_member(self):
         for entries, code in (

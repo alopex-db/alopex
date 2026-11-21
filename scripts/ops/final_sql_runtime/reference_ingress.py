@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import os
 from pathlib import Path
+import re
 import stat
 import zipfile
 
@@ -19,6 +20,7 @@ MAX_ORIGINAL_BYTES = 1_000_000_000
 MAX_WRAPPER_BYTES = 1_100_000_000
 MAX_STAGING_AGE = timedelta(days=1)
 CHUNK = 1024 * 1024
+ORIGINAL_NAME = re.compile(r"[a-z][a-z0-9-]{0,95}\.zip")
 
 
 def _require(ok, code):
@@ -96,7 +98,9 @@ def _review_descriptor(subject, descriptor, pin, run, metadata, now):
              _hex(descriptor["artifact_digest"], 64) and
              type(descriptor["artifact_size_bytes"]) is int and
              0 < descriptor["artifact_size_bytes"] <= MAX_WRAPPER_BYTES and
-             descriptor["inner_name"] == f"{subject}.zip", "STAGING_DESCRIPTOR")
+             type(descriptor["inner_name"]) is str and
+             ORIGINAL_NAME.fullmatch(descriptor["inner_name"]) and
+             descriptor["inner_name"] == pin.get("basename"), "STAGING_DESCRIPTOR")
     _require(type(run) is dict and run.get("id") == descriptor["run_id"] and
              run.get("head_sha") == descriptor["head_sha"] and
              type(run.get("repository")) is dict and
@@ -122,7 +126,9 @@ def _review_descriptor(subject, descriptor, pin, run, metadata, now):
              "ARTIFACT_METADATA")
     _require(type(pin) is dict and _hex(pin.get("zip_sha256"), 64) and
              type(pin.get("zip_size_bytes")) is int and
-             0 < pin["zip_size_bytes"] <= MAX_ORIGINAL_BYTES, "ORIGINAL_PIN")
+             0 < pin["zip_size_bytes"] <= MAX_ORIGINAL_BYTES and
+             type(pin.get("basename")) is str and
+             ORIGINAL_NAME.fullmatch(pin["basename"]), "ORIGINAL_PIN")
 
 
 def _destination_fd(destination):

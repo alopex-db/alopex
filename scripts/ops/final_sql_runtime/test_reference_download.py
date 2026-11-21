@@ -60,7 +60,8 @@ class ReferenceDownloadTest(unittest.TestCase):
             payload = wrapper(subject + ".zip", original)
             self.payloads[number] = payload
             self.pins[subject] = {"zip_sha256": sha(original),
-                                  "zip_size_bytes": len(original)}
+                                  "zip_size_bytes": len(original),
+                                  "basename": subject + ".zip"}
             self.descriptors[subject] = {
                 "run_id": 42, "head_sha": "a" * 40,
                 "repository_id": 7, "workflow_id": 8, "artifact_id": number,
