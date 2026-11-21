@@ -11,9 +11,9 @@ class OperationTests(unittest.TestCase):
         self.declared = {"preflight": 100, "cell": 100}
 
     def callbacks(self):
-        def prepare(manifest, destination, harness, record, row, operators, pin):
+        def prepare(manifest, destination, harness, record, row, operators, pin, *, kind):
             self.events.append(("prepare", destination))
-            return destination, dict(row)
+            return destination, dict(row, phase=kind)
 
         def execute(staged, config, *, kind, worker_timeout_seconds, run_timeout_seconds):
             self.events.append(("execute", kind, config["id"], worker_timeout_seconds,

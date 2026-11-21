@@ -97,8 +97,9 @@ def run(*, qualification, subjects, product_manifests, destination_for,
                 staged, config = prepare(product_manifests[row["subject"]],
                                          destination_for(kind, row), harness,
                                          harness_record, row, operators,
-                                         subjects[row["subject"]])
+                                         subjects[row["subject"]], kind=kind)
                 _require(type(config) is dict and
+                         config.get("phase") == kind and
                          all(config.get(key) == value for key, value in row.items()),
                          "staged coordinate mismatch")
                 execution = execute(staged, config, kind=kind,

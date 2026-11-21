@@ -105,11 +105,16 @@ class MatrixTests(unittest.TestCase):
             for bad in bads:
                 target = root / "unused"
                 with self.subTest(bad=bad), patch.dict(sys.modules, {"common": common}), self.assertRaises(ValueError):
-                    matrix.prepare_cell(path, target, root / "harness.tar", {}, cell, {}, bad)
+                    matrix.prepare_cell(path, target, root / "harness.tar", {}, cell, {}, bad,
+                                        kind="cell")
                 self.assertFalse(target.exists())
             (root / "receipt").write_text(json.dumps({"source": dict(source, commit="c" * 40)}))
             with patch.dict(sys.modules, {"common": common}), self.assertRaises(ValueError):
-                matrix.prepare_cell(path, root / "unused", root / "harness.tar", {}, cell, {}, pin)
+                matrix.prepare_cell(path, root / "unused", root / "harness.tar", {}, cell, {}, pin,
+                                    kind="cell")
+            with patch.dict(sys.modules, {"common": common}), self.assertRaises(ValueError):
+                matrix.prepare_cell(path, root / "unused", root / "harness.tar", {}, cell, {}, pin,
+                                    kind="preflight")
             pg = next(row for row in matrix.plan() if row["subject"] == "postgresql")
             pg_pin = dict(pin, subject="postgresql", product_subject="published",
                           reference_image_digest="d" * 64,

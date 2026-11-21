@@ -142,8 +142,11 @@ def verify_subject_pin(product_manifest, manifest, receipt, cell, expected_subje
 
 
 def prepare_cell(product_manifest, destination, harness, harness_record, cell, operators,
-                 expected_subject):
+                 expected_subject, *, kind):
     from common import atomic_json, contained, digest, private_dir, verify_assets
+    require(kind in ("preflight", "cell") and
+            (kind != "preflight" or cell["case"] == "select-all"),
+            "invalid measurement phase")
     require(not destination.exists(), "cell input already exists")
     source = json.loads(product_manifest.read_text())
     source = verify_assets(product_manifest, expected_subject["platform"])
@@ -169,7 +172,8 @@ def prepare_cell(product_manifest, destination, harness, harness_record, cell, o
     shutil.copyfile(harness, destination / "measurement-harness.tar")
     require(digest(destination / "measurement-harness.tar") == harness_record["sha256"], "combined harness changed")
     add("harness", "measurement-harness.tar")
-    config = {"schema": "alopex.native-sql-supervisor/v1", **cell, "source": pinned_source,
+    config = {"schema": "alopex.native-sql-supervisor/v1", **cell, "phase": kind,
+              "source": pinned_source,
               **{key: harness_record[key] for key in ("docs_subdirectory", "product_subdirectory", "docs_files", "product_files")}}
     atomic_json(destination / "measurement.json", config)
     add("measurement_config", "measurement.json")
