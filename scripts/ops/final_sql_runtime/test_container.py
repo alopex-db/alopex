@@ -110,6 +110,22 @@ class CollectedTests(unittest.TestCase):
 
 
 class CallbackTests(unittest.TestCase):
+    def test_deadline_budget_clamps_commands_and_rejects_expiry(self):
+        calls = []
+        base = SimpleNamespace(before=lambda name: calls.append(("before", name)),
+                               check=lambda: calls.append(("check",)),
+                               run=lambda command, **kwargs: calls.append(
+                                   ("run", kwargs["timeout"])))
+        now = [10]
+        budget = container.DeadlineBudget(base, 15, lambda: now[0])
+        budget.before("accept")
+        budget.check()
+        budget.run(["command"], timeout=420, log="log")
+        self.assertEqual(calls[-1], ("run", 5))
+        now[0] = 15
+        with self.assertRaisesRegex(TimeoutError, "RUN_DEADLINE"):
+            budget.before("collect")
+
     def test_preflight_and_matrix_run_ids_are_distinct(self):
         config = {"id": "sql-select-all-0-published"}
         self.assertEqual(container.owned_run_id("preflight", config),

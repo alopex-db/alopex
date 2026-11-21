@@ -39,6 +39,36 @@ def owned_run_id(kind, config):
     return kind + "-" + coordinate
 
 
+class DeadlineBudget:
+    """Limit every owned command across staging, execution and collection."""
+
+    def __init__(self, base, deadline, clock):
+        self.base, self.deadline, self.clock = base, deadline, clock
+
+    def remaining(self):
+        value = self.deadline - self.clock()
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise TimeoutError("RUN_DEADLINE")
+        return value
+
+    def before(self, operation):
+        self.remaining()
+        result = self.base.before(operation)
+        self.remaining()
+        return result
+
+    def check(self):
+        self.remaining()
+        result = self.base.check()
+        self.remaining()
+        return result
+
+    def run(self, command, *, timeout, log, env=None, cancel=None):
+        remaining = self.remaining()
+        return self.base.run(command, timeout=min(timeout, remaining), log=log,
+                             env=env, cancel=cancel)
+
+
 def verify_collected(run, config, kind, assets_digest, *, common):
     """Accept only a complete, hash-bound SQL report from an owned collection."""
     run.verify_collection()
@@ -141,9 +171,11 @@ class ContainerCallbacks:
                 return live
 
         docker = MeasurementDocker(profile)
-        budget = self.capacity.Budget(profile["storage"])
+        budget = DeadlineBudget(self.capacity.Budget(profile["storage"]),
+                                self.clock() + run_timeout_seconds, self.clock)
         self.active = (profile, docker, budget, config, kind)
         self.envctl.execute(profile, docker, budget, [])
+        budget.remaining()
         return profile["run_id"]
 
     def collect(self, execution, kind, row):
@@ -152,6 +184,7 @@ class ContainerCallbacks:
         self.common.require(execution == profile["run_id"] and kind == expected_kind and
                             all(config[key] == row[key] for key in row), "IDENTITY")
         self.envctl.collect(profile, docker, budget, profile["run_id"])
+        budget.remaining()
         run = self.lifecycle.Run(profile["private_output"], profile["run_id"]).load()
         return verify_collected(run, config, kind, self.common.digest(profile["assets"]),
                                 common=self.common)
@@ -169,7 +202,7 @@ class ContainerCallbacks:
             return
         run.load()
         if run.record["phase"] not in ("collected", "deleted"):
-            self.envctl.collect(profile, docker, budget, profile["run_id"])
+            self.envctl.collect(profile, docker, getattr(budget, "base", budget), profile["run_id"])
             run.load()
         run.clean(docker.inspect, docker.remove)
         self.active = None
