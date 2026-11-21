@@ -13,7 +13,7 @@ class ReferenceStagingTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.directory = Path(self.temp.name) / "originals"
+        self.directory = Path(self.temp.name).resolve() / "originals"
         self.directory.mkdir(mode=0o700)
         self.run = {"run_id": 42, "run_attempt": 1, "event": "workflow_dispatch",
                     "head_sha": "a" * 40, "repository_id": 7, "workflow_id": 9}
@@ -64,6 +64,19 @@ class ReferenceStagingTest(unittest.TestCase):
         path.symlink_to(self.directory / "published-original.zip")
         with self.assertRaises(OSError):
             self.verify()
+
+    def test_symlink_in_staging_ancestry_is_rejected(self):
+        original = self.directory
+        alias = original.parent / "alias"
+        alias.symlink_to(original.parent, target_is_directory=True)
+        self.directory = alias / "originals"
+        try:
+            self.rejects("STAGING_PATH")
+        finally:
+            self.directory = original
+        for subject in staging.SUBJECTS:
+            name = self.lock["originals"][subject]["basename"]
+            self.assertEqual(subject.encode(), (original / name).read_bytes())
 
     def test_file_and_directory_modes_rejected(self):
         path = self.directory / "before-original.zip"

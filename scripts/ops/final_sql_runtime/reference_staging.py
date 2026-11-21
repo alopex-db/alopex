@@ -105,6 +105,8 @@ def verify_staging(directory: Path, *, run: dict, expected: dict, lock: dict) ->
     _identity(run, expected)
     pins = _pins(lock)
     _require(isinstance(directory, Path) and directory.is_absolute(), "STAGING_PATH")
+    for ancestor in reversed((directory, *directory.parents)):
+        _require(stat.S_ISDIR(ancestor.lstat().st_mode), "STAGING_PATH")
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
     try:
         info = os.fstat(fd)
