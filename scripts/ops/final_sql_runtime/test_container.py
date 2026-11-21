@@ -27,7 +27,7 @@ class CollectedTests(unittest.TestCase):
         self.cell = self.root / "cell"
         self.cell.mkdir(parents=True)
         self.config = {"case": "select-all", "engine": "alopex-server", "trial": 0,
-                       "source": {"commit": "a" * 40}}
+                       "phase": "preflight", "source": {"commit": "a" * 40}}
         self.common = SimpleNamespace(read_json=lambda p: json.loads(p.read_text()),
                                       digest=digest,
                                       require=lambda condition, code: condition or
@@ -36,18 +36,21 @@ class CollectedTests(unittest.TestCase):
         write_json(self.root / "exit.json", {"ExitCode": 0, "OOMKilled": False})
         write_json(self.root / "environment.json", {"checked": True})
         write_json(self.root / "generated-permissions.json", {"checked": True})
-        self.result = {"trial": 0, "subject_identity": {"source": self.config["source"]}}
+        self.result = {"trial": 0, "subject_identity": {"source": self.config["source"]},
+                       "result_sha256": worker.result_digest("select-all")}
         self.raw = [{"sample": 0}]
         write_json(self.cell / "raw.ndjson", self.raw[0])
         self.result["raw_sha256"] = digest(self.cell / "raw.ndjson")
         write_json(self.cell / "resources.json", {"schema": "resource"})
         write_json(self.cell / "measurement.json", self.result)
         write_json(self.cell / "status.json", {"status": "passed", "worker_error": None,
-            "stop_error": None, "measurement": {"result_sha256": digest(self.cell / "measurement.json"),
-                                                  "raw_sha256": self.result["raw_sha256"]}})
+            "stop_error": None, "server_stopped": True, "server_identity": {"pid": 12},
+            "measurement": {"phase": "preflight",
+                            "result_sha256": digest(self.cell / "measurement.json"),
+                            "raw_sha256": self.result["raw_sha256"]}})
         write_json(self.root / "result.json", {"schema": "alopex.native-sql-measurement/v1",
             "status": "passed", "assets_digest": "b" * 64, "source": self.config["source"],
-            "case": "select-all", "engine": "alopex-server", "trial": 0,
+            "case": "select-all", "engine": "alopex-server", "trial": 0, "phase": "preflight",
             "cell_status_sha256": digest(self.cell / "status.json")})
 
     def verify(self, kind):
@@ -62,20 +65,45 @@ class CollectedTests(unittest.TestCase):
             self.verify("preflight")
         write_json(self.cell / "exact-result.json", {"rows": 34250,
             "result": worker.expected("select-all")})
+        status = json.loads((self.cell / "status.json").read_text())
+        status["measurement"]["exact_result_sha256"] = digest(self.cell / "exact-result.json")
+        write_json(self.cell / "status.json", status)
+        report = json.loads((self.root / "result.json").read_text())
+        report["cell_status_sha256"] = digest(self.cell / "status.json")
+        write_json(self.root / "result.json", report)
         self.assertEqual(self.verify("preflight")["rows"], 34250)
 
     def test_tampered_exact_result_is_rejected(self):
         write_json(self.cell / "exact-result.json", {"rows": 34250,
             "result": list(reversed(worker.expected("select-all")))})
+        status = json.loads((self.cell / "status.json").read_text())
+        status["measurement"]["exact_result_sha256"] = digest(self.cell / "exact-result.json")
+        write_json(self.cell / "status.json", status)
+        report = json.loads((self.root / "result.json").read_text())
+        report["cell_status_sha256"] = digest(self.cell / "status.json")
+        write_json(self.root / "result.json", report)
         with self.assertRaisesRegex(ValueError, "SQL result"):
             self.verify("preflight")
 
     def test_cell_returns_resource_bound_raw(self):
+        self.config["phase"] = "cell"
+        report = json.loads((self.root / "result.json").read_text())
+        report["phase"] = "cell"
+        write_json(self.root / "result.json", report)
+        status = json.loads((self.cell / "status.json").read_text())
+        status["measurement"]["phase"] = "cell"
+        write_json(self.cell / "status.json", status)
+        report["cell_status_sha256"] = digest(self.cell / "status.json")
+        write_json(self.root / "result.json", report)
         value = self.verify("cell")
         self.assertEqual(value["resource_digest"], digest(self.cell / "resources.json"))
         self.assertEqual(value["raw"], self.raw)
 
     def test_report_and_exit_must_be_complete(self):
+        self.config["phase"] = "cell"
+        report = json.loads((self.root / "result.json").read_text())
+        report["phase"] = "cell"
+        write_json(self.root / "result.json", report)
         write_json(self.root / "exit.json", {"ExitCode": 1, "OOMKilled": False})
         with self.assertRaisesRegex(ValueError, "CASE"):
             self.verify("cell")

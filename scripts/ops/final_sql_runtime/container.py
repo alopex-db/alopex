@@ -36,6 +36,7 @@ def verify_collected(run, config, kind, assets_digest, *, common):
     report = common.read_json(root / "result.json")
     common.require(report.get("schema") == "alopex.native-sql-measurement/v1" and
                    report.get("status") == "passed" and
+                   report.get("phase") == kind == config.get("phase") and
                    report.get("assets_digest") == assets_digest and
                    report.get("source") == config["source"] and
                    all(report.get(key) == config[key] for key in ("case", "engine", "trial")), "CASE")
@@ -49,7 +50,12 @@ def verify_collected(run, config, kind, assets_digest, *, common):
     common.require(common.digest(cell / "status.json") == report.get("cell_status_sha256"), "IDENTITY")
     status = common.read_json(cell / "status.json")
     common.require(status.get("status") == "passed" and status.get("worker_error") is None and
-                   status.get("stop_error") is None, "CASE")
+                   status.get("stop_error") is None and
+                   status.get("server_stopped") is True and
+                   type(status.get("server_identity")) is dict and
+                   type(status["server_identity"].get("pid")) is int and
+                   status["server_identity"]["pid"] > 0 and
+                   status.get("measurement", {}).get("phase") == kind, "CASE")
     result_path, raw_path = cell / "measurement.json", cell / "raw.ndjson"
     result = common.read_json(result_path)
     common.require(common.digest(result_path) == status["measurement"]["result_sha256"] and
@@ -65,8 +71,11 @@ def verify_collected(run, config, kind, assets_digest, *, common):
         common.require(exact_path.is_file(), "COLLECT")
         exact = common.read_json(exact_path)
         common.require(set(exact) == {"rows", "result"} and
-                       config["case"] == "select-all", "CASE")
-        worker.validate_exact("select-all", exact["result"], exact["rows"])
+                       config["case"] == "select-all" and
+                       common.digest(exact_path) == status["measurement"].get("exact_result_sha256"),
+                       "CASE")
+        common.require(worker.validate_exact("select-all", exact["result"], exact["rows"]) ==
+                       result["result_sha256"], "CASE")
         return exact
     common.require(kind == "cell", "INPUT")
     return {"cell_result": result, "raw": raw, "resource_digest": resource_digest}
