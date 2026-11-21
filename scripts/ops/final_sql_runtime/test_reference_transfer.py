@@ -106,6 +106,44 @@ class ReceiverTests(unittest.TestCase):
                     popen=popen)
         popen.assert_not_called()
 
+    def test_host_stream_commits_only_after_exact_assignment(self):
+        source = self.base / "source"
+        source.mkdir(mode=0o700)
+        for pin, data in zip(self.pins, self.payloads):
+            path = source / pin["basename"]
+            path.write_bytes(data)
+            path.chmod(0o400)
+        known_hosts = self.base / "known_hosts"
+        key = self.base / "key"
+        for path in (known_hosts, key):
+            path.write_bytes(b"test-only")
+            path.chmod(0o600)
+        expected = {
+            "run_id": 1, "repository_id": 2, "workflow_id": 3,
+            "workflow_path": ".github/workflows/alopex-performance.yml",
+            "head_sha": "a" * 40, "job_name": "stage", "runner_id": 4,
+            "runner_group_id": 5, "runner_label": "test-label"}
+        def local_receiver(_argv, **kwargs):
+            return subprocess.Popen(
+                [sys.executable, "-c", RECEIVER, str(self.root), "alopex"],
+                **kwargs)
+        with mock.patch.object(reference_transfer.reference_staging, "_pins",
+                               return_value={str(i): pin for i, pin in enumerate(self.pins)}), \
+             mock.patch.object(reference_transfer.reference_staging, "verify_staging"):
+            result = reference_transfer.transfer(
+                repository="alopex-db/alopex", expected=expected,
+                token="test-only", source=source, ssh_host="127.0.0.1",
+                ssh_port=22, ssh_user="runner", known_hosts=known_hosts,
+                private_key=key, runner_root=str(self.root), runner_repo="alopex",
+                fetch=lambda **_: {"run_id": 1, "runner_id": 4,
+                                   "head_sha": "a" * 40, "job_id": 6},
+                popen=local_receiver)
+        self.assertEqual("transferred", result["status"])
+        self.assertTrue((self.workspace / "reference-originals.ready").exists())
+        for pin, data in zip(self.pins, self.payloads):
+            self.assertEqual(data, (self.workspace / "reference-originals" /
+                                    pin["basename"]).read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()
