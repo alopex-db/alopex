@@ -1,7 +1,7 @@
 //! HNSW graph algorithms and data structure implementation.
 
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use super::cosine::CosineKernel;
 use super::cow::{KeyMap, PagedVec, SharedNode};
@@ -9,6 +9,70 @@ use super::types::{HnswConfig, HnswNode, HnswSearchResult, HnswStats, InsertStat
 use crate::vector::simd::{select_kernel, DistanceKernel};
 use crate::vector::{validate_dimensions, CompactionResult, Metric};
 use crate::{Error, Result};
+
+/// Scores are valid only while every vector in the owning bulk batch is immutable.
+#[derive(Default)]
+pub(crate) struct PairScoreCache {
+    scores: HashMap<(u32, u32), f64>,
+}
+
+impl PairScoreCache {
+    const MAX_ENTRIES: usize = 1_000_000;
+
+    fn score(&mut self, left_id: u32, right_id: u32, compute: impl FnOnce() -> f64) -> f64 {
+        let pair = (left_id, right_id);
+        if let Some(&score) = self.scores.get(&pair) {
+            return score;
+        }
+        let score = compute();
+        if self.scores.len() < Self::MAX_ENTRIES {
+            self.scores.insert(pair, score);
+        }
+        score
+    }
+}
+
+#[cfg(test)]
+mod pair_score_cache_tests {
+    use super::{HnswGraph, PairScoreCache};
+    use crate::vector::hnsw::HnswConfig;
+    use crate::vector::Metric;
+
+    #[test]
+    fn retains_scores_up_to_bounded_capacity() {
+        let mut cache = PairScoreCache::default();
+        assert_eq!(cache.score(0, 1, || 2.5), 2.5);
+        assert_eq!(
+            cache.score(0, 1, || panic!("cached score must be reused")),
+            2.5
+        );
+        assert_eq!(cache.scores.len(), 1);
+
+        for left in 1..PairScoreCache::MAX_ENTRIES as u32 {
+            cache.scores.insert((left, 0), 1.0);
+        }
+        assert_eq!(cache.scores.len(), PairScoreCache::MAX_ENTRIES);
+        assert_eq!(cache.score(u32::MAX, 0, || 3.5), 3.5);
+        assert_eq!(cache.scores.len(), PairScoreCache::MAX_ENTRIES);
+    }
+
+    #[test]
+    fn cached_node_similarity_matches_direct_score() {
+        for metric in [Metric::Cosine, Metric::L2, Metric::InnerProduct] {
+            let config = HnswConfig::default().with_dimension(2).with_metric(metric);
+            let mut graph = HnswGraph::new(config).unwrap();
+            let left = graph.insert(b"left", &[2.0, 3.0], &[]).unwrap();
+            let right = graph.insert(b"right", &[5.0, 7.0], &[]).unwrap();
+            let expected = graph.node_similarity(left, right);
+            let mut cache = PairScoreCache::default();
+            assert_eq!(
+                graph.node_similarity_with_cache(left, right, Some(&mut cache)),
+                expected,
+                "metric={metric:?}"
+            );
+        }
+    }
+}
 
 /// Core in-memory HNSW graph.
 #[allow(dead_code)]
@@ -79,11 +143,12 @@ impl HnswGraph {
 
     /// Inserts a vector into the graph, returning the assigned node id.
     pub fn insert(&mut self, key: &[u8], vector: &[f32], metadata: &[u8]) -> Result<u32> {
-        self.insert_with_pruning(key, vector, metadata, true, None)
+        self.insert_with_pruning(key, vector, metadata, true, None, None)
     }
 
     /// Inserts a vector while deferring reverse-edge pruning to the bulk owner.
     /// An optional batch-local hint supplements the existing entry without changing ef.
+    #[cfg(test)]
     pub(crate) fn insert_unpruned(
         &mut self,
         key: &[u8],
@@ -91,7 +156,19 @@ impl HnswGraph {
         metadata: &[u8],
         entry_hint: Option<u32>,
     ) -> Result<u32> {
-        self.insert_with_pruning(key, vector, metadata, false, entry_hint)
+        self.insert_with_pruning(key, vector, metadata, false, entry_hint, None)
+    }
+
+    /// Defers pruning and records only reverse edges that exceeded their degree limit.
+    pub(crate) fn insert_unpruned_tracked(
+        &mut self,
+        key: &[u8],
+        vector: &[f32],
+        metadata: &[u8],
+        entry_hint: Option<u32>,
+        overfull: &mut HashSet<(u32, usize)>,
+    ) -> Result<u32> {
+        self.insert_with_pruning(key, vector, metadata, false, entry_hint, Some(overfull))
     }
 
     fn insert_with_pruning(
@@ -101,6 +178,7 @@ impl HnswGraph {
         metadata: &[u8],
         prune_reverse_edges: bool,
         entry_hint: Option<u32>,
+        mut overfull: Option<&mut HashSet<(u32, usize)>>,
     ) -> Result<u32> {
         self.validate_vector(vector)?;
 
@@ -187,6 +265,17 @@ impl HnswGraph {
             };
             let selected = self.select_neighbors_heuristic(&candidates, max_conn);
             self.connect_new_node(node_id, &selected, l);
+
+            if let Some(overfull) = overfull.as_deref_mut() {
+                for &neighbor_id in &selected {
+                    if self
+                        .node(neighbor_id)
+                        .is_some_and(|neighbor| neighbor.neighbors[l].len() > max_conn)
+                    {
+                        overfull.insert((neighbor_id, l));
+                    }
+                }
+            }
 
             if prune_reverse_edges {
                 // Prune neighbor lists to maintain degree constraints.
@@ -801,6 +890,15 @@ impl HnswGraph {
     }
 
     fn select_neighbors_heuristic(&self, candidates: &[ScoredEntry], max: usize) -> Vec<u32> {
+        self.select_neighbors_heuristic_with_cache(candidates, max, None)
+    }
+
+    fn select_neighbors_heuristic_with_cache(
+        &self,
+        candidates: &[ScoredEntry],
+        max: usize,
+        mut cache: Option<&mut PairScoreCache>,
+    ) -> Vec<u32> {
         if candidates.len() < max {
             return candidates
                 .iter()
@@ -831,7 +929,11 @@ impl HnswGraph {
                 continue;
             }
             let diverse = selected.iter().all(|&chosen| {
-                let similarity = self.node_similarity(candidate.node_id, chosen);
+                let similarity = self.node_similarity_with_cache(
+                    candidate.node_id,
+                    chosen,
+                    cache.as_deref_mut(),
+                );
                 similarity <= candidate.score
             });
             if diverse || selected.is_empty() {
@@ -873,6 +975,16 @@ impl HnswGraph {
     }
 
     pub(crate) fn prune_neighbors(&mut self, node_id: u32, level: usize, max_degree: usize) {
+        self.prune_neighbors_with_cache(node_id, level, max_degree, None);
+    }
+
+    fn prune_neighbors_with_cache(
+        &mut self,
+        node_id: u32,
+        level: usize,
+        max_degree: usize,
+        mut cache: Option<&mut PairScoreCache>,
+    ) {
         let neighbors_snapshot = {
             let Some(node) = self.node(node_id) else {
                 return;
@@ -889,11 +1001,11 @@ impl HnswGraph {
             .filter(|&n| self.node(n).is_some())
             .map(|neighbor_id| ScoredEntry {
                 node_id: neighbor_id,
-                score: self.node_similarity(node_id, neighbor_id),
+                score: self.node_similarity_with_cache(node_id, neighbor_id, cache.as_deref_mut()),
             })
             .collect();
 
-        let selected = self.select_neighbors_heuristic(&selected, max_degree);
+        let selected = self.select_neighbors_heuristic_with_cache(&selected, max_degree, cache);
 
         self.mark_node_changed(node_id);
         if let Some(node) = self
@@ -908,6 +1020,7 @@ impl HnswGraph {
     }
 
     /// Restores degree limits after a bulk construction chunk.
+    #[cfg(test)]
     pub(crate) fn prune_overfull_neighbors(&mut self) {
         for node_id in 0..self.nodes.len() as u32 {
             let level_count = self
@@ -922,6 +1035,39 @@ impl HnswGraph {
                 };
                 self.prune_neighbors(node_id, level, max_degree);
             }
+        }
+    }
+
+    /// Prunes only reverse-edge lists that grew beyond the limit in this chunk.
+    pub(crate) fn prune_tracked_overfull_neighbors(
+        &mut self,
+        overfull: &mut HashSet<(u32, usize)>,
+    ) {
+        self.prune_tracked_overfull_neighbors_with_cache(overfull, None);
+    }
+
+    pub(crate) fn prune_tracked_overfull_neighbors_cached(
+        &mut self,
+        overfull: &mut HashSet<(u32, usize)>,
+        cache: &mut PairScoreCache,
+    ) {
+        self.prune_tracked_overfull_neighbors_with_cache(overfull, Some(cache));
+    }
+
+    fn prune_tracked_overfull_neighbors_with_cache(
+        &mut self,
+        overfull: &mut HashSet<(u32, usize)>,
+        mut cache: Option<&mut PairScoreCache>,
+    ) {
+        let mut pending: Vec<_> = overfull.drain().collect();
+        pending.sort_unstable();
+        for (node_id, level) in pending {
+            let max_degree = if level == 0 {
+                self.config.m * 2
+            } else {
+                self.config.m
+            };
+            self.prune_neighbors_with_cache(node_id, level, max_degree, cache.as_deref_mut());
         }
     }
 
@@ -1045,6 +1191,20 @@ impl HnswGraph {
             Metric::InnerProduct => {
                 f64::from(self.kernel.inner_product(&left.vector, &right.vector))
             }
+        }
+    }
+
+    fn node_similarity_with_cache(
+        &self,
+        left_id: u32,
+        right_id: u32,
+        cache: Option<&mut PairScoreCache>,
+    ) -> f64 {
+        match cache {
+            Some(cache) => cache.score(left_id, right_id, || {
+                self.node_similarity(left_id, right_id)
+            }),
+            None => self.node_similarity(left_id, right_id),
         }
     }
 
