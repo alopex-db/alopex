@@ -31,7 +31,7 @@ def _reviewed(subjects, manifests, audit_pins, operators, declared_seconds):
                  type(audit_pin) is dict and
                  all(audit_pin.get(key) == pin.get(key) for key in ("source", "assets_digest")) and
                  all(matrix._hex(audit_pin.get(key), 64) for key in
-                     ("assets_digest", "resource_digest", "worker_sha256", "harness_sha256")),
+                     ("assets_digest", "worker_sha256", "harness_sha256")),
                  "REVIEWED_PIN")
         _require(pin.get("subject") == subject and
                  pin.get("product_subject") == ("published" if subject == "postgresql" else subject) and

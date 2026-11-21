@@ -2,7 +2,8 @@
 
 The caller supplies 48 private collections and independently authenticated
 receipts. Each cell receipt names the coordinate, proves owned cleanup was
-deleted, and pins SHA-256 of measurement.json, raw.ndjson, worker.py, and the
+deleted, and pins SHA-256 of measurement.json, raw.ndjson, resources.json,
+worker.py, and the
 archived SQL harness worker. Four preflight receipts each pin the full ordered
 result JSON. ``authenticate_receipt`` must verify that provenance; this
 module cannot infer it from operation summaries or self-declared file hashes.
@@ -18,7 +19,7 @@ from scripts.ops import final_sql_matrix as independent
 from . import matrix as runtime_matrix
 from . import worker
 
-FILES = ("measurement", "raw", "worker", "harness")
+FILES = ("measurement", "raw", "resources", "worker", "harness")
 
 
 def require(condition, code):
@@ -56,8 +57,9 @@ def audit_completed(operation_result, collections, receipts, pins, authenticate_
     ``authenticate_receipt`` is a caller-owned, source-pinned independent
     verifier. It must return literal ``True`` only for an authentic receipt;
     file digests and cleanup statements in an unauthenticated receipt are not
-    evidence. The receipt's ``sha256`` maps all four FILES to their exact bytes.
-    A collection maps FILES to absolute private Paths. Neither may be generated
+    evidence. The receipt's ``sha256`` maps all five FILES to their exact bytes.
+    A collection maps private files to absolute Paths and harness to verified
+    archived bytes. Neither may be generated
     from the runtime operation summary.
     """
     require(type(operation_result) is dict and
@@ -110,6 +112,7 @@ def audit_completed(operation_result, collections, receipts, pins, authenticate_
     require(operation_result["summary"] == runtime_matrix.summarize(operation_cells),
             "OPERATION_SUMMARY")
     cells = []
+    resource_digests = {}
     seen_private = set()
     for operated, collection, receipt in zip(operation_cells, collections, receipts):
         key = _key(operated)
@@ -135,7 +138,7 @@ def audit_completed(operation_result, collections, receipts, pins, authenticate_
         data = {}
         for name in FILES:
             path = paths[name]
-            if name in ("measurement", "raw"):
+            if name in ("measurement", "raw", "resources"):
                 require(path not in seen_private, "DUPLICATE_PRIVATE_FILE")
                 seen_private.add(path)
             data[name] = _read(path, allow_bytes=name == "harness")
@@ -159,7 +162,9 @@ def audit_completed(operation_result, collections, receipts, pins, authenticate_
                       "measurement": measurement, "raw_bytes": data["raw"],
                       "worker_bytes": data["worker"], "harness_bytes": data["harness"],
                       "trial_median_seconds": operated["trial_median_seconds"]})
-    result = independent.audit_matrix(cells, pins)
+        resource_digests[key] = hashes["resources"]
+    result = independent.audit_matrix(cells, pins,
+                                      resource_digests=resource_digests)
     require(result.get("verified_cells") == 48 and
             result.get("verified_samples") == 1008 and
             result.get("performance_acceptance") is False,

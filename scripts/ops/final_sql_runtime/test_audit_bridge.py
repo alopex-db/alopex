@@ -20,16 +20,18 @@ class AuditBridgeTests(unittest.TestCase):
         root = Path(self.directory.name)
         self.pins = {subject: {
             "source": {"commit": subject}, "assets_digest": "a" * 64,
-            "resource_digest": "b" * 64,
             "worker_sha256": hashlib.sha256(WORKER).hexdigest(),
             "harness_sha256": hashlib.sha256(HARNESS).hexdigest(),
         } for subject in independent.SUBJECTS}
         self.collections, self.receipts, operated = [], [], []
         for index, row in enumerate(matrix.plan()):
             case, subject, trial = row["case"], row["subject"], row["trial"]
+            resources = json.dumps({"schema": "alopex.sql-resource-servers/v1",
+                                    "coordinate": row["id"]}).encode()
+            resource_digest = hashlib.sha256(resources).hexdigest()
             resource = {"schema": "alopex.sql-operation-resources/v1",
                         "status": "observed", "coverage": "stable_pid_namespace_allocation",
-                        "manifest_sha256": "b" * 64,
+                        "manifest_sha256": resource_digest,
                         "client": self.process(1), "server_processes": [self.process(2)]}
             raw = b"".join(json.dumps({"sample": n, "seconds": .001,
                                        "resources": resource}).encode() + b"\n"
@@ -44,6 +46,7 @@ class AuditBridgeTests(unittest.TestCase):
                            "raw_sha256": hashlib.sha256(raw).hexdigest(),
                            "latency_p50_ms": 1.0}
             contents = {"measurement": json.dumps(measurement).encode(), "raw": raw,
+                        "resources": resources,
                         "worker": WORKER, "harness": HARNESS}
             paths = {}
             for name, data in contents.items():
@@ -112,6 +115,7 @@ class AuditBridgeTests(unittest.TestCase):
             lambda: self.receipts[0].update(authentic=False),
             lambda: self.receipts[0].update(cleanup="collected"),
             lambda: self.receipts[0]["sha256"].update(raw="0" * 64),
+            lambda: self.receipts[0]["sha256"].update(resources="0" * 64),
             lambda: self.collections[1]["files"].update(raw=self.collections[0]["files"]["raw"]),
             lambda: self.operation["evidence"]["cells"].__setitem__(1,
                 copy.deepcopy(self.operation["evidence"]["cells"][0])),

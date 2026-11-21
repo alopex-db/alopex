@@ -99,6 +99,13 @@ class MatrixTests(unittest.TestCase):
                     matrix.audit_matrix(bad, self.pins)
             with self.assertRaises(ValueError):
                 matrix.audit_matrix(cells, {"candidate": self.pins["candidate"]})
+            dynamic = {key: "c" * 64 for key in
+                       ((row["case"], row["trial"], row["subject"]) for row in matrix.plan())}
+            matrix.audit_matrix(cells, self.pins, resource_digests=dynamic)
+            self.assertEqual(audit.call_args.args[1]["resource_digest"], "c" * 64)
+            dynamic.pop(next(iter(dynamic)))
+            with self.assertRaisesRegex(ValueError, "RESOURCE_DIGEST_COVERAGE"):
+                matrix.audit_matrix(cells, self.pins, resource_digests=dynamic)
 
     def test_threshold_noise_and_paired_trials(self):
         self.assertTrue(matrix.compare([100] * 3, [95] * 3)["improvement_proven"])

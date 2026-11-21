@@ -15,7 +15,7 @@ import tarfile
 from . import container, matrix, same_job
 
 HARNESS_MEMBER = "docs/scripts/performance/server-sql-isolated-v0816.py"
-FILES = ("measurement", "raw", "worker", "harness")
+FILES = ("measurement", "raw", "resources", "worker", "harness")
 
 
 def require(value, code):
@@ -220,7 +220,9 @@ def attest_collections(*, qualification_args, profile_for, profile_hashes, pins,
             preflight_receipts.append(receipt)
         else:
             files = {"measurement": collected / "measurement.json",
-                     "raw": collected / "raw.ndjson", "worker": worker_path,
+                     "raw": collected / "raw.ndjson",
+                     "resources": collected / "resources.json",
+                     "worker": worker_path,
                      "harness": harness_data}
             collections.append({**coordinate, "phase": kind, "run_id": run_id,
                                 "files": files})

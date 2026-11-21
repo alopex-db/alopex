@@ -28,7 +28,6 @@ class ControllerTests(unittest.TestCase):
                                       "source": source, "assets_digest": assets_digest,
                                       "platform": "linux", "files": files}
             self.audit_pins[subject] = {"source": source, "assets_digest": assets_digest,
-                                        "resource_digest": "d" * 64,
                                         "worker_sha256": "e" * 64,
                                         "harness_sha256": "f" * 64}
         self.subjects["postgresql"] = dict(

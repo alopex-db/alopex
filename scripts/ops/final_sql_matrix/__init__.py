@@ -151,14 +151,23 @@ def compare(before, after):
             and b-c > noise and all(a < z for z, a in zip(before, after))}
 
 
-def audit_matrix(cells, pins):
+def audit_matrix(cells, pins, *, resource_digests=None):
     """Return an offline comparison; performance acceptance is always separate."""
     require(type(pins) is dict and set(pins) == set(SUBJECTS), "SUBJECTS")
     require(type(cells) is list and len(cells) == 48, "CELL_COUNT")
     expected_keys = {(r["case"], r["trial"], r["subject"]) for r in plan()}
     keys = [(c.get("case"), c.get("trial"), c.get("subject")) for c in cells if type(c) is dict]
     require(len(keys) == 48 and len(set(keys)) == 48 and set(keys) == expected_keys, "MATRIX_COVERAGE")
-    medians = {key: audit_cell(cell, pins[cell["subject"]]) for key, cell in zip(keys, cells)}
+    if resource_digests is not None:
+        require(type(resource_digests) is dict and set(resource_digests) == expected_keys and
+                all(_hex(value) for value in resource_digests.values()),
+                "RESOURCE_DIGEST_COVERAGE")
+    medians = {}
+    for key, cell in zip(keys, cells):
+        pin = pins[cell["subject"]]
+        if resource_digests is not None:
+            pin = dict(pin, resource_digest=resource_digests[key])
+        medians[key] = audit_cell(cell, pin)
     comparisons = []
     for case in CASES:
         require(len({c["measurement"]["result_sha256"] for c in cells if c["case"] == case}) == 1,
