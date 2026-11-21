@@ -54,6 +54,8 @@ jobs:
           python3 -B -m unittest discover -s scripts/ops/tests \
             -p test_s04_wire_preflight.py \
             -k test_real_unix_peer_pidfd_tracks_exit_without_docker -v
+      - name: Verify offline S04 socket inventory on Linux
+        run: python3 -B -m unittest discover -s scripts/ops/tests -p test_s04_socket_inventory.py -v
       - name: Verify signed-index capture and WAL controller contracts
         env:
           PYTHONPATH: scripts/test-env:scripts/ops
@@ -538,7 +540,8 @@ jobs:
       - name: Clean Windows validation outputs
         if: always() && runner.os == 'Windows'
         run: |
-          if (Test-Path target) { Remove-Item -Recurse -Force target }
+          if (Test-Path target) { Remove-Item -Recurse -Force -ErrorAction Stop target }
+          if (Test-Path target) { throw "Windows validation target remains after cleanup" }
           python scripts/compatibility/storage.py --log artifacts/windows-wal/storage-cleanup.jsonl
 
       - name: Upload Windows WAL source and storage evidence

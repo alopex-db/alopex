@@ -7,10 +7,43 @@ import unittest
 from unittest.mock import patch
 
 from common import Failure
-from same_job_wrapper import seal_wrapper_failure
+from same_job_wrapper import seal_wrapper_failure, run_closure_candidate
+from lifecycle import Run
+from resolve_builder_lock import LockError
 
 
 class WrapperFailureTests(unittest.TestCase):
+    def test_closure_mismatch_requires_deleted_run_and_final_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory) / 'private'
+            private.mkdir()
+            profile = {'private_output': str(private / 'runs'), 'run_id': 'hosted-804-42'}
+            signed = {'proof_sha256': 'a' * 64}
+            run = Run(profile['private_output'], 'hosted-804-42-trace-lock').create({})
+            run.transition('stopped')
+            run.collect(lambda staging: (staging / 'result.json').write_text('{}'))
+            run.transition('deleted')
+            (run.root / 'final-result.private.json').write_text(json.dumps({
+                'schema': 'alopex.trace-closure-final/v1', 'status': 'failed',
+                'proof_sha256': 'a' * 64, 'error_code': 'CLOSURE_MISMATCH'}))
+            with patch('offline_closure_lifecycle.run_candidate_lifecycle',
+                       side_effect=LockError('unsatisfied Depends: x')):
+                result = run_closure_candidate(profile, {}, private, object(), signed)
+            self.assertEqual(result['status'], 'mismatch')
+
+    def test_closure_guard_failure_cannot_be_diagnostic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory) / 'private'
+            private.mkdir()
+            profile = {'private_output': str(private / 'runs'), 'run_id': 'hosted-804-42'}
+            with patch('offline_closure_lifecycle.run_candidate_lifecycle',
+                       side_effect=LockError('offline host capacity')):
+                with self.assertRaisesRegex(RuntimeError, 'closure guard failure'):
+                    run_closure_candidate(profile, {}, private, object(),
+                                          {'proof_sha256': 'a' * 64})
+            receipt = json.loads((private / 'closure-phase.private.json').read_text())
+            self.assertEqual(receipt['status'], 'guard_failed')
+
     def test_records_fixed_capture_gate_without_exposing_detail(self):
         with tempfile.TemporaryDirectory() as directory:
             private = Path(directory) / "alopex-804-qualification"

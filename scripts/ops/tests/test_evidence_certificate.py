@@ -73,7 +73,7 @@ class CertificateTests(unittest.TestCase):
         source = (REPO/'.github/workflows/alopex-performance.yml').read_text()
         for name, work in (('inventory', 'Collect encrypted read-only host inventory'),
                            ('qualification', 'Admit this runner before candidate acquisition'),
-                           ('wal_cost_682', 'Qualify, capture signed indexes, and measure on the same runner'),
+                           ('wal_cost_682', 'Qualify, capture signed indexes, measure WAL, and check candidate closure'),
                            ('s04_inspect', 'Inspect selected Docker context read-only')):
             import re
             match = re.search(r'^  '+name+r':\n(.*?)(?=^  [a-z0-9_]+:|\Z)', source, re.M | re.S)

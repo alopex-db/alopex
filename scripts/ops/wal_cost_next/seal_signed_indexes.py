@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import io
 import json
+import re
 import os
 from pathlib import Path
 import select
@@ -20,6 +21,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "test-env"))
 from capacity import Budget  # noqa: E402
 from common import Failure, read_json, require  # noqa: E402
+from lifecycle import Run  # noqa: E402
 
 LIMIT = 250_000_000
 # The raw capture stays within LIMIT. Sealing needs a second full-size copy
@@ -75,20 +77,51 @@ def audit(root):
     return size
 
 
+def capture_identity(private):
+    """Bind the sealed receipt to this selected run and canonical proof."""
+    profile = read_json(private / "profile.json", private=True)
+    run_id = profile["run_id"] + "-trace-resolve"
+    run = private / "runs" / run_id
+    if not run.exists():
+        return run, run_id, None
+    record = read_json(run / "run.json", private=True)
+    require(record.get("run_id") == run_id, "IDENTITY")
+    proof_file = run / "proof" / "proof.sha256"
+    auth_file = run / "proof" / "authentication.json"
+    proof_hash = None
+    if proof_file.is_file() and auth_file.is_file():
+        proof_hash = proof_file.read_text().strip()
+        auth = read_json(auth_file)
+        canonical = json.dumps(auth, sort_keys=True, separators=(",", ":")).encode()
+        require(re.fullmatch(r"[0-9a-f]{64}", proof_hash) is not None and
+                hashlib.sha256(canonical).hexdigest() == proof_hash, "COLLECT")
+    return run, run_id, proof_hash
+
+
 def _seal_full(private, certificate, output):
+    run, run_id, proof_hash = capture_identity(private)
     if output.exists():
         require(output.is_dir() and not output.is_symlink(), "COLLECT")
         public = read_json(output / "public.json")
         ciphertext = output / "private-evidence.cms"
-        require(public.get("schema") == "alopex.signed-index-capture/v1" and
+        require(run.exists() and
+                public.get("schema") == "alopex.signed-index-capture/v1" and
+                public.get("case") == "SIGNED_INDEX_CAPTURE" and
+                public.get("capture_run_id") == run_id and
+                public.get("proof_sha256") == proof_hash and
                 public.get("outcome") in ("passed", "failed") and ciphertext.is_file() and
                 not ciphertext.is_symlink() and
                 digest(ciphertext) == public.get("evidence_sha256"), "COLLECT")
+        if public["outcome"] == "passed":
+            require(proof_hash is not None and
+                    read_json(run / "run.json", private=True)["phase"] == "deleted" and
+                    (run / "collected" / "capture.status").read_text() ==
+                    "capture-complete\n", "COLLECT")
+            Run(private / "runs", run_id).load().verify_collection()
         return public
-    profile = read_json(private / "profile.json", private=True)
-    run = private / "runs" / (profile["run_id"] + "-trace-resolve")
     if not run.exists():
         return None
+    profile = read_json(private / "profile.json", private=True)
     receipt_path = run / "capture-budget.private.json"
     receipt = read_json(receipt_path, private=True) if receipt_path.exists() else None
     if receipt is not None:
@@ -101,7 +134,10 @@ def _seal_full(private, certificate, output):
                 (run / "collected" / "capture.status").is_file() and
                 (run / "proof" / "proof.sha256").is_file() and
                 (run / "collected" / "capture.status").read_text() == "capture-complete\n")
-    require(complete or (run / "failure.json").is_file(), "COLLECT")
+    require((complete and proof_hash is not None) or
+            (run / "failure.json").is_file(), "COLLECT")
+    if complete:
+        Run(private / "runs", run_id).load().verify_collection()
     require(certificate.is_file() and not certificate.is_symlink(), "PREREQUISITE")
     budget = Budget(profile["storage"])
     baseline = receipt["allocated_before_bytes"] if receipt is not None else None
@@ -189,6 +225,7 @@ def _seal_full(private, certificate, output):
         public = {"schema": "alopex.signed-index-capture/v1", "case": "SIGNED_INDEX_CAPTURE",
                   "outcome": "passed" if complete else "failed",
                   "error_code": None if complete else "CAPTURE_FAILURE",
+                  "capture_run_id": run_id, "proof_sha256": proof_hash,
                   "evidence_sha256": digest(ciphertext)}
         (staging / "public.json").write_text(json.dumps(public, sort_keys=True) + "\n")
         require(not output.exists() and not output.is_symlink(), "COLLECT")
@@ -217,8 +254,8 @@ def _seal_full(private, certificate, output):
 
 def _seal_failure(private, certificate, output, original):
     """Seal only bounded diagnostic metadata when the complete archive cannot fit."""
+    run, run_id, proof_hash = capture_identity(private)
     profile = read_json(private / "profile.json", private=True)
-    run = private / "runs" / (profile["run_id"] + "-trace-resolve")
     require(run.is_dir() and not run.is_symlink() and not output.exists() and
             not output.is_symlink(), "COLLECT")
     require(certificate.is_file() and not certificate.is_symlink(), "PREREQUISITE")
@@ -294,6 +331,7 @@ def _seal_failure(private, certificate, output, original):
         public = {"schema": "alopex.signed-index-capture/v1",
                   "case": "SIGNED_INDEX_CAPTURE", "outcome": "failed",
                   "error_code": "EVIDENCE_FAILURE",
+                  "capture_run_id": run_id, "proof_sha256": proof_hash,
                   "evidence_sha256": digest(ciphertext)}
         (staging / "public.json").write_text(json.dumps(public, sort_keys=True) + "\n")
         used = budget.used()

@@ -32,6 +32,11 @@ on:
         required: false
         type: boolean
         default: false
+      s04_socket_inventory_mode:
+        description: Offline selected socket metadata inventory for #684
+        required: false
+        type: boolean
+        default: false
       s04_capture_mode:
         description: Run #804 qualification then capture selected CLI against an offline fake socket
         required: false
@@ -39,6 +44,22 @@ on:
         default: false
       expected_controller_sha:
         description: Exact controller commit for qualification mode
+        required: false
+        type: string
+      four_case_lock_sha256:
+        description: Independently reviewed SHA-256 of the #712 private lock
+        required: false
+        type: string
+      four_case_lock_base64:
+        description: Base64 of the exact #712 private lock bytes
+        required: false
+        type: string
+      four_case_manifest_sha256:
+        description: Independently reviewed SHA-256 of the #712 static manifest
+        required: false
+        type: string
+      four_case_manifest_base64:
+        description: Base64 of the exact #712 static manifest bytes
         required: false
         type: string
 
@@ -51,8 +72,184 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  s04_socket_inventory:
+    if: ${{ inputs.s04_socket_inventory_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Gate exact source and host allocation before checkout
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, stat, subprocess, sys, tempfile
+          gate = 'SOURCE_BINDING'
+          root_id = 'none'
+          try:
+              e = os.environ
+              assert e.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+              assert e.get('ISSUE_NUMBER') == '684'
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_CONTROLLER_SHA', ''))
+              assert e['EXPECTED_CONTROLLER_SHA'] == e['GITHUB_SHA']
+              runner_temp = pathlib.Path(e['RUNNER_TEMP']).resolve(strict=True)
+              assert runner_temp == pathlib.Path(e['RUNNER_TEMP']) and runner_temp.is_dir()
+              env_file = pathlib.Path(e['GITHUB_ENV'])
+              assert env_file.is_absolute()
+              for key in ('TMPDIR', 'TMP', 'TEMP'):
+                  os.environ[key] = str(runner_temp)
+              fd = os.open(env_file, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+              try:
+                  info = os.fstat(fd)
+                  assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                  payload = ''.join(f'{key}={runner_temp}\n' for key in
+                                    ('TMPDIR', 'TMP', 'TEMP')).encode()
+                  assert os.write(fd, payload) == len(payload)
+              finally:
+                  os.close(fd)
+              assert pathlib.Path(tempfile.gettempdir()).resolve(strict=True) == runner_temp
+              gate = 'DAEMON_DISCOVERY'
+              # A selected local daemon must be identifiable before checkout.
+              # Unknown flags/configuration stop the inventory; no Docker API is queried.
+              daemons = []
+              for entry in pathlib.Path('/proc').iterdir():
+                  if not entry.name.isdecimal():
+                      continue
+                  try:
+                      comm = (entry / 'comm').read_text().strip()
+                  except FileNotFoundError:
+                      continue
+                  assert comm
+                  if comm != 'dockerd':
+                      continue
+                  try:
+                      raw = (entry / 'cmdline').read_bytes()
+                  except FileNotFoundError:
+                      continue
+                  assert len(raw) <= 65536
+                  args = [os.fsdecode(part) for part in raw.split(b'\0') if part]
+                  assert args and pathlib.Path(args[0]).name == 'dockerd'
+                  daemons.append(args)
+              assert len(daemons) == 1
+              gate = 'DAEMON_CONFIG'
+              args = daemons[0][1:]
+              assert not any(arg.startswith('--rootless') or arg.startswith('--config-file') or
+                             arg == '-g' or arg.startswith('-g=') for arg in args)
+              roots_in_args = [arg.split('=', 1)[1] for arg in args if arg.startswith('--data-root=')]
+              for index, arg in enumerate(args):
+                  if arg == '--data-root':
+                      assert index + 1 < len(args)
+                      roots_in_args.append(args[index + 1])
+              assert len(roots_in_args) <= 1
+              setting = pathlib.Path('/etc/docker/daemon.json')
+              configured_root = None
+              if setting.exists():
+                  assert not setting.is_symlink() and setting.stat().st_size <= 65536
+                  configured_root = json.loads(setting.read_text()).get('data-root')
+              if configured_root is not None and roots_in_args:
+                  assert configured_root == roots_in_args[0]
+              gate = 'DAEMON_ROOT'
+              daemon = pathlib.Path(roots_in_args[0] if roots_in_args else
+                                    configured_root or '/var/lib/docker')
+              assert daemon.is_absolute() and daemon.resolve(strict=True) == daemon
+              gate = 'ROOT_SCOPE'
+              temp_areas = ((pathlib.Path('/tmp'), 'tmp'),
+                            (pathlib.Path('/var/tmp'), 'var_tmp'))
+              def temp_entries(areas):
+                  selected = []
+                  for area, label in areas:
+                      if not area.exists():
+                          continue
+                      assert area.is_dir() and not area.is_symlink()
+                      with os.scandir(area) as entries:
+                          for entry in entries:
+                              if 'alopex' not in entry.name.lower():
+                                  continue
+                              info = entry.stat(follow_symlinks=False)
+                              actual = pathlib.Path(entry.path).resolve(strict=True)
+                              assert actual.is_absolute()
+                              selected.append((label, entry.name, info.st_dev, info.st_ino,
+                                               info.st_uid, str(actual)))
+                  return sorted(selected)
+              temp_snapshot = temp_entries(temp_areas)
+              roots = [('workspace_parent', pathlib.Path(e['GITHUB_WORKSPACE']).parent),
+                       ('home', pathlib.Path.home()), ('runner_temp', runner_temp),
+                       ('daemon', daemon)]
+              roots.extend((label, pathlib.Path(actual)) for label, _, _, _, _, actual
+                           in temp_snapshot)
+              roots = [(name, p) for name, p in roots if p.exists()]
+              assert all(p.is_absolute() and (p.is_dir() or p.is_file()) and
+                         not p.is_symlink() for _, p in roots)
+              roots = [(name, p) for name, p in roots
+                       if not any(p != q and p.is_relative_to(q) for _, q in roots)]
+              total = 0
+              for root_id, root in roots:
+                  gate = 'ROOT_SCAN'
+                  prefix = ['/usr/bin/sudo', '-n'] if root == daemon else []
+                  run = subprocess.run(prefix + ['/usr/bin/du', '-sk' if root == daemon else '-skL',
+                                                 '--', str(root)],
+                                       stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+                  gate = 'ROOT_EXIT'
+                  if run.returncode != 0:
+                      lines = run.stderr.decode('utf-8', errors='replace').splitlines()
+                      vanished = (run.returncode == 1 and bool(lines) and all(
+                          re.fullmatch(r'(?:/usr/bin/)?du: cannot access .+: No such file or directory',
+                                       line) is not None for line in lines))
+                      gate = 'ROOT_EXIT_VANISHED' if vanished else 'ROOT_EXIT_OTHER'
+                      raise AssertionError
+                  gate = 'ROOT_STDERR'
+                  assert not run.stderr
+                  gate = 'ROOT_OUTPUT_SHAPE'
+                  parts = run.stdout.decode().strip().split('\t')
+                  assert len(parts) == 2
+                  gate = 'ROOT_OUTPUT_COUNT'
+                  assert parts[0].isdecimal()
+                  gate = 'ROOT_OUTPUT_ROOT'
+                  assert parts[1] == str(root)
+                  total += int(parts[0]) * 1024
+                  gate = 'ROOT_FREE_SPACE'
+                  fs = os.statvfs(root)
+                  assert fs.f_bavail * fs.f_frsize > 1_000_000_000
+              root_id = 'none'
+              gate = 'TEMP_SNAPSHOT'
+              assert temp_entries(temp_areas) == temp_snapshot
+              gate = 'CAPACITY'
+              assert total + 1_000_000_000 < 40_000_000_000
+              print('{"case":"S04_SOCKET_STORAGE","outcome":"passed"}')
+          except BaseException:
+              print(json.dumps({'case': 'S04_SOCKET_STORAGE', 'outcome': 'failed',
+                                'error_code': gate, 'root_id': root_id}, sort_keys=True))
+              sys.exit(1)
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_controller_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Collect selected socket metadata without connection
+        id: collect
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: python3 -B scripts/ops/s04_socket_inventory.py
+      - name: Seal private socket inventory
+        if: always() && steps.collect.outcome != 'skipped'
+        env:
+          COLLECT_OUTCOME: ${{ steps.collect.outcome }}
+        run: python3 -B scripts/ops/s04_socket_inventory_seal.py
+      - name: Upload encrypted socket inventory
+        if: always() && steps.collect.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: s04-socket-metadata-inventory
+          path: |
+            native-s04-socket-inventory-export/private-evidence.cms
+            native-s04-socket-inventory-export/public.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
   inventory:
-    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
+    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -75,7 +272,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   qualification:
-    if: inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode))
+    if: inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode))
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -228,15 +425,23 @@ jobs:
           fetch-depth: 1
       - name: Check evidence recipient validity before work
         run: python3 -B scripts/ops/check_evidence_certificate.py --minimum-seconds 86400
+      - name: Install independently pinned four-case inputs
+        if: inputs.sql_four_case_mode
+        env:
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+          ALOPEX_FOUR_CASE_LOCK_B64: ${{ inputs.four_case_lock_base64 }}
+          ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
+          ALOPEX_FOUR_CASE_MANIFEST_B64: ${{ inputs.four_case_manifest_base64 }}
+        run: python3 -B scripts/ops/four_case_job.py install
       - name: Admit this runner before candidate acquisition
-        if: ${{ !inputs.sql_diagnostic_mode }}
+        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --admission-only
       - name: Retrieve exact candidate assets
-        if: ${{ !inputs.sql_diagnostic_mode }}
+        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -244,7 +449,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --acquire-assets
       - name: Qualify on this runner
-        if: ${{ !inputs.sql_diagnostic_mode }}
+        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
@@ -272,6 +477,31 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
         run: python3 -B scripts/ops/hosted_test_env_qualification_1951.py --execute
+      - name: Admit runner for source-pinned four-case qualification
+        if: inputs.sql_four_case_mode
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+        run: python3 -B scripts/ops/hosted_test_env_qualification_four_case.py --admission-only
+      - name: Acquire source-pinned four-case assets
+        if: inputs.sql_four_case_mode
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/ops/hosted_test_env_qualification_four_case.py --acquire-assets
+      - name: Qualify source-pinned four-case assets on this runner
+        if: inputs.sql_four_case_mode
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+        run: python3 -B scripts/ops/hosted_test_env_qualification_four_case.py --execute
       - name: Preserve encrypted qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -315,14 +545,23 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
-          GH_TOKEN: ${{ github.token }}
-        run: python3 -B scripts/ops/same_job_four_case.py
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+          ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
+        run: python3 -B scripts/ops/four_case_job.py run
+      - name: Seal private four-case evidence
+        if: always() && inputs.sql_four_case_mode && steps.matrix.outcome != 'skipped'
+        env:
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+          ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
+        run: python3 -B scripts/ops/four_case_job.py seal
       - name: Preserve encrypted four-case evidence
         if: always() && inputs.sql_four_case_mode && steps.matrix.outcome != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: native-sql-four-case-matrix
-          path: native-sql-four-case-export/
+          path: |
+            native-sql-four-case-export/private-evidence.cms
+            native-sql-four-case-export/public.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -343,7 +582,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   wal_cost_682:
-    if: inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode
+    if: inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
@@ -506,7 +745,7 @@ jobs:
           path: frozen-wal-controller
       - name: Check evidence recipient validity before work
         run: python3 -B qualification-controller/scripts/ops/check_evidence_certificate.py --certificate frozen-wal-controller/.github/ops/native-evidence-cert.pem --expected-sha256 d33a612dab2f76986e0dc6ba0ba45be15265ceccd2d56b07c14f9f696259f6b2 --minimum-seconds 86400
-      - name: Qualify, capture signed indexes, and measure on the same runner
+      - name: Qualify, capture signed indexes, measure WAL, and check candidate closure
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -553,7 +792,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   s04_inspect:
-    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode }}
+    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

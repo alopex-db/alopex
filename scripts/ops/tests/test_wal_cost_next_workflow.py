@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 import types
@@ -37,14 +38,14 @@ class WorkflowContract(unittest.TestCase):
         qualification = workflow.split('  qualification:\n', 1)[1].split('  wal_cost_682:\n', 1)[0]
         self.assertIn("inputs.issue_number == '804'", qualification)
         self.assertIn("inputs.issue_number == '712'", qualification)
-        self.assertIn('scripts/ops/same_job_four_case.py', qualification)
+        self.assertIn('scripts/ops/four_case_job.py run', qualification)
         self.assertIn('wal_cost_mode:', workflow)
         self.assertIn("inputs.issue_number == '682'", workflow)
         self.assertIn('!inputs.sql_four_case_mode && !inputs.wal_cost_mode', workflow)
         order = ['Bound checkout before source acquisition',
                  'Stage current #804 controller in measured workspace',
                  'Stage frozen #682 comparator in measured workspace',
-                 'Qualify, capture signed indexes, and measure on the same runner',
+                 'Qualify, capture signed indexes, measure WAL, and check candidate closure',
                  'Seal signed Ubuntu indexes', 'Seal wrapper evidence',
                  'Preserve encrypted and allowlisted evidence']
         cost_job = workflow.split('  wal_cost_682:\n', 1)[1]
@@ -56,6 +57,10 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn('path: frozen-wal-controller', workflow)
         self.assertIn('if-no-files-found: error', workflow)
         self.assertNotIn('*.log\n', workflow.split('path: |')[-1])
+        upload = cost_job.split('name: Preserve encrypted and allowlisted evidence', 1)[1]
+        self.assertIn('wal-cost-wrapper-export/private-evidence.cms', upload)
+        self.assertNotIn('candidate.private.json', upload)
+        self.assertNotIn('closure-phase.private.json', upload)
 
     def test_sealer_exports_only_allowlisted_fields_and_encrypts_private(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -68,6 +73,22 @@ class WorkflowContract(unittest.TestCase):
                 'original_error': None, 'cleanup_error': None, 'comparator_exit': 0,
                 'all_owned_children_waited': True, 'secret_machine_path': '/hidden'}))
             (private / 'comparator.stdout.private.log').write_text('private log')
+            closure_run = private / 'runs/hosted-804-42-trace-lock'
+            (closure_run / 'collected').mkdir(parents=True)
+            (closure_run / 'run.json').write_text(json.dumps({
+                'run_id': 'hosted-804-42-trace-lock', 'phase': 'deleted'}))
+            (closure_run / 'collection.json').write_text('{}')
+            (closure_run / 'collected/result.json').write_text('{}')
+            (closure_run / 'collected/candidate.private.json').write_text(json.dumps({
+                'approval': 'unapproved', 'formal_lock': False, 'secret': '/hidden/closure'}))
+            (closure_run / 'final-result.private.json').write_text(json.dumps({
+                'schema': 'alopex.trace-closure-final/v1', 'status': 'candidate',
+                'proof_sha256': 'a' * 64, 'error_code': None}))
+            (private / 'closure-phase.private.json').write_text(json.dumps({
+                'schema': 'alopex.trace-closure-phase/v1', 'case': 'TRACE_CLOSURE_682',
+                'status': 'candidate', 'approval': 'unapproved', 'formal_lock': False,
+                'run_id': 'hosted-804-42-trace-lock', 'proof_sha256': 'a' * 64,
+                'secret': '/hidden/closure'}))
             evidence = frozen / 'wal-cost-export/private-evidence.cms'
             evidence.write_bytes(b'encrypted cost')
             (frozen / 'wal-cost-export/result.json').write_text(json.dumps({
@@ -81,11 +102,22 @@ class WorkflowContract(unittest.TestCase):
 
             with patch.object(sealer.subprocess, 'run', side_effect=fake_encrypt):
                 public = sealer.seal(qualification, frozen, private, output)
-            self.assertEqual(public['outcome'], 'passed')
+            self.assertEqual(public['outcome'], 'failed')
+            self.assertEqual(public['error_code'], 'LOCK_UNAPPROVED')
+            self.assertEqual(public['wal_outcome'], 'passed')
+            self.assertEqual(public['closure_outcome'], 'candidate')
+            self.assertEqual(public['closure_approval'], 'unapproved')
+            self.assertIs(public['formal_lock'], False)
+            self.assertNotIn('/hidden/closure', (output / 'public.json').read_text())
             self.assertNotIn('secret_machine_path', (output / 'public.json').read_text())
             self.assertTrue((output / 'private-evidence.cms').is_file())
             self.assertFalse((private / 'wrapper-result.private.json').exists())
             self.assertFalse((private / 'comparator.stdout.private.log').exists())
+            with patch.object(sealer, 'seal', return_value=public), \
+                 patch.object(sys, 'argv', ['seal_wrapper', '--qualification', str(qualification),
+                                            '--frozen', str(frozen), '--private', str(private),
+                                            '--output', str(output)]):
+                self.assertEqual(sealer.main(), 1)
 
     def test_missing_comparator_export_still_encrypts_wrapper_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -171,6 +203,44 @@ class WorkflowContract(unittest.TestCase):
             self.assertFalse((private / 'wrapper-evidence.tar.gz').exists())
             self.assertFalse(wrapper.exists())
             self.assertFalse(log.exists())
+
+    def test_oversized_private_closure_input_fails_before_encryption(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            qualification, frozen, private, output = [root / name for name in
+                                                      ('qualification', 'frozen', 'private', 'output')]
+            private.mkdir()
+            (private / 'closure-phase.private.json').write_text(json.dumps({
+                'schema': 'alopex.trace-closure-phase/v1', 'case': 'TRACE_CLOSURE_682',
+                'status': 'guard_failed', 'approval': 'unapproved', 'formal_lock': False,
+                'run_id': 'hosted-804-42-trace-lock', 'proof_sha256': 'a' * 64}))
+            collected = private / 'runs/hosted-804-42-trace-lock/collected'
+            collected.mkdir(parents=True)
+            (collected / 'candidate.private.json').write_bytes(b'x' * (sealer.CLOSURE_INPUT_LIMIT + 1))
+            with patch.object(sealer.subprocess, 'run') as encrypt:
+                public = sealer.seal(qualification, frozen, private, output)
+            encrypt.assert_not_called()
+            self.assertEqual(public['error_code'], 'EVIDENCE_FAILURE')
+            self.assertFalse((output / 'private-evidence.cms').exists())
+            self.assertFalse((private / 'wrapper-evidence.tar.gz').exists())
+
+    def test_candidate_phase_without_deleted_final_is_guard_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            qualification, frozen, private, output = [root / name for name in
+                                                      ('qualification', 'frozen', 'private', 'output')]
+            private.mkdir()
+            (private / 'closure-phase.private.json').write_text(json.dumps({
+                'schema': 'alopex.trace-closure-phase/v1', 'case': 'TRACE_CLOSURE_682',
+                'status': 'candidate', 'approval': 'unapproved', 'formal_lock': False,
+                'run_id': 'hosted-804-42-trace-lock', 'proof_sha256': 'a' * 64}))
+            def fake_encrypt(command, **_):
+                Path(command[command.index('-out') + 1]).write_bytes(b'encrypted')
+                return types.SimpleNamespace(returncode=0)
+            with patch.object(sealer.subprocess, 'run', side_effect=fake_encrypt):
+                public = sealer.seal(qualification, frozen, private, output)
+            self.assertEqual(public['closure_error_code'], 'CLOSURE_GUARD')
+            self.assertEqual(public['outcome'], 'failed')
 
 
 if __name__ == '__main__':

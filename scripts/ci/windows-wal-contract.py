@@ -50,6 +50,9 @@ commands = [
                          "--lib", "lsm::publication_tests::"]),
     ("container-fence", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                         "--lib", "lsm::overflow::fence_tests::"]),
+    ("large-container-reopen", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
+                                "--lib", "lsm::overflow::windows_reopen_tests::windows_fences_and_reopens_container_above_old_default_copy_budget",
+                                "--", "--exact"]),
     ("staging-recovery", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
                          "--lib", "storage::publication::staging::tests::"]),
     ("activation-staging", ["cargo", "test", "--release", "--locked", "-p", "alopex-core",
@@ -136,7 +139,8 @@ for name, command in commands:
     required = {"readonly-recovery": "3 passed; 0 failed", "lowlevel-writer": "36 passed; 0 failed",
                 "spool-codec": "29 passed; 0 failed; 0 ignored",
                 "windows-publication": "5 passed; 0 failed", "lsm-publication": "12 passed; 0 failed",
-                "container-fence": "10 passed; 0 failed", "directory-publication": "8 passed; 0 failed",
+                "container-fence": "11 passed; 0 failed", "directory-publication": "8 passed; 0 failed",
+                "large-container-reopen": "1 passed; 0 failed; 0 ignored",
                 "overflow-garbage": "17 passed; 0 failed", "overflow-lifecycle": "4 passed; 0 failed",
                 "public-overflow": "9 passed; 0 failed; 0 ignored",
                 "public-journal": "2 passed; 0 failed; 0 ignored",
@@ -153,7 +157,7 @@ for name, command in commands:
                 "hnsw-two-index-eviction": "6 passed; 0 failed; 0 ignored",
                 "hnsw-savepoint-cache": "13 passed; 0 failed; 0 ignored",
                 "hnsw-begin-cache": "11 passed; 0 failed; 0 ignored",
-                "hnsw-copy-on-write": "10 passed; 0 failed; 0 ignored",
+                "hnsw-copy-on-write": "11 passed; 0 failed; 0 ignored",
                 "hnsw-dirty-writes": "17 passed; 0 failed; 0 ignored"}
     if name in required and required[name] not in contents:
         raise SystemExit(f"{name}: expected native tests did not run")

@@ -46,6 +46,7 @@ job's owner.
 | `alopex-performance.yml:qualification` | Extended Verification | exact-SHA same-runner native acceptance; for #712, the pinned four-case server/client SQL matrix or paired stage diagnostic; for #684, selected Docker CLI offline wire capture after acceptance, each with separate encrypted evidence |
 | `alopex-performance.yml:wal_cost_682` | Extended Verification | exact-SHA same-runner native acceptance followed by frozen four-cell WAL cost comparison and encrypted evidence |
 | `alopex-performance.yml:s04_inspect` | Extended Verification | read-only selected-host Docker endpoint and CLI inspection for #684; encrypted private receipt, no container creation or performance qualification |
+| `alopex-performance.yml:s04_socket_inventory` | Extended Verification | read-only selected Unix socket path, ACL, context and daemon metadata for #684; encrypted private receipt before any S04 connection, without performance qualification |
 | `alopex-py-release.yml:linux` | RC Qualification | qualified Linux wheels |
 | `alopex-py-release.yml:macos` | RC Qualification | qualified macOS wheels |
 | `alopex-py-release.yml:windows` | RC Qualification | qualified Windows wheels |
@@ -81,6 +82,7 @@ job's owner.
 | `parity-harness.yml:contract` | Development CI | benchmark harness contract result |
 | `parity-performance.yml:performance` | Extended Verification | exact-SHA canonical benchmark JSON/Markdown and raw evidence |
 | `parity-performance.yml:retain-run-outcome` | Extended Verification | runner-independent exact-SHA terminal run outcome |
+| `native-evidence-expiry.yml:recipients` | Extended Verification | scheduled read-only recipient certificate renewal-deadline check for candidate and frozen comparator |
 | `public-release-verification.yml:verify` | Stable Delivery | package reachability and minimal import |
 | `public-release-verification.yml:publish` | Stable Delivery | immutable public run report |
 | `public-release-verification.yml:publish-vector-benchmark` | Stable Delivery | validated projection of retained exact-SHA evidence into public docs |

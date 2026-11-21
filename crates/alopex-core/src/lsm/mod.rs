@@ -1701,8 +1701,9 @@ impl LsmKV {
         Ok(commit_ts)
     }
 
-    /// At most one checkpoint and one recheck, before any part of this write
-    /// reaches the WAL. Never retry an append after an I/O error.
+    /// Within this capacity check, at most one checkpoint and one recheck occur
+    /// before this write reaches the WAL. The caller may have checkpointed
+    /// earlier for replay or spool limits. Never retry after an append I/O error.
     fn prepare_wal_capacity(&self, requested: u64) -> Result<()> {
         let (capacity, used) = {
             let wal = self.wal.read().expect("lsm wal lock poisoned");
