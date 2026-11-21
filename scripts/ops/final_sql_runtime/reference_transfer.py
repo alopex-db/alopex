@@ -22,7 +22,9 @@ from . import reference_handoff, reference_staging
 
 
 CHUNK = 1024 * 1024
-MAX_SECONDS = 900
+MAX_SECONDS = 480
+JOB_GATE_SECONDS = 600
+GATE_MARGIN_SECONDS = 15
 # The receiver is fixed code. Arguments are shell-quoted because ssh invokes a
 # remote shell even when the local SSH process is started with an argv vector.
 RECEIVER = r'''
@@ -137,7 +139,7 @@ def _send(fd: int, data: bytes, deadline: float) -> None:
 def transfer(*, repository: str, expected: dict, token: str,
              source: Path, ssh_host: str, ssh_port: int, ssh_user: str,
              known_hosts: Path, private_key: Path, runner_root: str,
-             runner_repo: str, timeout_seconds: int = 900,
+             runner_repo: str, timeout_seconds: int = 480,
              fetch=reference_handoff.fetch_and_verify,
              popen=subprocess.Popen) -> dict:
     """Verify, then stream exact bytes to the assigned ephemeral runner.
@@ -196,6 +198,10 @@ def transfer(*, repository: str, expected: dict, token: str,
                  assignment.get('head_sha') == expected['head_sha'] and
                  type(assignment.get('job_id')) is int and assignment['job_id'] > 0,
                  'TRANSFER_ASSIGNMENT')
+        started_at = reference_handoff.job_start_timestamp(assignment.get('started_at'))
+        remaining_gate = started_at + JOB_GATE_SECONDS - GATE_MARGIN_SECONDS - time.time()
+        _require(0 < remaining_gate <= JOB_GATE_SECONDS,
+                 'TRANSFER_JOB_DEADLINE')
         remote = 'python3 -c ' + shlex.quote(RECEIVER) + ' ' + shlex.quote(runner_root) + ' ' + shlex.quote(runner_repo)
         argv = ['ssh', '-F', '/dev/null', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
                 '-o', 'UserKnownHostsFile=' + str(known_hosts), '-o', 'GlobalKnownHostsFile=/dev/null',
@@ -204,7 +210,7 @@ def transfer(*, repository: str, expected: dict, token: str,
                 '-o', 'ProxyCommand=none', '-o', 'ProxyJump=none', '-o', 'LogLevel=ERROR',
                 '-T', '-i', str(private_key), '-p', str(ssh_port),
                 ssh_user + '@' + ssh_host, remote]
-        deadline = time.monotonic() + timeout_seconds
+        deadline = time.monotonic() + min(timeout_seconds, remaining_gate)
         with tempfile.TemporaryFile() as output:
             process = popen(argv, stdin=subprocess.PIPE, stdout=output,
                             stderr=subprocess.DEVNULL)

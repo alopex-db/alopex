@@ -1,6 +1,7 @@
 """Local receiver contract checks; no SSH, runner, or original ZIPs."""
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 import sys
@@ -136,13 +137,30 @@ class ReceiverTests(unittest.TestCase):
                 ssh_port=22, ssh_user="runner", known_hosts=known_hosts,
                 private_key=key, runner_root=str(self.root), runner_repo="alopex",
                 fetch=lambda **_: {"run_id": 1, "runner_id": 4,
-                                   "head_sha": "a" * 40, "job_id": 6},
+                                   "head_sha": "a" * 40, "job_id": 6,
+                                   "started_at": datetime.now(timezone.utc).strftime(
+                                       "%Y-%m-%dT%H:%M:%SZ")},
                 popen=local_receiver)
         self.assertEqual("transferred", result["status"])
         self.assertTrue((self.workspace / "reference-originals.ready").exists())
         for pin, data in zip(self.pins, self.payloads):
             self.assertEqual(data, (self.workspace / "reference-originals" /
                                     pin["basename"]).read_bytes())
+        blocked_popen = mock.Mock(side_effect=AssertionError("expired job must not receive bytes"))
+        with mock.patch.object(reference_transfer.reference_staging, "_pins",
+                               return_value={str(i): pin for i, pin in enumerate(self.pins)}), \
+             mock.patch.object(reference_transfer.reference_staging, "verify_staging"):
+            with self.assertRaisesRegex(ValueError, "TRANSFER_JOB_DEADLINE"):
+                reference_transfer.transfer(
+                    repository="alopex-db/alopex", expected=expected,
+                    token="test-only", source=source, ssh_host="127.0.0.1",
+                    ssh_port=22, ssh_user="runner", known_hosts=known_hosts,
+                    private_key=key, runner_root=str(self.root), runner_repo="alopex",
+                    fetch=lambda **_: {"run_id": 1, "runner_id": 4,
+                                       "head_sha": "a" * 40, "job_id": 6,
+                                       "started_at": "2020-01-01T00:00:00Z"},
+                    popen=blocked_popen)
+        blocked_popen.assert_not_called()
 
 
 if __name__ == "__main__":

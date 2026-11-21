@@ -38,6 +38,7 @@ class ReferenceHandoffTest(unittest.TestCase):
             {"id": 37, "run_id": 17, "head_sha": "a" * 40,
              "runner_id": 29, "runner_group_id": 31,
              "name": "stage_original_references", "status": "in_progress",
+             "started_at": "2026-11-21T05:00:00Z",
              "conclusion": None, "labels": ["alopex-712-originals-one-use"]}]}
 
     def verify(self):
@@ -46,7 +47,15 @@ class ReferenceHandoffTest(unittest.TestCase):
 
     def test_exact_active_assignment(self):
         self.assertEqual(self.verify(), {"run_id": 17, "job_id": 37,
-                                         "runner_id": 29, "head_sha": "a" * 40})
+                                         "runner_id": 29, "head_sha": "a" * 40,
+                                         "started_at": "2026-11-21T05:00:00Z"})
+
+    def test_missing_or_invalid_job_start_is_rejected(self):
+        job = self.jobs["jobs"][0]
+        for value in (None, "2026-11-21", "2026-13-21T05:00:00Z"):
+            job["started_at"] = value
+            with self.assertRaisesRegex(ValueError, "^HANDOFF_JOB_TIME$"):
+                self.verify()
 
     def test_unassigned_runner_is_pending_only_while_idle(self):
         self.jobs = {"total_count": 0, "jobs": []}

@@ -10,11 +10,22 @@ from __future__ import annotations
 import re
 import os
 import time
+from datetime import datetime
 
 from . import reference_download as download
 
 
 HEX40 = re.compile(r"[0-9a-f]{40}")
+UTC_INSTANT = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z")
+
+
+def job_start_timestamp(value: object) -> float:
+    """Parse the authenticated Actions job start as an exact UTC instant."""
+    _require(type(value) is str and UTC_INSTANT.fullmatch(value), "HANDOFF_JOB_TIME")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        raise ValueError("HANDOFF_JOB_TIME") from None
 
 
 def _require(ok: bool, code: str) -> None:
@@ -100,8 +111,10 @@ def verify_assignment(*, expected: dict, run: dict, attempt_jobs: dict,
         expected["runner_label"] in job["labels"] and
         runner["status"] == "online" and runner["busy"],
         "HANDOFF_JOB")
+    job_start_timestamp(job.get("started_at"))
     return {"run_id": expected["run_id"], "job_id": job["id"],
-            "runner_id": expected["runner_id"], "head_sha": expected["head_sha"]}
+            "runner_id": expected["runner_id"], "head_sha": expected["head_sha"],
+            "started_at": job["started_at"]}
 
 
 def fetch_and_verify(*, repository: str, expected: dict, token: str | None = None,

@@ -1,6 +1,7 @@
 """Synthetic local-only staging checks; no preserved reference is copied."""
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 import sys
@@ -93,7 +94,9 @@ class LocalStageTests(unittest.TestCase):
                 known_hosts=known_hosts, private_key=key,
                 runner_root=str(runner_root), runner_repo="alopex",
                 fetch=lambda **_: {"run_id": 1, "runner_id": 4,
-                                   "head_sha": "a" * 40, "job_id": 6},
+                                   "head_sha": "a" * 40, "job_id": 6,
+                                   "started_at": datetime.now(timezone.utc).strftime(
+                                       "%Y-%m-%dT%H:%M:%SZ")},
                 popen=local_receiver)
         self.assertEqual("transferred", result["status"])
         self.assertTrue((workspace / "reference-originals.ready").exists())
