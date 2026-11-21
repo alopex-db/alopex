@@ -101,7 +101,7 @@ def run(*, qualification, subjects, product_manifests, destination_for,
                 _require(type(config) is dict and
                          all(config.get(key) == value for key, value in row.items()),
                          "staged coordinate mismatch")
-                execution = execute(staged, config,
+                execution = execute(staged, config, kind=kind,
                                     worker_timeout_seconds=min(WORKER_SECONDS, run_bound),
                                     run_timeout_seconds=run_bound)
                 observed = collect(execution, kind, row)

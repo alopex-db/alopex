@@ -15,8 +15,8 @@ class OperationTests(unittest.TestCase):
             self.events.append(("prepare", destination))
             return destination, dict(row)
 
-        def execute(staged, config, *, worker_timeout_seconds, run_timeout_seconds):
-            self.events.append(("execute", config["id"], worker_timeout_seconds,
+        def execute(staged, config, *, kind, worker_timeout_seconds, run_timeout_seconds):
+            self.events.append(("execute", kind, config["id"], worker_timeout_seconds,
                                 run_timeout_seconds))
             self.now += 1
             return config

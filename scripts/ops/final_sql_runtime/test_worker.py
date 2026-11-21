@@ -36,6 +36,22 @@ def cell(case="aggregate", subject="candidate"):
 
 
 class WorkerTests(unittest.TestCase):
+    def test_preflight_captures_one_exact_validated_result(self):
+        module = types.SimpleNamespace()
+        captured = worker.enforce_complete_result_order(module, capture_exact=True)
+        wanted = worker.expected("select-all")
+        self.assertEqual(module.validate("select-all", wanted, 34250),
+                         worker.result_digest("select-all"))
+        self.assertEqual(json.loads(captured["raw"]),
+                         {"rows": 34250, "result": wanted})
+        first = captured["raw"]
+        self.assertEqual(module.validate("select-all", wanted, 34250),
+                         worker.result_digest("select-all"))
+        self.assertIs(captured["raw"], first)
+        with self.assertRaises(ValueError):
+            module.validate("select-all", wanted[:-1], 34250)
+        self.assertIs(captured["raw"], first)
+
     def test_v0816_harness_uses_exact_oracle_for_all_included_cases(self):
         identity = types.ModuleType("subject_identity")
         identity.verify_subject = lambda **_: None

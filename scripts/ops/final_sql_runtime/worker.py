@@ -99,15 +99,32 @@ def load_module(name, path):
     return module
 
 
-def enforce_complete_result_order(module):
-    """Keep the archived SQL and checksum, but reject reordered/duplicated rows."""
-    module.validate = validate_exact
+def enforce_complete_result_order(module, *, capture_exact=False):
+    """Keep archived SQL while checking every result and optionally retaining one."""
+    captured = {"raw": None}
+
+    def checked(case, result, rows):
+        checksum = validate_exact(case, result, rows)
+        if capture_exact and captured["raw"] is None:
+            require(case == "select-all", "preflight must select all rows")
+            raw = json.dumps({"rows": rows, "result": result},
+                             sort_keys=True, allow_nan=False).encode()
+            require(len(raw) <= 2_000_000, "preflight result exceeds bound")
+            captured["raw"] = raw
+        return checksum
+
+    module.validate = checked
+    return captured
 
 
 def main(config):
     require(sys.platform == "linux" and os.geteuid() != 0, "native unprivileged Linux worker required")
     require(config["schema"] == "alopex.native-sql-measurement-cell/v1", "unknown cell schema")
     require(config["case"] in ISOLATED, "case outside independent SQL lane")
+    phase = config.get("phase")
+    require(phase in ("preflight", "cell") and
+            (phase != "preflight" or config["case"] == "select-all"),
+            "invalid measurement phase")
     require(config.get("subject") in ("published", "before", "candidate", "postgresql") and
             config["engine"] == ("postgresql" if config["subject"] == "postgresql" else "alopex-server"),
             "subject engine mismatch")
@@ -115,7 +132,9 @@ def main(config):
     os.umask(0o077)
     output = Path(config["result"])
     raw_path = Path(config["raw"])
+    exact_path = Path(config["exact_result"]) if phase == "preflight" else None
     require(not output.exists() and not raw_path.exists(), "immutable cell output already exists")
+    require(exact_path is None or not exact_path.exists(), "immutable preflight output already exists")
     for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "RAYON_NUM_THREADS",
                 "TOKIO_WORKER_THREADS", "POLARS_MAX_THREADS"):
         require(os.environ.get(key) == "1", "thread policy mismatch")
@@ -143,12 +162,16 @@ def main(config):
     sys.path.insert(0, str(product))
     parity = load_module("fixed_product_parity", product / "parity_v0811_measure.py")
     isolated = load_module("fixed_isolated_sql", docs / "server-sql-isolated-v0816.py")
-    enforce_complete_result_order(isolated)
+    captured = enforce_complete_result_order(isolated, capture_exact=phase == "preflight")
     result = isolated.measure(parity, config["engine"], config["case"], raw_path)
     raw = [json.loads(line) for line in raw_path.read_text().splitlines()]
     verify_cell(result, raw, config, resource_digest)
     require(hashlib.sha256(Path(os.environ[ENV]).read_bytes()).hexdigest() == resource_digest,
             "resource manifest changed")
+    if exact_path is not None:
+        require(captured["raw"] is not None, "missing exact preflight result")
+        with exact_path.open("xb") as stream:
+            stream.write(captured["raw"])
     result.update(trial=config["trial"], subject_identity=subject,
                   raw_sha256=hashlib.sha256(raw_path.read_bytes()).hexdigest())
     with output.open("x") as stream:
