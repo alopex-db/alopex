@@ -65,6 +65,22 @@ class LocalStageTests(unittest.TestCase):
                                   destination=self.destination, lock=self.lock)
         self.assertEqual([], list(self.destination.iterdir()))
 
+    def test_symlink_in_destination_ancestry_is_rejected_without_copy(self):
+        real_root = self.root / "real-root"
+        parent = real_root / "nested"
+        parent.mkdir(parents=True)
+        alias = self.root / "alias"
+        alias.symlink_to(real_root, target_is_directory=True)
+        destination = alias / "nested" / "private-stage"
+        with self.assertRaisesRegex(ValueError, "LOCAL_STAGE_PARENT"):
+            prepare_local_staging(originals=self.originals,
+                                  destination=destination, lock=self.lock)
+        self.assertFalse((parent / "private-stage").exists())
+        self.assertEqual([], list(parent.glob(".reference-stage-*")))
+        for subject, path in self.originals.items():
+            self.assertEqual(self.bytes[subject], path.read_bytes())
+            self.assertEqual(0o644, path.stat().st_mode & 0o777)
+
     def test_private_stage_passes_real_transfer_verifier_and_receiver(self):
         prepare_local_staging(originals=self.originals,
                               destination=self.destination, lock=self.lock)

@@ -37,6 +37,8 @@ def prepare_local_staging(*, originals: dict[str, Path], destination: Path,
              isinstance(destination, Path) and destination.is_absolute() and
              not os.path.lexists(destination), "LOCAL_STAGE_INPUT")
     parent = destination.parent
+    for ancestor in reversed((parent, *parent.parents)):
+        _require(stat.S_ISDIR(ancestor.lstat().st_mode), "LOCAL_STAGE_PARENT")
     parent_info = parent.lstat()
     _require(stat.S_ISDIR(parent_info.st_mode) and
              parent_info.st_uid == os.getuid(), "LOCAL_STAGE_PARENT")
