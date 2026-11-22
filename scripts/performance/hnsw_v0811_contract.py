@@ -1799,19 +1799,40 @@ def main() -> int:
     parser.add_argument("--max-scale-n", type=int, default=1_000_000)
     parser.add_argument("--baseline-only", action="store_true")
     parser.add_argument("--embedding-cache", type=Path)
+    parser.add_argument("--mode", choices=("public", "debug"), required=True)
+    parser.add_argument("--source-commit")
+    parser.add_argument("--run-id", type=int)
+    parser.add_argument("--run-attempt", type=int)
     args = parser.parse_args()
     if args.min_queries < QUERY_COUNT:
         parser.error("min-queries must be at least 10000")
     if args.runs != MEASUREMENT_RUNS:
         parser.error(f"runs must be exactly {MEASUREMENT_RUNS}")
-    checkpoint = RawCheckpointWriter(args.output)
+    if args.mode == "public":
+        if not all((args.release_version, args.source_commit, args.run_id, args.run_attempt)):
+            parser.error("public mode requires version, commit, run ID and attempt")
+        source_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        if source_commit != args.source_commit:
+            parser.error("source commit does not match the checked-out source")
+        if importlib.metadata.version("alopex") != args.release_version:
+            parser.error("measured package version does not match the release version")
+        if not hasattr(os, "sched_getaffinity") or os.sched_getaffinity(0) != {0}:
+            parser.error("public benchmark requires the reviewed single-core affinity")
+        checkpoint = None
+    else:
+        args.output.mkdir(parents=True, exist_ok=True, mode=0o700)
+        args.output.chmod(0o700)
+        checkpoint = RawCheckpointWriter(args.output)
     benchmark_runs, dataset, builds, recall_ceiling, diagnostics = run_benchmark(
         args.dataset,
         min_queries=args.min_queries,
         run_count=args.runs,
         extended=not args.baseline_only,
         embedding_cache=args.embedding_cache,
-        checkpoint=checkpoint.append,
+        checkpoint=checkpoint.append if checkpoint else None,
     )
     scale = (
         run_scale_benchmark(
@@ -1819,21 +1840,29 @@ def main() -> int:
             max_n=args.max_scale_n,
             min_queries=args.min_queries,
             run_count=args.runs,
-            checkpoint=checkpoint.append,
+            checkpoint=checkpoint.append if checkpoint else None,
         )
         if args.glove_dataset and not args.baseline_only
         else {}
     )
-    write_artifacts(
-        args.output,
-        benchmark_runs,
-        release_version=args.release_version,
-        dataset=dataset,
-        builds=builds,
-        recall_ceiling=recall_ceiling,
-        diagnostics=diagnostics,
-        scale=scale,
-    )
+    if args.mode == "public":
+        try:
+            from .hnsw_v0811_public import build_public_payload, write_public_pair
+        except ImportError:
+            from hnsw_v0811_public import build_public_payload, write_public_pair
+        payload = build_public_payload(
+            release_version=args.release_version, source_commit=args.source_commit,
+            run_id=args.run_id, run_attempt=args.run_attempt,
+            runs=benchmark_runs, dataset=dataset, builds=builds,
+            recall_ceiling=recall_ceiling, diagnostics=diagnostics, scale=scale,
+        )
+        write_public_pair(args.output, payload)
+    else:
+        write_artifacts(
+            args.output, benchmark_runs, release_version=args.release_version,
+            dataset=dataset, builds=builds, recall_ceiling=recall_ceiling,
+            diagnostics=diagnostics, scale=scale,
+        )
     return 0
 
 

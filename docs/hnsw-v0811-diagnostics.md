@@ -3,12 +3,16 @@
 ## Status
 
 The public Kaggle Version 4 notebook demonstrates the Alopex vector API. Its
-timings are not release performance claims. The canonical v0.8.11 performance
-evidence is `performance-artifacts/hnsw/hnsw-diagnostic.json` inside the
-exact-commit `parity-performance-*` artifact produced by Extended Verification
+timings are not release performance claims. For v0.8.17 Extended Verification,
+the canonical performance evidence is `hnsw-diagnostic.json` inside the
+exact-commit `parity-performance-public-*` artifact produced by Extended Verification
 in [`parity-performance.yml`](../.github/workflows/parity-performance.yml).
-The artifact records the checked-out commit, package version, environment,
-raw measurements, normalized JSON, CSV views, and rendered Markdown. After the
+The public artifact contains only the typed JSON/Markdown measurement pair and
+the fixed JSON/Markdown run-status pair. It records the checked-out commit,
+run ID/attempt, package version, and numeric measurements. Local environment,
+raw observations, CSV views, and arbitrary diagnostic text stay in the separate
+debug path and are not uploaded. Historical v3 artifacts remain diagnostic
+provenance and are not accepted as v4 public evidence. After the
 same commit is published under an `alopex-py-vX.Y.Z` tag, Stable Delivery only
 checks exact-wheel reachability, validates this retained evidence against that
 tag, and copies the JSON/Markdown pair into the public versioned report path.
@@ -33,12 +37,12 @@ scale measurements.
   The hosted runner records 200k and 1M as explicit execution-limit rows.
 
 Every timed setting warms one full query cycle and records three runs that each
-last at least two seconds and execute at least 10,000 queries. JSON contains the
-full result, raw JSON preserves runs, CSV files expose each matrix, and Markdown
-provides the release summary, CPU model/core affinity, and fastest settings at
-recall 0.95 and 0.99 (including explicit `not met` cells).
+last at least two seconds and execute at least 10,000 queries. The public JSON
+contains typed numeric run rows and summary matrices; Markdown presents the
+release summary and fastest settings at recall 0.95 and 0.99 (including explicit
+`not met` cells). It contains no CPU identity, affinity or dependency inventory.
 
-The full benchmark artifact is retained for 30 days. A separate hosted job
+The allowlisted public benchmark artifact is retained for 30 days. A separate hosted job
 retains the exact SHA, run ID/attempt, and terminal performance-job outcome for
 90 days even when the self-hosted job times out or loses its runner. The public
 versioned JSON/Markdown pair remains the durable successful release snapshot.
@@ -51,6 +55,7 @@ python scripts/performance/hnsw_v0811_contract.py \
   --glove-dataset /path/to/glove-100-angular.hdf5 \
   --max-scale-n 50000 \
   --output artifacts/hnsw-diagnostic \
+  --mode debug \
   --release-version 0.8.11
 ```
 

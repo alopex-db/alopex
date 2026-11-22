@@ -26,7 +26,6 @@ env:
   POLARS_MAX_THREADS: "1"
   RAYON_NUM_THREADS: "1"
   ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
-  NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
 
 jobs:
   performance:
@@ -48,29 +47,43 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare owner-only local diagnostics
+        run: |
+          if ! install -d -m 700 performance-debug performance-debug/sql performance-debug/hnsw >/dev/null 2>&1; then
+            printf '::error::PARITY_DIAGNOSTIC_DIRECTORY_FAILED\n'
+            exit 1
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11.11"
       - name: Prepare isolated Python environment
         id: prepare_python
         run: |
+          bash scripts/performance/run_private_stage.sh prepare_python bash -euo pipefail <<'PRIVATE_STAGE'
           python -m venv .venv-performance
-          echo "VIRTUAL_ENV=$PWD/.venv-performance" >> "$GITHUB_ENV"
           echo "$PWD/.venv-performance/bin" >> "$GITHUB_PATH"
+          PRIVATE_STAGE
       - uses: dtolnay/rust-toolchain@1.96.0
       - name: Install pinned reference engines
         id: dependencies
         run: |
+          bash scripts/performance/run_private_stage.sh dependencies bash -euo pipefail <<'PRIVATE_STAGE'
           python -m pip install --disable-pip-version-check \
             -r scripts/performance/requirements-v0811.txt
+          PRIVATE_STAGE
       - name: Build release Alopex and pinned Nim parser
         id: build
         run: |
+          bash scripts/performance/run_private_stage.sh build bash -euo pipefail <<'PRIVATE_STAGE'
+          export VIRTUAL_ENV="$PWD/.venv-performance"
+          export NIM_SQL_PARSER_LIB_DIR="$PWD/crates/alopex-sql/nim-sql-parser"
           bash scripts/build-nim-parser.sh --backend docker
           maturin develop --release -m crates/alopex-py/Cargo.toml
+          PRIVATE_STAGE
       - name: Verify performance contracts
         id: contracts
         run: |
+          bash scripts/performance/run_private_stage.sh contracts bash -euo pipefail <<'PRIVATE_STAGE'
           python scripts/validate_v0811_ledgers.py
           python scripts/reference_tests/polars_public_inventory.py \
             docs/parity/polars-v1.43.2.json
@@ -78,20 +91,24 @@ jobs:
             docs/parity/sql-v0.8.11.json
           python scripts/reference_tests/hnsw_public_inventory.py \
             docs/parity/hnsw-v0.8.11.json
+          PRIVATE_STAGE
       - name: Run pinned SQL live differential
         id: differential
         env:
           ALOPEX_REFERENCE_POSTGRES_DSN: postgresql://postgres:alopex@127.0.0.1:5432/alopex_perf
         run: |
+          bash scripts/performance/run_private_stage.sh differential bash -euo pipefail <<'PRIVATE_STAGE'
           python -m scripts.reference_tests.sql_v0811_differential \
             --engine sqlite --engine postgresql --engine duckdb --engine datafusion \
-            --output performance-artifacts/sql/reference-evidence.json
+            --output performance-debug/sql/reference-evidence.json
           python -m scripts.reference_tests.sql_v0811_advanced_dml \
             --engine postgresql --engine duckdb \
-            --output performance-artifacts/sql/advanced-dml-evidence.json
+            --output performance-debug/sql/advanced-dml-evidence.json
+          PRIVATE_STAGE
       - name: Download the checksum-pinned HNSW dataset
         id: hnsw_dataset
         run: |
+          bash scripts/performance/run_private_stage.sh hnsw_dataset bash -euo pipefail <<'PRIVATE_STAGE'
           curl -fL https://github.com/user-attachments/files/31764184/archive.zip -o "$RUNNER_TEMP/amazon.zip"
           echo "fb3c0bc51dbfaae83c8b72cf472a69fe4a894d4d9e8fa639ff22f4100da123ea  $RUNNER_TEMP/amazon.zip" | sha256sum --check --strict
           mkdir -p "$RUNNER_TEMP/amazon"
@@ -99,20 +116,24 @@ jobs:
           dataset="$RUNNER_TEMP/amazon/home/sdf/marketing_sample_for_amazon_com-ecommerce__20200101_20200131__10k_data.csv"
           echo "ec7ad773a70e654d65ee3757748fe99d614be24ad087330e437bcc84cda85291  $dataset" | sha256sum --check --strict
           echo "HNSW_DATASET=$dataset" >> "$GITHUB_ENV"
+          PRIVATE_STAGE
       - name: Download the checksum-pinned scale dataset
         id: scale_dataset
         run: |
+          bash scripts/performance/run_private_stage.sh scale_dataset bash -euo pipefail <<'PRIVATE_STAGE'
           dataset="$RUNNER_TEMP/glove-100-angular.hdf5"
           curl -fL https://ann-benchmarks.com/glove-100-angular.hdf5 -o "$dataset"
           echo "544af1d5e84e112cd4749571dcfd8ca109818a572f850af75a3a09e093a953c4  $dataset" | sha256sum --check --strict
           echo "GLOVE_DATASET=$dataset" >> "$GITHUB_ENV"
+          PRIVATE_STAGE
       - name: Measure paired engines
         id: benchmark
         env:
           SUITE: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }}
           ALOPEX_PERF_POSTGRES_DSN: postgresql://postgres:alopex@127.0.0.1:5432/alopex_perf
         run: |
-          mkdir -p performance-artifacts/hnsw
+          bash scripts/performance/run_private_stage.sh benchmark bash -euo pipefail <<'PRIVATE_STAGE'
+          mkdir -p performance-public
           RELEASE_VERSION="$(python - <<'PY'
           import tomllib
           with open("Cargo.toml", "rb") as stream:
@@ -120,60 +141,62 @@ jobs:
           PY
           )"
           export RELEASE_VERSION
-          cpu_model="$(lscpu | sed -n 's/^Model name:[[:space:]]*//p')"
-          test -n "$cpu_model"
-          {
-            echo "cpu_model=$cpu_model"
-            echo "benchmark_core=0"
-            taskset -c 0 python -c 'import os; print("benchmark_affinity=" + ",".join(map(str, sorted(os.sched_getaffinity(0)))))'
-            uname -a
-            python --version
-            python -m pip freeze --all
-          } > performance-artifacts/hnsw/environment.txt
           taskset -c 0 python scripts/performance/hnsw_v0811_contract.py \
             --dataset "$HNSW_DATASET" \
             --glove-dataset "$GLOVE_DATASET" \
             --max-scale-n 50000 \
-            --output performance-artifacts/hnsw \
+            --output performance-public \
+            --mode public \
+            --source-commit "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --release-version "$RELEASE_VERSION"
           taskset -c 0 python scripts/performance/flat_vector_ingest_v0814.py \
-            --output performance-artifacts/hnsw/flat-vector-ingest-v0814.json
+            --output performance-debug/hnsw/flat-vector-ingest-v0814.json
           python scripts/performance/release_hnsw_evidence.py \
-            --root performance-artifacts/hnsw \
+            --root performance-public \
             --version "$RELEASE_VERSION" \
-            --commit "$GITHUB_SHA"
+            --commit "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --public-pair
           taskset -c 0 python scripts/performance/parity_v0811_measure.py \
             --suite "$SUITE" \
-            --hnsw-measurements performance-artifacts/hnsw/hnsw-diagnostic.json \
-            --output performance-artifacts/measurements.json
+            --hnsw-measurements performance-public/hnsw-diagnostic.json \
+            --output performance-debug/measurements.json
+          PRIVATE_STAGE
       - name: Verify SQL HNSW cost regression
         id: sql_knn_cost
         env:
-          ALOPEX_KNN_COST_RAW_NDJSON: ${{ github.workspace }}/performance-artifacts/hnsw/sql-knn-index-cost.raw.ndjson
           ALOPEX_KNN_COST_SOURCE_COMMIT: ${{ github.sha }}
           ALOPEX_KNN_COST_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          set -o pipefail
+          bash scripts/performance/run_private_stage.sh sql_knn_cost bash -euo pipefail <<'PRIVATE_STAGE'
+          export ALOPEX_KNN_COST_RAW_NDJSON="$PWD/performance-debug/hnsw/sql-knn-index-cost.raw.ndjson"
+          export NIM_SQL_PARSER_LIB_DIR="$PWD/crates/alopex-sql/nim-sql-parser"
           taskset -c 0 cargo test --release -p alopex-embedded --features lane_ci --test knn_index_cost \
-            sql_knn_hnsw_cost_process_separated_evidence -- --ignored --exact --nocapture \
-            2>&1 | tee performance-artifacts/hnsw/sql-knn-index-cost.txt
+            sql_knn_hnsw_cost_process_separated_evidence -- --ignored --exact --nocapture
+          PRIVATE_STAGE
       - name: Verify prepared batch throughput
         id: prepared_batch_throughput
         run: |
-          set -o pipefail
+          bash scripts/performance/run_private_stage.sh prepared_batch_throughput bash -euo pipefail <<'PRIVATE_STAGE'
+          export NIM_SQL_PARSER_LIB_DIR="$PWD/crates/alopex-sql/nim-sql-parser"
           taskset -c 0 cargo test --release -p alopex-embedded --features lane_ci --test prepared_statement \
             prepared_execute_many_hnsw_throughput_matches_literal_batch \
-            -- --ignored --exact --nocapture \
-            2>&1 | tee performance-artifacts/hnsw/prepared-batch-throughput.txt
+            -- --ignored --exact --nocapture
+          PRIVATE_STAGE
       - name: Enforce curated/full performance contracts
         id: gate
         env:
           SUITE: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }}
         run: |
+          bash scripts/performance/run_private_stage.sh gate bash -euo pipefail <<'PRIVATE_STAGE'
           python scripts/performance/parity_v0811_gate.py \
             --suite "$SUITE" \
-            --measurements performance-artifacts/measurements.json \
-            --output performance-artifacts/gate.json
+            --measurements performance-debug/measurements.json \
+            --output performance-debug/gate.json
+          PRIVATE_STAGE
       - name: Record immutable run status
         if: always()
         env:
@@ -188,7 +211,8 @@ jobs:
           PREPARED_BATCH_THROUGHPUT: ${{ steps.prepared_batch_throughput.outcome }}
           GATE: ${{ steps.gate.outcome }}
         run: |
-          mkdir -p performance-artifacts/hnsw
+          bash scripts/performance/run_private_stage.sh status bash -euo pipefail <<'PRIVATE_STAGE'
+          mkdir -p performance-public
           python3 - <<'PY'
           import json
           import os
@@ -208,17 +232,42 @@ jobs:
               "failure_stage": failure or incomplete,
               "stages": stages,
           }
-          root = Path("performance-artifacts/hnsw")
+          root = Path("performance-public")
+          if status != "success":
+              (root / "hnsw-diagnostic.json").unlink(missing_ok=True)
+              (root / "hnsw-diagnostic.md").unlink(missing_ok=True)
           (root / "benchmark-status.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-          lines = ["# HNSW benchmark run", "", f"Status: `{status}`", "", f"Source commit: `{payload['source_commit']}`", "", "| stage | outcome |", "|---|---|"]
-          lines.extend(f"| {name} | {stages[name]} |" for name in names)
-          (root / "benchmark-status.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          from scripts.performance.release_hnsw_evidence import render_status_markdown
+          (root / "benchmark-status.md").write_text(render_status_markdown(payload), encoding="utf-8")
           PY
-      - uses: actions/upload-artifact@v4
+          PRIVATE_STAGE
+      - name: Validate exact public upload inventory
+        id: public_inventory
         if: always()
+        run: |
+          bash scripts/performance/run_private_stage.sh public_inventory bash -euo pipefail <<'PRIVATE_STAGE'
+          RELEASE_VERSION="$(python - <<'PYVERSION'
+          import tomllib
+          with open("Cargo.toml", "rb") as stream:
+              print(tomllib.load(stream)["workspace"]["package"]["version"])
+          PYVERSION
+          )"
+          python scripts/performance/release_hnsw_evidence.py \
+            --root performance-public \
+            --version "$RELEASE_VERSION" \
+            --commit "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+          PRIVATE_STAGE
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && steps.public_inventory.outcome == 'success' }}
         with:
-          name: parity-performance-${{ github.run_id }}-${{ github.run_attempt }}
-          path: performance-artifacts
+          name: parity-performance-public-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            performance-public/benchmark-status.json
+            performance-public/benchmark-status.md
+            performance-public/hnsw-diagnostic.json
+            performance-public/hnsw-diagnostic.md
           if-no-files-found: error
           retention-days: 30
 
@@ -234,13 +283,19 @@ jobs:
         env:
           PERFORMANCE_JOB_RESULT: ${{ needs.performance.result }}
         run: |
-          mkdir -p performance-outcome
-          python3 - <<'PY'
+          umask 077
+          if ! mkdir -p performance-outcome >/dev/null 2>&1; then
+            printf '::error::PARITY_OUTCOME_DIRECTORY_FAILED\n'
+            exit 1
+          fi
+          if ! python3 - > performance-outcome-private.log 2>&1 <<'PY'; then
           import json
           import os
           from pathlib import Path
 
           result = os.environ["PERFORMANCE_JOB_RESULT"]
+          if result not in {"success", "failure", "cancelled", "skipped"}:
+              raise SystemExit("invalid terminal performance job result")
           status = "success" if result == "success" else "failure" if result == "failure" else "incomplete"
           payload = {
               "schema": "alopex.parity-performance-run/v1",
@@ -266,6 +321,9 @@ jobs:
           ]
           (root / "outcome.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY
+            printf '::error::PARITY_OUTCOME_FAILED\n'
+            exit 1
+          fi
       - name: Upload the run outcome independently of the benchmark runner
         uses: actions/upload-artifact@v4
         with:
