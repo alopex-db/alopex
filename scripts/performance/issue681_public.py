@@ -155,15 +155,20 @@ def _inventory(directory):
         raise PublicFailure("PUBLIC_CAPACITY") from None
 
 
-def run_case(*, binary, directory, source_commit, binary_sha256, rows, dimensions,
+def run_case(*, binary, directory, private_dir, source_commit, binary_sha256, rows, dimensions,
              trial, finish, timeout, rss_limit, counter_factory=PhaseRss):
     """Run one bounded case; make typed rows at each phase end, never from a raw log."""
     _directory(directory)
+    _directory(private_dir)
+    require(directory != private_dir and directory not in private_dir.parents and
+            private_dir not in directory.parents, "PUBLIC_INPUT")
     records = []
     events = queue.Queue(maxsize=32)
+    stop_reader = threading.Event()
     process = None
     observer = None
     reader = None
+    audit_stream = None
     code = "PUBLIC_PROTOCOL"
     started = time.monotonic()
     last_inventory = started
@@ -176,6 +181,9 @@ def run_case(*, binary, directory, source_commit, binary_sha256, rows, dimension
                 "PUBLIC_INPUT")
         _identity(binary, source_commit, binary_sha256)
         _inventory(directory)
+        fd = os.open(private_dir / "audit.jsonl", os.O_WRONLY | os.O_CREAT |
+                     os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        audit_stream = os.fdopen(fd, "wb")
         phases = (*PHASES, finish)
         expected = tuple((phase, kind) for phase in phases for kind in ("start", "end")) + (
             ("complete", None),)
@@ -191,15 +199,24 @@ def run_case(*, binary, directory, source_commit, binary_sha256, rows, dimension
             raise PublicFailure("PUBLIC_COUNTER") from None
 
         def read_child():
+            def deliver(value):
+                while not stop_reader.is_set():
+                    try:
+                        events.put(value, timeout=0.1)
+                        return
+                    except queue.Full:
+                        pass
             try:
                 for line in iter(lambda: process.stdout.readline(MAX_EVENT_BYTES + 1), ""):
-                    events.put(line)
+                    if stop_reader.is_set():
+                        break
+                    deliver(line)
             finally:
-                events.put(None)
+                deliver(None)
 
         reader = threading.Thread(target=read_child, daemon=True)
         reader.start()
-        for phase, kind in expected:
+        for sequence, (phase, kind) in enumerate(expected):
             while True:
                 now = time.monotonic()
                 if now - started > timeout:
@@ -215,6 +232,7 @@ def run_case(*, binary, directory, source_commit, binary_sha256, rows, dimension
                         raise PublicFailure("PUBLIC_CHILD")
             require(line is not None, "PUBLIC_CHILD")
             data = _event(line, phase, kind)
+            observed = None
             if phase == "complete":
                 require(observer.active is None and data.get("finish") == finish)
             elif kind == "start":
@@ -231,6 +249,10 @@ def run_case(*, binary, directory, source_commit, binary_sha256, rows, dimension
                 require(row["kernel_peak_rss_bytes"] < rss_limit,
                         "PUBLIC_COUNTER")
                 records.append(row)
+            audit_stream.write(_canonical({"sequence": sequence,
+                                           "event": json.loads(line),
+                                           "observation": observed}))
+            audit_stream.flush()
             process.stdin.write("continue\n")
             process.stdin.flush()
         require(process.wait(timeout=5) == 0 and events.get(timeout=1) is None,
@@ -245,6 +267,16 @@ def run_case(*, binary, directory, source_commit, binary_sha256, rows, dimension
                   "finish": finish, "phases": records,
                   "result_validated": True,
                   "rss_scope": "Linux VmHWM reset at phase handshakes"}
+        audit_stream.write(_canonical({"receipt": {
+            "schema": "alopex.issue681-private-audit/v1",
+            "source_commit": source_commit, "binary_sha256": binary_sha256,
+            "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "rows": rows, "dimensions": dimensions, "trial": trial,
+            "finish": finish, "child_exit": 0, "events": len(expected),
+            "phases": len(records),
+            "public_sha256": hashlib.sha256(_canonical(report)).hexdigest()}}))
+        audit_stream.flush()
+        os.fsync(audit_stream.fileno())
         _write(directory, report)
         return report
     except PublicFailure as error:
@@ -252,19 +284,28 @@ def run_case(*, binary, directory, source_commit, binary_sha256, rows, dimension
     except Exception:
         code = "PUBLIC_CHILD"
     finally:
+        if audit_stream is not None:
+            audit_stream.close()
         if process is not None:
             if process.poll() is None:
-                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                     process.wait()
             process.stdin.close()
             process.stdout.close()
         if observer is not None:
             observer.close()
         if reader is not None:
+            stop_reader.set()
             reader.join(timeout=2)
     failed = {"schema": SCHEMA, "status": "failed", "error_code": code,
               "completed_phases": len(records)}
@@ -280,6 +321,7 @@ def main(argv=None):
     parser = FixedErrorParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--private", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--binary-sha256", required=True)
     parser.add_argument("--rows", type=int, required=True)
@@ -290,6 +332,7 @@ def main(argv=None):
     try:
         args = parser.parse_args(argv)
         report = run_case(binary=args.binary, directory=args.output,
+                          private_dir=args.private,
                           source_commit=args.source_commit,
                           binary_sha256=args.binary_sha256, rows=args.rows,
                           dimensions=384, trial=args.trial, finish=args.finish,

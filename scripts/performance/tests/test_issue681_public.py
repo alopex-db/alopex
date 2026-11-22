@@ -13,6 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import issue681_public as public
+import issue681_public_audit as audit
 
 
 class Counter:
@@ -26,7 +27,14 @@ class Counter:
     def finish(self, phase):
         assert self.active == phase
         self.active = None
-        return {"phase": phase, "kernel_reported_peak_rss_bytes": 2048}
+        before = {"rss_bytes": 1024, "high_water_bytes": 1024}
+        after = {"rss_bytes": 1536, "high_water_bytes": 2048}
+        return {"phase": phase, "before_reset": before, "after_reset": before,
+                "after": after, "kernel_reported_peak_rss_bytes": 2048,
+                "kernel_high_water_decreased": False,
+                "aggregation": "maximum of reset and end kernel high-water readings",
+                "scope": "child process between phase handshakes, including end-event serialization",
+                "counter": "Linux VmHWM after clear_refs=5; kernel RSS accounting accuracy applies"}
 
     def close(self):
         pass
@@ -60,7 +68,7 @@ def events(*, finish="rollback", malformed=False, secret=False,
 class PublicCollectorTests(unittest.TestCase):
     def measure(self, *, malformed=False, secret=False, stderr_secret=False,
                 capacity_error=False, counter_error=False, finish="rollback",
-                validated=True):
+                validated=True, tamper_private=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             binary = root / "fixture"
@@ -75,6 +83,8 @@ class PublicCollectorTests(unittest.TestCase):
             binary.chmod(0o700)
             output = root / "export"
             output.mkdir(mode=0o700)
+            private = root / "private"
+            private.mkdir(mode=0o700)
             digest = hashlib.sha256(binary.read_bytes()).hexdigest()
             inventory = (mock.Mock(side_effect=OSError("/private/host/capacity"))
                          if capacity_error else mock.Mock(return_value={
@@ -84,7 +94,8 @@ class PublicCollectorTests(unittest.TestCase):
             with mock.patch.object(public.sys, "platform", "linux"), \
                     mock.patch.object(public.storage, "inventory", inventory):
                 result = public.run_case(
-                    binary=binary, directory=output, source_commit="a" * 40,
+                    binary=binary, directory=output, private_dir=private,
+                    source_commit="a" * 40,
                     binary_sha256=digest, rows=1000, dimensions=384, trial=0,
                     finish=finish, timeout=5, rss_limit=1_000_000,
                     counter_factory=counter)
@@ -93,6 +104,31 @@ class PublicCollectorTests(unittest.TestCase):
             self.assertEqual(content, public._canonical(result))
             self.assertEqual((output / "public.json").stat().st_mode & 0o777, 0o600)
             self.assertNotIn(b"/private/host", content)
+            if result["status"] == "measured":
+                self.assertEqual(list(private.iterdir()), [private / "audit.jsonl"])
+                self.assertEqual(len((private / "audit.jsonl").read_bytes().splitlines()), 20)
+                if tamper_private is not None:
+                    lines = [json.loads(line) for line in
+                             (private / "audit.jsonl").read_bytes().splitlines()]
+                    if tamper_private == "elapsed":
+                        lines[1]["event"]["data"]["elapsed_ns"] += 1
+                    elif tamper_private == "peak":
+                        lines[1]["observation"]["kernel_reported_peak_rss_bytes"] += 1
+                    elif tamper_private == "receipt":
+                        lines[-1]["receipt"]["runner_sha256"] = "0" * 64
+                    (private / "audit.jsonl").write_bytes(b"".join(
+                        public._canonical(line) for line in lines))
+                pin = {"source_commit": "a" * 40, "source_tree": "1" * 40,
+                       "binary_sha256": digest, "assets_digest": "2" * 64,
+                       "example_sha256": "3" * 64, "parser_sha256": "4" * 64,
+                       "profile": "release", "platform": "linux/amd64",
+                       "parser_contract": "0.28.0"}
+                if tamper_private is None:
+                    self.assertEqual(audit.audit_case(
+                        output, private, binary, pin, 1000, 0, finish), result)
+                else:
+                    with self.assertRaisesRegex(ValueError, "^PRIVATE_AUDIT$"):
+                        audit.audit_case(output, private, binary, pin, 1000, 0, finish)
             return result
 
     def test_collection_constructs_only_typed_public_rows(self):
@@ -119,6 +155,11 @@ class PublicCollectorTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error_code"], "PUBLIC_PROTOCOL")
         self.assertEqual(result["completed_phases"], 9)
+
+    def test_private_event_counter_and_receipt_tamper_fail_audit(self):
+        for tamper in ("elapsed", "peak", "receipt"):
+            with self.subTest(tamper=tamper):
+                self.measure(tamper_private=tamper)
 
     def test_invalid_event_fails_with_fixed_code_only(self):
         result = self.measure(malformed=True, stderr_secret=True)
