@@ -118,7 +118,7 @@ def _storage(extra, additional):
 
 
 def _build(source, target, work, parser_library, inventory_roots, limit,
-           rust_version, env):
+           rust_version, env, host_guard):
     log = work / "cargo-build.private.log"
     flags = " ".join(
         f"--remap-path-prefix={path}=/alopex-build/{label}"
@@ -133,6 +133,7 @@ def _build(source, target, work, parser_library, inventory_roots, limit,
                      NIM_SQL_PARSER_LIB_DIR=str(parser_library.parent),
                      ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD="1", RUSTFLAGS=flags)
     build_env.pop("CARGO_ENCODED_RUSTFLAGS", None)
+    host_guard()
     with log.open("xb") as output:
         os.chmod(log, 0o600)
         process = subprocess.Popen(assets.COMMAND, cwd=source, env=build_env,
@@ -148,7 +149,9 @@ def _build(source, target, work, parser_library, inventory_roots, limit,
                     pass
                 used = case.storage.inventory(inventory_roots)["allocated_bytes"]
                 require(used < case.STOP_BYTES and used <= limit)
+                host_guard()
             require(process.returncode == 0)
+            host_guard()
         except BaseException:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -164,10 +167,11 @@ def produce(*, source, target, work, output, parser_record, parser_root,
             parser_library,
             source_commit, source_tree, example_sha256, cargo_lock_sha256,
             parser_record_sha256, parser_sha256, rust_version,
-            additional_storage_bytes, private_roots, build_lock):
+            additional_storage_bytes, private_roots, build_lock, host_guard):
     """Return exact public pins, or one fixed failure without a promoted bundle."""
     try:
         require(sys.platform == "linux" and platform.machine() == "x86_64")
+        require(callable(host_guard))
         for path in (source, target, work, output.parent, build_lock.parent,
                      parser_root):
             owned_private_directory(path)
@@ -200,7 +204,8 @@ def produce(*, source, target, work, output, parser_record, parser_root,
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             baseline = _storage(inventory_roots, additional_storage_bytes)
             _build(source, target, work, parser_library, inventory_roots,
-                   baseline + additional_storage_bytes, rust_version, os.environ)
+                   baseline + additional_storage_bytes, rust_version, os.environ,
+                   host_guard)
             verify_source(source, source_commit, source_tree, example_sha256,
                           cargo_lock_sha256)
             binary = target / "release/examples/issue681_hnsw_first_write"

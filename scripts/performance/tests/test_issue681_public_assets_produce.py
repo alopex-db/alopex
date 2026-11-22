@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import issue681_public_assets_produce as produce
@@ -17,6 +18,52 @@ def sha(data):
 
 
 class SourceBuildAdmissionTests(unittest.TestCase):
+    def test_host_guard_runs_before_during_and_after_cargo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "work"
+            work.mkdir()
+            process = mock.Mock(pid=1234, returncode=0)
+            process.poll.side_effect = [None, 0]
+            calls = []
+            with mock.patch.object(produce.subprocess, "Popen", return_value=process), \
+                 mock.patch.object(produce.case.storage, "inventory",
+                                   return_value={"allocated_bytes": 1}):
+                produce._build(root, root / "target", work,
+                               root / "parser/lib.so", [root], 10,
+                               "1.90.0", {}, lambda: calls.append("guard"))
+            self.assertEqual(calls, ["guard", "guard", "guard"])
+            process.wait.assert_called_once_with(timeout=15)
+
+    def test_active_host_guard_failure_reaps_cargo_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "work"
+            work.mkdir()
+            process = mock.Mock(pid=1234, returncode=None)
+            process.poll.return_value = None
+            process.wait.side_effect = [subprocess.TimeoutExpired("cargo", 15),
+                                        None]
+            calls = []
+
+            def guard():
+                calls.append("guard")
+                if len(calls) == 2:
+                    raise ValueError("private host scan failed")
+
+            with mock.patch.object(produce.subprocess, "Popen", return_value=process), \
+                 mock.patch.object(produce.case.storage, "inventory",
+                                   return_value={"allocated_bytes": 1}), \
+                 mock.patch.object(produce.os, "killpg") as killpg:
+                with self.assertRaisesRegex(ValueError, "private host scan failed"):
+                    produce._build(root, root / "target", work,
+                                   root / "parser/lib.so", [root], 10,
+                                   "1.90.0", {}, guard)
+            self.assertEqual(calls, ["guard", "guard"])
+            killpg.assert_called_once_with(1234, produce.signal.SIGTERM)
+            self.assertEqual(process.wait.call_args_list[-1],
+                             mock.call(timeout=20))
+
     def test_exact_clean_source_and_changed_example(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "source"
