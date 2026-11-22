@@ -19,8 +19,8 @@ MAX_PRIVATE_ZIP_BYTES = 105_000_000
 
 
 def select(*, run: dict, artifacts: list[dict], status: dict,
-           expected_run_id: int) -> tuple[str, str, int, int]:
-    """Return historical source, CMS digest, and exact artifact IDs."""
+           expected_run_id: int) -> tuple[str, str, int, str, int, str]:
+    """Return source, CMS digest, and exact public/private ZIP IDs and digests."""
     if (not isinstance(expected_run_id, int) or isinstance(expected_run_id, bool)
             or expected_run_id <= 0 or not isinstance(run, dict)
             or run.get("id") != expected_run_id
@@ -68,11 +68,15 @@ def select(*, run: dict, artifacts: list[dict], status: dict,
                  else MAX_PRIVATE_ZIP_BYTES)
         size = artifact.get("size_in_bytes")
         artifact_id = artifact.get("id")
+        zip_digest = artifact.get("digest")
         identity = artifact.get("workflow_run")
         if (not isinstance(size, int) or isinstance(size, bool)
                 or not 0 < size <= bound
                 or not isinstance(artifact_id, int) or isinstance(artifact_id, bool)
                 or artifact_id <= 0
+                or not isinstance(zip_digest, str)
+                or not zip_digest.startswith("sha256:")
+                or not SHA256.fullmatch(zip_digest.removeprefix("sha256:"))
                 or artifact.get("archive_download_url") !=
                 f"https://api.github.com/repos/{REPOSITORY}/actions/artifacts/{artifact_id}/zip"
                 or not isinstance(identity, dict)
@@ -85,4 +89,5 @@ def select(*, run: dict, artifacts: list[dict], status: dict,
     if set(selected) != {PUBLIC_ARTIFACT, PRIVATE_ARTIFACT}:
         raise ValueError("ARTIFACT")
     return (source, status["ciphertext_sha256"],
-            selected[PUBLIC_ARTIFACT]["id"], selected[PRIVATE_ARTIFACT]["id"])
+            selected[PUBLIC_ARTIFACT]["id"], selected[PUBLIC_ARTIFACT]["digest"],
+            selected[PRIVATE_ARTIFACT]["id"], selected[PRIVATE_ARTIFACT]["digest"])

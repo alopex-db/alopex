@@ -22,6 +22,7 @@ def fixture():
     }
     artifacts = [{
         "id": artifact_id, "name": name, "expired": False, "size_in_bytes": 1024,
+        "digest": "sha256:" + ("1" if artifact_id == 11 else "2") * 64,
         "archive_download_url":
             f"https://api.github.com/repos/{provenance.REPOSITORY}/actions/artifacts/{artifact_id}/zip",
         "workflow_run": {"id": RUN_ID, "head_sha": SOURCE,
@@ -38,7 +39,9 @@ def fixture():
 
 class ProvenanceTests(unittest.TestCase):
     def test_accepts_exact_successful_scheduled_run(self):
-        self.assertEqual(provenance.select(**fixture()), (SOURCE, DIGEST, 11, 12))
+        self.assertEqual(provenance.select(**fixture()),
+                         (SOURCE, DIGEST, 11, "sha256:" + "1" * 64,
+                          12, "sha256:" + "2" * 64))
 
     def test_rejects_wrong_run_event_source_or_conclusion(self):
         for field, value in (("id", 0), ("event", "workflow_dispatch"),
@@ -53,7 +56,7 @@ class ProvenanceTests(unittest.TestCase):
 
     def test_rejects_mismatched_or_missing_artifact(self):
         for change in ("missing", "duplicate", "expired", "source", "repository",
-                       "oversized", "url"):
+                       "oversized", "url", "digest"):
             with self.subTest(change=change):
                 args = fixture()
                 if change == "missing":
@@ -68,6 +71,8 @@ class ProvenanceTests(unittest.TestCase):
                     args["artifacts"][0]["workflow_run"]["repository_id"] = 0
                 elif change == "oversized":
                     args["artifacts"][1]["size_in_bytes"] = 106_000_000
+                elif change == "digest":
+                    args["artifacts"][1]["digest"] = "sha256:invalid"
                 else:
                     args["artifacts"][1]["archive_download_url"] = "https://example.invalid/zip"
                 with self.assertRaises(ValueError):
