@@ -559,8 +559,14 @@ impl HnswTxnEntry {
     /// Clone a graph loaded only for reading in this transaction.
     /// A flushed mutation remains ineligible even after `dirty` is cleared.
     pub fn clone_unmodified_load(&self) -> Option<HnswIndex> {
-        (!self.cached_read && !self.mutable_accessed && !self.dirty)
+        self.is_unmodified_load()
             .then(|| self.index.clone_for_read())
+    }
+
+    /// Whether this entry holds a graph newly loaded without mutation.
+    /// Cached reads already have a shared owner and need no publication.
+    pub fn is_unmodified_load(&self) -> bool {
+        !self.cached_read && !self.mutable_accessed && !self.dirty
     }
 
     pub(crate) fn loaded(index: HnswIndex) -> Self {
