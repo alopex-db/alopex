@@ -258,6 +258,9 @@ jobs:
   perf-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     env:
       RUSTUP_TOOLCHAIN: stable
     timeout-minutes: 90
@@ -267,30 +270,11 @@ jobs:
       - name: Install stable Rust under storage guard
         run: python3 scripts/ci/stress_guarded_command.py --case perf --phase toolchain -- rustup toolchain install stable --profile minimal
 
-      - name: Download latest perf baselines
-        id: perf-baseline
+      - name: Load pinned historical perf baselines under storage guard
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          mkdir -p "${GITHUB_WORKSPACE}/target/stress-baselines"
-          found=false
-          for run_id in $(gh run list --workflow stress-tests.yml --event schedule --status success --limit 20 --json databaseId -q '.[].databaseId'); do
-            if [ "$run_id" = "$GITHUB_RUN_ID" ]; then
-              continue
-            fi
-            if gh run download "$run_id" -n perf-baselines -D "${GITHUB_WORKSPACE}/target/stress-baselines"; then
-              found=true
-              echo "Downloaded perf baseline artifact from run ${run_id}."
-              break
-            fi
-          done
-
-          if [ "$found" != "true" ]; then
-            echo "No completed scheduled perf baseline artifact found; this run will seed baselines."
-          fi
-          echo "found=${found}" >> "$GITHUB_OUTPUT"
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 scripts/ci/stress_guarded_command.py --case perf --phase baseline_fetch -- python3 scripts/ci/stress_legacy_baseline.py
 
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
@@ -299,8 +283,8 @@ jobs:
         id: perf_case
         env:
           RUST_BACKTRACE: 1
-          STRESS_BASELINE_REQUIRED: ${{ steps.perf-baseline.outputs.found == 'true' && 'true' || 'false' }}
-          STRESS_BASELINE_UPDATE: ${{ steps.perf-baseline.outputs.found == 'true' && 'false' || 'true' }}
+          STRESS_BASELINE_REQUIRED: "true"
+          STRESS_BASELINE_UPDATE: "false"
           STRESS_BASELINE_DIR: ${{ github.workspace }}/target/stress-baselines
           STRESS_REPORT_DIR: ${{ github.workspace }}/target/stress-reports/perf
           STRESS_ARTIFACTS_DIR: ${{ github.workspace }}/target/stress-artifacts/perf
