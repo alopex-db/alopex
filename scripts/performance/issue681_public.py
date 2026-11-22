@@ -143,9 +143,13 @@ def _write(directory, report):
         raise PublicFailure("PUBLIC_PROTOCOL") from None
 
 
-def _inventory(directory):
+def _inventory(directory, extra=()):
     try:
-        value = storage.inventory([directory])
+        require(type(extra) is tuple and
+                all(isinstance(root, Path) and root.is_absolute() and
+                    root.exists() and not root.is_symlink() for root in extra),
+                "PUBLIC_CAPACITY")
+        value = storage.inventory([directory, *extra])
         require(type(value) is dict and _uint(value.get("allocated_bytes"), STOP_BYTES - 1)
                 and value["allocated_bytes"] + 1_000_000_000 < STOP_BYTES,
                 "PUBLIC_CAPACITY")
@@ -156,7 +160,8 @@ def _inventory(directory):
 
 
 def run_case(*, binary, directory, private_dir, source_commit, binary_sha256, rows, dimensions,
-             trial, finish, timeout, rss_limit, counter_factory=PhaseRss):
+             trial, finish, timeout, rss_limit, inventory_roots=(),
+             counter_factory=PhaseRss):
     """Run one bounded case; make typed rows at each phase end, never from a raw log."""
     _directory(directory)
     _directory(private_dir)
@@ -180,7 +185,7 @@ def run_case(*, binary, directory, private_dir, source_commit, binary_sha256, ro
                 _uint(rss_limit, 8_000_000_000) and rss_limit > 0,
                 "PUBLIC_INPUT")
         _identity(binary, source_commit, binary_sha256)
-        _inventory(directory)
+        _inventory(directory, inventory_roots)
         fd = os.open(private_dir / "audit.jsonl", os.O_WRONLY | os.O_CREAT |
                      os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         audit_stream = os.fdopen(fd, "wb")
@@ -222,7 +227,7 @@ def run_case(*, binary, directory, private_dir, source_commit, binary_sha256, ro
                 if now - started > timeout:
                     raise PublicFailure("PUBLIC_TIMEOUT")
                 if now - last_inventory >= 30:
-                    _inventory(directory)
+                    _inventory(directory, inventory_roots)
                     last_inventory = now
                 try:
                     line = events.get(timeout=0.1)
@@ -260,7 +265,7 @@ def run_case(*, binary, directory, private_dir, source_commit, binary_sha256, ro
         reader.join(timeout=2)
         require(len(records) == len(phases) and not reader.is_alive() and
                 observer.active is None)
-        _inventory(directory)
+        _inventory(directory, inventory_roots)
         report = {"schema": SCHEMA, "status": "measured",
                   "source_commit": source_commit, "binary_sha256": binary_sha256,
                   "rows": rows, "dimensions": dimensions, "trial": trial,
@@ -329,6 +334,7 @@ def main(argv=None):
     parser.add_argument("--finish", choices=("commit", "rollback"), required=True)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--rss-limit", type=int, default=8_000_000_000)
+    parser.add_argument("--inventory-root", type=Path, action="append", required=True)
     try:
         args = parser.parse_args(argv)
         report = run_case(binary=args.binary, directory=args.output,
@@ -336,7 +342,8 @@ def main(argv=None):
                           source_commit=args.source_commit,
                           binary_sha256=args.binary_sha256, rows=args.rows,
                           dimensions=384, trial=args.trial, finish=args.finish,
-                          timeout=args.timeout, rss_limit=args.rss_limit)
+                          timeout=args.timeout, rss_limit=args.rss_limit,
+                          inventory_roots=tuple(args.inventory_root))
         return 0 if report["status"] == "measured" else 1
     except Exception:
         # Setup errors have no admitted public export directory. The workflow

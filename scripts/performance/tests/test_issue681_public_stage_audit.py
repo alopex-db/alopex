@@ -11,6 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import issue681_public as public
+import issue681_public_admission as admission
 import issue681_public_pair as pair
 import issue681_public_stage_audit as stage
 from test_issue681_public import Counter, events
@@ -56,6 +57,26 @@ class PublicStageAuditTests(unittest.TestCase):
                     locations.append({"arm": arm, "rows": rows, "trial": trial,
                                       "public": public_dir, "private": private_dir})
             assembled = pair.assemble(reports, pins, "rollback")
+            admission_dir = root / "admission"
+            admission_dir.mkdir(mode=0o700)
+            schedule = [("preflight", None, None, None)]
+            last_rows = None
+            for rows, trial, arm in pair._order():
+                if rows != last_rows:
+                    schedule.append(("stage", rows, None, None))
+                    last_rows = rows
+                schedule.append(("case", rows, trial, arm))
+            ledger = admission_dir / "admission.jsonl"
+            with ledger.open("wb") as stream:
+                for kind, rows, trial, arm in schedule:
+                    stream.write(public._canonical({
+                        "schema": admission.LEDGER_SCHEMA,
+                        "kind": kind, "rows": rows, "trial": trial,
+                        "arm": arm, "allocated_bytes": 1_000,
+                        "idle_window_seconds": 3,
+                        "min_idle_basis_points": 10_000,
+                        "status": "passed"}))
+            ledger.chmod(0o600)
             def admit_asset(root, pin, *, private_roots):
                 arm = next(arm for arm in pair.ARMS if pins[arm] == pin)
                 return {"binary": binaries[arm]}
@@ -64,24 +85,35 @@ class PublicStageAuditTests(unittest.TestCase):
                 self.assertTrue(stage.audit_stage(
                     assembled, case_locations=locations,
                     asset_locations=asset_locations, pins=pins,
-                    finish="rollback", private_roots=(str(root),)))
+                    finish="rollback", private_roots=(str(root),),
+                    admission_dir=admission_dir,
+                    additional_bytes=1_000_000_000))
                 export = root / "export"
                 export.mkdir(mode=0o700)
                 def independent_audit(value):
                     return stage.audit_stage(
                         value, case_locations=locations,
                         asset_locations=asset_locations, pins=pins,
-                        finish="rollback", private_roots=(str(root),))
+                        finish="rollback", private_roots=(str(root),),
+                        admission_dir=admission_dir,
+                        additional_bytes=1_000_000_000)
                 pair.write(reports, pins, export, finish="rollback",
                            independent_audit=independent_audit)
                 self.assertEqual(set(export.iterdir()), {export / "public.json"})
+                ledger_raw = ledger.read_bytes()
+                ledger.write_bytes(ledger_raw + b"private extra\n")
+                with self.assertRaisesRegex(ValueError, "^STAGE_AUDIT$"):
+                    independent_audit(assembled)
+                ledger.write_bytes(ledger_raw)
                 with (locations[5]["private"] / "audit.jsonl").open("ab") as stream:
                     stream.write(b"private tamper\n")
                 with self.assertRaisesRegex(ValueError, "^STAGE_AUDIT$"):
                     stage.audit_stage(
                         assembled, case_locations=locations,
                         asset_locations=asset_locations, pins=pins,
-                        finish="rollback", private_roots=(str(root),))
+                        finish="rollback", private_roots=(str(root),),
+                        admission_dir=admission_dir,
+                        additional_bytes=1_000_000_000)
                 with self.assertRaisesRegex(ValueError, "^PUBLIC_PAIR$"):
                     pair.verify(export, pins=pins,
                                 independent_audit=independent_audit)

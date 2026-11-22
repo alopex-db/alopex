@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import issue681_public_assets as assets
+import issue681_public_admission as admission
 import issue681_public_audit as audit
 import issue681_public_pair as pair
 
@@ -15,8 +16,9 @@ def require(value):
 
 
 def _audit_stage(report, case_locations, asset_locations, pins, finish,
-                 private_roots):
+                 private_roots, admission_dir, additional_bytes):
     pair._pins(pins)
+    require(admission.verify_ledger(admission_dir, additional_bytes) is True)
     require(finish in ("commit", "rollback") and
             type(case_locations) is list and len(case_locations) == 30 and
             type(asset_locations) is dict and set(asset_locations) == set(pair.ARMS) and
@@ -52,10 +54,11 @@ def _audit_stage(report, case_locations, asset_locations, pins, finish,
 
 
 def audit_stage(report, *, case_locations, asset_locations, pins, finish,
-                private_roots):
+                private_roots, admission_dir, additional_bytes):
     """Return true only after all exact assets and cases pass independent audit."""
     try:
         return _audit_stage(report, case_locations, asset_locations, pins,
-                            finish, private_roots)
+                            finish, private_roots, admission_dir,
+                            additional_bytes)
     except Exception:
         raise ValueError("STAGE_AUDIT") from None

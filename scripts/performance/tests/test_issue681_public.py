@@ -66,6 +66,19 @@ def events(*, finish="rollback", malformed=False, secret=False,
 
 
 class PublicCollectorTests(unittest.TestCase):
+    def test_inventory_includes_prior_cases_and_assets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            current = root / "current"
+            previous = root / "previous"
+            assets = root / "assets"
+            for path in (current, previous, assets):
+                path.mkdir(mode=0o700)
+            with mock.patch.object(public.storage, "inventory",
+                                   return_value={"allocated_bytes": 1_000}) as inventory:
+                public._inventory(current, (previous, assets))
+            inventory.assert_called_once_with([current, previous, assets])
+
     def measure(self, *, malformed=False, secret=False, stderr_secret=False,
                 capacity_error=False, counter_error=False, finish="rollback",
                 validated=True, tamper_private=None):
