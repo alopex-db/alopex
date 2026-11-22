@@ -42,6 +42,7 @@ class HostedBuildPairTest(unittest.TestCase):
                   "additional_storage_bytes": 8_000_000_000,
                   "private_roots": (str(root),),
                   "build_lock": root / "build.lock",
+                  "cargo_home": root / "cargo-home",
                   "git_binary": Path("/usr/bin/git"), "git_env": {}}
         return {
             "before": dict(common, source=root / "before", work=root / "work1",
@@ -139,6 +140,19 @@ class HostedBuildPairTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "^PUBLIC_BUILD$"):
                 build.build_pair(inputs, output_parent, guard)
             self.assertEqual(events, [])
+
+    def test_cargo_home_must_match_between_arms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            inputs = self.inputs(root)
+            output_parent = root / "public-staging"
+            output_parent.mkdir(mode=0o700)
+            guard = self.guard(root)
+            inputs["candidate"]["cargo_home"] = root / "other-cargo"
+            with mock.patch.object(build.producer, "produce") as produce:
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_BUILD$"):
+                    build.build_pair(inputs, output_parent, guard)
+            produce.assert_not_called()
 
     def test_acquisition_growth_consumes_same_build_allowance(self):
         with tempfile.TemporaryDirectory() as tmp:

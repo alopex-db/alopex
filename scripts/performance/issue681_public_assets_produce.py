@@ -139,7 +139,7 @@ def _storage(extra, additional):
 
 
 def _build(source, target, work, parser_library, inventory_roots, limit,
-           rust_version, env, host_guard):
+           rust_version, env, host_guard, cargo_home):
     log = work / "cargo-build.private.log"
     flags = " ".join(
         f"--remap-path-prefix={path}=/alopex-build/{label}"
@@ -147,7 +147,8 @@ def _build(source, target, work, parser_library, inventory_roots, limit,
                             (target, "target"),
                             (parser_library.parent, "parser"),
                             (Path.home(), "home")))
-    build_env = dict(env, CARGO_INCREMENTAL="0", CARGO_NET_OFFLINE="true",
+    build_env = dict(env, CARGO_HOME=str(cargo_home),
+                     CARGO_INCREMENTAL="0", CARGO_NET_OFFLINE="true",
                      CARGO_PROFILE_RELEASE_DEBUG="0",
                      CARGO_BUILD_JOBS="2", CARGO_TARGET_DIR=str(target),
                      RUSTUP_TOOLCHAIN=rust_version,
@@ -184,12 +185,30 @@ def _build(source, target, work, parser_library, inventory_roots, limit,
             raise
 
 
+def verify_cargo_home(cargo_home):
+    owned_private_directory(cargo_home)
+    require(cargo_home.resolve(strict=True) == cargo_home and
+            Path.home() in cargo_home.parents)
+    vendor = cargo_home / "vendor"
+    owned_private_directory(vendor)
+    require(not vendor.is_symlink() and vendor.resolve(strict=True) == vendor)
+    config = cargo_home / "config.toml"
+    require(config.is_file() and not config.is_symlink())
+    info = config.stat()
+    require(info.st_uid == os.geteuid() and
+            stat.S_IMODE(info.st_mode) == 0o600)
+    expected = ("[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n"
+                "[source.vendored-sources]\ndirectory = " +
+                json.dumps(str(vendor)) + "\n").encode()
+    require(assets._read_file(config, 4096) == expected)
+
+
 def produce(*, source, target, work, output, parser_record, parser_root,
             parser_library,
             source_commit, source_tree, example_sha256, cargo_lock_sha256,
             parser_record_sha256, parser_sha256, rust_version,
             additional_storage_bytes, private_roots, build_lock, host_guard,
-            git_binary, git_env):
+            git_binary, git_env, cargo_home):
     """Return exact public pins, or one fixed failure without a promoted bundle."""
     try:
         require(sys.platform == "linux" and platform.machine() == "x86_64")
@@ -197,10 +216,11 @@ def produce(*, source, target, work, output, parser_record, parser_root,
         for path in (source, target, work, output.parent, build_lock.parent,
                      parser_root):
             owned_private_directory(path)
+        verify_cargo_home(cargo_home)
         require(target != source and source not in target.parents and
                 work != source and source not in work.parents)
         require(all(" " not in str(path) for path in
-                    (source, target, work, parser_root, Path.home())))
+                    (source, target, work, parser_root, cargo_home, Path.home())))
         require(not output.exists() and isinstance(private_roots, tuple) and
                 all(type(item) is str and item.startswith("/") and len(item) >= 8
                     for item in private_roots))
@@ -214,7 +234,7 @@ def produce(*, source, target, work, output, parser_record, parser_root,
                       cargo_lock_sha256, git_binary=git_binary, git_env=git_env)
         require(verify_parser(parser_record, parser_root, parser_library) ==
                 parser_record_sha256 and digest(parser_library) == parser_sha256)
-        inventory_roots = [source, target, work, parser_root,
+        inventory_roots = [source, target, work, parser_root, cargo_home,
                            parser_record.parent, output.parent]
         _storage(inventory_roots, additional_storage_bytes)
         fd = os.open(build_lock, os.O_CREAT | os.O_RDWR |
@@ -227,7 +247,7 @@ def produce(*, source, target, work, output, parser_record, parser_root,
             baseline = _storage(inventory_roots, additional_storage_bytes)
             _build(source, target, work, parser_library, inventory_roots,
                    baseline + additional_storage_bytes, rust_version, os.environ,
-                   host_guard)
+                   host_guard, cargo_home)
             verify_source(source, source_commit, source_tree, example_sha256,
                           cargo_lock_sha256, git_binary=git_binary,
                           git_env=git_env)
@@ -237,6 +257,7 @@ def produce(*, source, target, work, output, parser_record, parser_root,
             protected_roots = tuple(dict.fromkeys((*private_roots, str(source),
                                                   str(target), str(work),
                                                   str(parser_root),
+                                                  str(cargo_home),
                                                   str(parser_record.parent),
                                                   str(output.parent),
                                                   str(Path.home()))))

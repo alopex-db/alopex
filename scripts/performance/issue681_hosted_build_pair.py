@@ -17,11 +17,12 @@ ARM_KEYS = {"source", "target", "work", "parser_record",
             "parser_root", "parser_library", "source_commit", "source_tree",
             "example_sha256", "cargo_lock_sha256", "parser_record_sha256",
             "parser_sha256", "rust_version", "additional_storage_bytes",
-            "private_roots", "build_lock", "git_binary", "git_env"}
+            "private_roots", "build_lock", "git_binary", "git_env",
+            "cargo_home"}
 COMMON = {"target", "parser_record", "parser_root", "parser_library",
           "example_sha256", "parser_record_sha256", "parser_sha256",
           "rust_version", "additional_storage_bytes", "private_roots",
-          "build_lock", "git_binary", "git_env"}
+          "build_lock", "git_binary", "git_env", "cargo_home"}
 
 
 def require(value):
@@ -51,7 +52,8 @@ def build_pair(inputs, output_parent, guard):
         require(type(guard) is capacity.HostStorageGuard)
         roots = [before[key] for key in ("source", "work")]
         roots += [candidate[key] for key in ("source", "work")]
-        roots += [before["target"], before["parser_root"], output_parent]
+        roots += [before["target"], before["parser_root"],
+                  before["cargo_home"], output_parent]
         require(all(isinstance(root, Path) and root.is_absolute() and
                     root.resolve(strict=False) == root for root in roots) and
                 all(left != right and left not in right.parents and
