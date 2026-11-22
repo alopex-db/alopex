@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -81,7 +82,8 @@ class PublicCollectorTests(unittest.TestCase):
 
     def measure(self, *, malformed=False, secret=False, stderr_secret=False,
                 capacity_error=False, counter_error=False, finish="rollback",
-                validated=True, tamper_private=None, exit_delay=0):
+                validated=True, tamper_private=None, exit_delay=0,
+                host_guard=None, clock=None, timeout=5, children=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             binary = root / "fixture"
@@ -105,14 +107,28 @@ class PublicCollectorTests(unittest.TestCase):
                              "allocated_bytes": 1000}))
             counter = (mock.Mock(side_effect=OSError("/private/host/proc"))
                        if counter_error else Counter)
+            actual_popen = public.subprocess.Popen
+
+            def start_child(*args, **kwargs):
+                child = actual_popen(*args, **kwargs)
+                children.append(child)
+                return child
+
+            clock_patch = (mock.patch.object(public, "time",
+                                             SimpleNamespace(monotonic=clock))
+                           if clock is not None else contextlib.nullcontext())
+            child_patch = (mock.patch.object(public.subprocess, "Popen",
+                                             side_effect=start_child)
+                           if children is not None else contextlib.nullcontext())
             with mock.patch.object(public.sys, "platform", "linux"), \
-                    mock.patch.object(public.storage, "inventory", inventory):
+                    mock.patch.object(public.storage, "inventory", inventory), \
+                    clock_patch, child_patch:
                 result = public.run_case(
                     binary=binary, directory=output, private_dir=private,
                     source_commit="a" * 40,
                     binary_sha256=digest, rows=1000, dimensions=384, trial=0,
-                    finish=finish, timeout=5, rss_limit=1_000_000,
-                    counter_factory=counter)
+                    finish=finish, timeout=timeout, rss_limit=1_000_000,
+                    counter_factory=counter, host_guard=host_guard)
             content = (output / "public.json").read_bytes()
             self.assertEqual(list(output.iterdir()), [output / "public.json"])
             self.assertEqual(content, public._canonical(result))
@@ -194,6 +210,17 @@ class PublicCollectorTests(unittest.TestCase):
         result = self.measure(capacity_error=True)
         self.assertEqual(result, {"schema": public.SCHEMA, "status": "failed",
                                   "error_code": "PUBLIC_CAPACITY", "completed_phases": 0})
+
+    def test_mid_case_complete_host_guard_failure_reaps_child(self):
+        children = []
+        guard = mock.Mock(side_effect=[None, OSError("/private/host/storage")])
+        ticks = iter((0, 31))
+        result = self.measure(host_guard=guard, clock=lambda: next(ticks),
+                              timeout=1800, children=children)
+        self.assertEqual(result["error_code"], "PUBLIC_CAPACITY")
+        self.assertEqual(guard.call_count, 2)
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].poll())
 
     def test_counter_failure_emits_only_fixed_status(self):
         result = self.measure(counter_error=True)

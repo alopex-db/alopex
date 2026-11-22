@@ -37,14 +37,16 @@ def _empty_private(directory):
 def _run_mode(*, pins, asset_locations, work, export, finish, private_roots,
               admission_dir, additional_bytes, admit_stage, admit_case,
               complete_case,
-              inventory_roots=(), case_runner=case.run_case):
+              inventory_roots=(), case_runner=case.run_case,
+              host_guard=None):
     """Collect, audit and export exactly one completion mode in this job."""
     pair._pins(pins)
     require(finish in ("commit", "rollback") and
             type(asset_locations) is dict and set(asset_locations) == set(pair.ARMS) and
             type(private_roots) is tuple and callable(admit_stage) and
             callable(admit_case) and callable(complete_case) and
-            callable(case_runner))
+                callable(case_runner) and
+                (host_guard is None or callable(host_guard)))
     _empty_private(work)
     _empty_private(export)
     require(work != export and work not in export.parents and
@@ -70,13 +72,16 @@ def _run_mode(*, pins, asset_locations, work, export, finish, private_roots,
         private = root / "private"
         public.mkdir(mode=0o700)
         private.mkdir(mode=0o700)
-        report = case_runner(
+        case_inputs = dict(
             binary=admitted[arm]["binary"], directory=public,
             private_dir=private, source_commit=pins[arm]["source_commit"],
             binary_sha256=pins[arm]["binary_sha256"], rows=rows,
             dimensions=384, trial=trial, finish=finish,
             timeout=TIMEOUTS[rows], rss_limit=RSS_LIMIT,
             inventory_roots=inventory_roots)
+        if host_guard is not None:
+            case_inputs["host_guard"] = host_guard
+        report = case_runner(**case_inputs)
         require(type(report) is dict and report.get("status") == "measured")
         require(complete_case(rows, trial, arm) is True)
         require(audit.audit_case(public, private, admitted[arm]["binary"],

@@ -162,7 +162,7 @@ def _inventory(directory, extra=()):
 
 def run_case(*, binary, directory, private_dir, source_commit, binary_sha256, rows, dimensions,
              trial, finish, timeout, rss_limit, inventory_roots=(),
-             counter_factory=PhaseRss):
+             counter_factory=PhaseRss, host_guard=None):
     """Run one bounded case; make typed rows at each phase end, never from a raw log."""
     _directory(directory)
     _directory(private_dir)
@@ -179,6 +179,16 @@ def run_case(*, binary, directory, private_dir, source_commit, binary_sha256, ro
     started = time.monotonic()
     last_inventory = started
     try:
+        require(host_guard is None or callable(host_guard), "PUBLIC_INPUT")
+
+        def checked_inventory():
+            if host_guard is not None:
+                try:
+                    host_guard()
+                except BaseException:
+                    raise PublicFailure("PUBLIC_CAPACITY") from None
+            _inventory(directory, inventory_roots)
+
         require(sys.platform == "linux" and rows in (1_000, 10_000, 100_000) and
                 dimensions == 384 and _uint(trial, 4) and
                 finish in ("commit", "rollback") and
@@ -186,7 +196,7 @@ def run_case(*, binary, directory, private_dir, source_commit, binary_sha256, ro
                 _uint(rss_limit, 8_000_000_000) and rss_limit > 0,
                 "PUBLIC_INPUT")
         _identity(binary, source_commit, binary_sha256)
-        _inventory(directory, inventory_roots)
+        checked_inventory()
         fd = os.open(private_dir / "audit.jsonl", os.O_WRONLY | os.O_CREAT |
                      os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         audit_stream = os.fdopen(fd, "wb")
@@ -228,7 +238,7 @@ def run_case(*, binary, directory, private_dir, source_commit, binary_sha256, ro
                 if now - started > timeout:
                     raise PublicFailure("PUBLIC_TIMEOUT")
                 if now - last_inventory >= 30:
-                    _inventory(directory, inventory_roots)
+                    checked_inventory()
                     last_inventory = now
                 try:
                     line = events.get(timeout=0.1)
@@ -267,7 +277,7 @@ def run_case(*, binary, directory, private_dir, source_commit, binary_sha256, ro
         reader.join(timeout=2)
         require(len(records) == len(phases) and not reader.is_alive() and
                 observer.active is None)
-        _inventory(directory, inventory_roots)
+        checked_inventory()
         report = {"schema": SCHEMA, "status": "measured",
                   "source_commit": source_commit, "binary_sha256": binary_sha256,
                   "rows": rows, "dimensions": dimensions, "trial": trial,
