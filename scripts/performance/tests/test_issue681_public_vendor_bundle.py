@@ -20,20 +20,27 @@ def canonical(value):
 
 
 class PublicVendorBundleTest(unittest.TestCase):
-    def fixture(self, root, *, patch_pins=True):
+    def fixture(self, root, *, patch_pins=True, executable=False,
+                nested_pair=False):
         vendor = root / "vendor"
         package = vendor / "demo-1.0.0"
         (package / "src").mkdir(parents=True)
         files = {"Cargo.toml": b"[package]\nname='demo'\nversion='1.0.0'\n",
                  "src-file.rs": b"pub fn sibling() {}\n",
                  "src/lib.rs": b"pub fn demo() {}\n"}
+        if nested_pair:
+            files["src/extra.rs"] = b"pub fn extra() {}\n"
         for name, raw in files.items():
             (package / name).write_bytes(raw)
+        if executable:
+            (package / "src/lib.rs").chmod(0o755)
         archive_raw = io.BytesIO()
         with tarfile.open(fileobj=archive_raw, mode="w:gz") as archive:
             for name, raw in (*files.items(), (".gitignore", b"target\n")):
                 info = tarfile.TarInfo("demo-1.0.0/" + name)
                 info.size = len(raw)
+                if executable and name == "src/lib.rs":
+                    info.mode = 0o755
                 archive.addfile(info, io.BytesIO(raw))
         checksum = bundle.digest(archive_raw.getvalue())
         cache = root / "cache"
