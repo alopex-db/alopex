@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Collect #681 phase measurements as fixed public records on Linux.
+
+The diagnostic runner is a separate entry point. This runner never prints or
+exports child events, stderr, process identity, host inventory or exceptions.
+An independently reviewed pair controller must bind the source/binary pins and
+compare completed trials before treating a run as release evidence.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import queue
+import re
+import signal
+import stat
+import subprocess
+import sys
+import threading
+import time
+
+from phase_rss import PhaseRss
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts/compatibility"))
+import storage
+
+SCHEMA = "alopex.issue681-public-phase/v1"
+PHASES = ("seed", "index_build", "cold_transaction_1", "cold_transaction_2",
+          "warm", "writer_begin", "first_insert", "second_insert")
+ERRORS = frozenset({"PUBLIC_INPUT", "PUBLIC_CAPACITY", "PUBLIC_PROTOCOL",
+                    "PUBLIC_COUNTER", "PUBLIC_TIMEOUT", "PUBLIC_CHILD"})
+MAX_EVENT_BYTES = 4096
+STOP_BYTES = 40_000_000_000
+
+
+class PublicFailure(Exception):
+    def __init__(self, code):
+        if code not in ERRORS:
+            raise ValueError("PUBLIC_PROTOCOL")
+        super().__init__(code)
+        self.code = code
+
+
+def require(value, code="PUBLIC_PROTOCOL"):
+    if not value:
+        raise PublicFailure(code)
+
+
+def _uint(value, maximum):
+    return type(value) is int and 0 <= value <= maximum
+
+
+def _canonical(value):
+    return (json.dumps(value, sort_keys=True, separators=(",", ":"),
+                       allow_nan=False) + "\n").encode("utf-8")
+
+
+def _record(phase, data, counter):
+    """Project one checked phase end directly into an allowlisted public row."""
+    require(type(data) is dict and data.get("event") == "end")
+    elapsed = data.get("elapsed_ns")
+    require((elapsed is None and phase in ("warm", "rollback")) or
+            (phase not in ("warm", "rollback") and
+             _uint(elapsed, 3_600_000_000_000) and elapsed > 0))
+    require(type(counter) is dict and counter.get("phase") == phase and
+            _uint(counter.get("kernel_reported_peak_rss_bytes"), 8_000_000_000),
+            "PUBLIC_COUNTER")
+    stats = data.get("stats")
+    if phase in ("cold_transaction_1", "cold_transaction_2", "warm",
+                 "first_insert", "second_insert"):
+        require(type(stats) is dict)
+    if stats is not None:
+        require(type(stats) is dict and _uint(stats.get("hits"), 1_000_000_000) and
+                _uint(stats.get("misses"), 1_000_000_000))
+    graph_bytes = data.get("graph_bytes")
+    require((phase == "warm" and _uint(graph_bytes, 8_000_000_000) and
+             graph_bytes > 0) or (phase != "warm" and graph_bytes is None))
+    return {"phase": phase, "elapsed_ns": elapsed,
+            "kernel_peak_rss_bytes": counter["kernel_reported_peak_rss_bytes"],
+            "cache_hits": None if stats is None else stats["hits"],
+            "cache_misses": None if stats is None else stats["misses"],
+            "graph_bytes": graph_bytes}
+
+
+def _event(line, expected_phase, expected_kind):
+    require(type(line) is str and 0 < len(line.encode("utf-8")) <= MAX_EVENT_BYTES and
+            line.endswith("\n"))
+    try:
+        value = json.loads(line)
+    except (ValueError, UnicodeError):
+        raise PublicFailure("PUBLIC_PROTOCOL") from None
+    require(type(value) is dict and set(value) == {"phase", "data"} and
+            value["phase"] == expected_phase and type(value["data"]) is dict)
+    data = value["data"]
+    if expected_phase == "complete":
+        stats = data.get("stats")
+        require(type(stats) is dict and _uint(stats.get("hits"), 1_000_000_000) and
+                _uint(stats.get("misses"), 1_000_000_000))
+    else:
+        require(data.get("event") == expected_kind)
+    return data
+
+
+def _identity(binary, source_commit, binary_sha256):
+    require(type(source_commit) is str and re.fullmatch(r"[0-9a-f]{40}", source_commit) and
+            type(binary_sha256) is str and re.fullmatch(r"[0-9a-f]{64}", binary_sha256),
+            "PUBLIC_INPUT")
+    require(isinstance(binary, Path) and binary.is_absolute() and not binary.is_symlink() and
+            binary.is_file(), "PUBLIC_INPUT")
+    require(hashlib.sha256(binary.read_bytes()).hexdigest() == binary_sha256,
+            "PUBLIC_INPUT")
+
+
+def _directory(directory):
+    require(isinstance(directory, Path) and directory.is_absolute() and
+            directory.is_dir() and not directory.is_symlink(), "PUBLIC_INPUT")
+    info = directory.stat()
+    require(info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700 and
+            not any(directory.iterdir()), "PUBLIC_INPUT")
+
+
+def _write(directory, report):
+    body = _canonical(report)
+    require(len(body) <= 16_384, "PUBLIC_PROTOCOL")
+    path = directory / "public.json"
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                     getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        require(path.read_bytes() == body)
+        return path
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise PublicFailure("PUBLIC_PROTOCOL") from None
+
+
+def _inventory(directory):
+    try:
+        value = storage.inventory([directory])
+        require(type(value) is dict and _uint(value.get("allocated_bytes"), STOP_BYTES - 1)
+                and value["allocated_bytes"] + 1_000_000_000 < STOP_BYTES,
+                "PUBLIC_CAPACITY")
+    except PublicFailure:
+        raise
+    except Exception:
+        raise PublicFailure("PUBLIC_CAPACITY") from None
+
+
+def run_case(*, binary, directory, source_commit, binary_sha256, rows, dimensions,
+             trial, timeout, rss_limit, counter_factory=PhaseRss):
+    """Run one bounded case; make typed rows at each phase end, never from a raw log."""
+    _directory(directory)
+    records = []
+    events = queue.Queue(maxsize=32)
+    process = None
+    observer = None
+    reader = None
+    code = "PUBLIC_PROTOCOL"
+    started = time.monotonic()
+    last_inventory = started
+    try:
+        require(sys.platform == "linux" and rows in (1_000, 10_000, 100_000) and
+                dimensions == 384 and _uint(trial, 4) and
+                _uint(timeout, 1800) and timeout > 0 and
+                _uint(rss_limit, 8_000_000_000) and rss_limit > 0,
+                "PUBLIC_INPUT")
+        _identity(binary, source_commit, binary_sha256)
+        _inventory(directory)
+        phases = (*PHASES, "rollback")
+        expected = tuple((phase, kind) for phase in phases for kind in ("start", "end")) + (
+            ("complete", None),)
+        process = subprocess.Popen([str(binary), str(rows), str(dimensions)],
+                                   cwd=ROOT, env=dict(os.environ, ALOPEX_MANUAL_681="1",
+                                                      RAYON_NUM_THREADS="2", OMP_NUM_THREADS="2"),
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, text=True,
+                                   start_new_session=True)
+        try:
+            observer = counter_factory(process.pid)
+        except Exception:
+            raise PublicFailure("PUBLIC_COUNTER") from None
+
+        def read_child():
+            try:
+                for line in iter(lambda: process.stdout.readline(MAX_EVENT_BYTES + 1), ""):
+                    events.put(line)
+            finally:
+                events.put(None)
+
+        reader = threading.Thread(target=read_child, daemon=True)
+        reader.start()
+        for phase, kind in expected:
+            while True:
+                now = time.monotonic()
+                if now - started > timeout:
+                    raise PublicFailure("PUBLIC_TIMEOUT")
+                if now - last_inventory >= 30:
+                    _inventory(directory)
+                    last_inventory = now
+                try:
+                    line = events.get(timeout=0.1)
+                    break
+                except queue.Empty:
+                    if process.poll() is not None and not reader.is_alive() and events.empty():
+                        raise PublicFailure("PUBLIC_CHILD")
+            require(line is not None, "PUBLIC_CHILD")
+            data = _event(line, phase, kind)
+            if phase == "complete":
+                require(observer.active is None)
+            elif kind == "start":
+                try:
+                    observer.begin(phase)
+                except Exception:
+                    raise PublicFailure("PUBLIC_COUNTER") from None
+            else:
+                try:
+                    observed = observer.finish(phase)
+                except Exception:
+                    raise PublicFailure("PUBLIC_COUNTER") from None
+                row = _record(phase, data, observed)
+                require(row["kernel_peak_rss_bytes"] < rss_limit,
+                        "PUBLIC_COUNTER")
+                records.append(row)
+            process.stdin.write("continue\n")
+            process.stdin.flush()
+        require(process.wait(timeout=5) == 0 and events.get(timeout=1) is None,
+                "PUBLIC_CHILD")
+        reader.join(timeout=2)
+        require(len(records) == len(phases) and not reader.is_alive() and
+                observer.active is None)
+        _inventory(directory)
+        report = {"schema": SCHEMA, "status": "measured",
+                  "source_commit": source_commit, "binary_sha256": binary_sha256,
+                  "rows": rows, "dimensions": dimensions, "trial": trial,
+                  "finish": "rollback", "phases": records,
+                  "rss_scope": "Linux VmHWM reset at phase handshakes"}
+        _write(directory, report)
+        return report
+    except PublicFailure as error:
+        code = error.code
+    except Exception:
+        code = "PUBLIC_CHILD"
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+            process.stdin.close()
+            process.stdout.close()
+        if observer is not None:
+            observer.close()
+        if reader is not None:
+            reader.join(timeout=2)
+    failed = {"schema": SCHEMA, "status": "failed", "error_code": code,
+              "completed_phases": len(records)}
+    _write(directory, failed)
+    return failed
+
+
+def main(argv=None):
+    class FixedErrorParser(argparse.ArgumentParser):
+        def error(self, message):
+            raise PublicFailure("PUBLIC_INPUT")
+
+    parser = FixedErrorParser(description=__doc__)
+    parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--binary-sha256", required=True)
+    parser.add_argument("--rows", type=int, required=True)
+    parser.add_argument("--trial", type=int, required=True)
+    parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument("--rss-limit", type=int, default=8_000_000_000)
+    try:
+        args = parser.parse_args(argv)
+        report = run_case(binary=args.binary, directory=args.output,
+                          source_commit=args.source_commit,
+                          binary_sha256=args.binary_sha256, rows=args.rows,
+                          dimensions=384, trial=args.trial,
+                          timeout=args.timeout, rss_limit=args.rss_limit)
+        return 0 if report["status"] == "measured" else 1
+    except Exception:
+        # Setup errors have no admitted public export directory. The workflow
+        # log receives one fixed code; never print exception text or arguments.
+        print("PUBLIC_INPUT")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
