@@ -72,7 +72,7 @@ jobs:
         env:
           RUST_BACKTRACE: 1
           STRESS_TEST_TIMEOUT: 120
-          STRESS_REPORT_DIR: target/stress-reports # set empty string to skip artifact upload
+          STRESS_REPORT_DIR: target/stress-reports
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: python3 scripts/ci/stress_guarded_command.py --case stress --phase test -- cargo test --features test-hooks,lane_ci --test 'stress_*' -- --test-threads=1
 
@@ -82,13 +82,19 @@ jobs:
           STRESS_OUTCOME: ${{ steps.stress_case.outcome == 'success' && 'passed' || 'failed' }}
         run: python3 scripts/ci/stress_guarded_command.py --case stress --phase seal -- python3 scripts/ci/stress_finalize_case.py --case stress --outcome "${STRESS_OUTCOME}"
 
-      - name: Upload stress reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+      - name: Upload stress public status
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
         with:
-          name: stress-reports
-          path: target/stress-reports
-          if-no-files-found: ignore
+          case_id: stress
+          kind: public
+
+      - name: Upload stress encrypted evidence
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
+        with:
+          case_id: stress
+          kind: private
 
   sanitizer-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -151,21 +157,19 @@ jobs:
           STRESS_OUTCOME: ${{ steps.sanitizer_case.outcome == 'success' && 'passed' || 'failed' }}
         run: python3 scripts/ci/stress_guarded_command.py --case "${STRESS_CASE_ID}" --phase seal -- python3 scripts/ci/stress_finalize_case.py --case "${STRESS_CASE_ID}" --outcome "${STRESS_OUTCOME}"
 
-      - name: Upload sanitizer reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+      - name: Upload sanitizer public status
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
         with:
-          name: sanitizer-${{ matrix.os }}-${{ matrix.sanitizer }}-reports
-          path: target/stress-reports/${{ matrix.sanitizer }}
-          if-no-files-found: ignore
+          case_id: ${{ matrix.sanitizer }}
+          kind: public
 
-      - name: Upload sanitizer artifacts
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+      - name: Upload sanitizer encrypted evidence
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
         with:
-          name: sanitizer-${{ matrix.os }}-${{ matrix.sanitizer }}-artifacts
-          path: target/stress-artifacts/${{ matrix.sanitizer }}
-          if-no-files-found: ignore
+          case_id: ${{ matrix.sanitizer }}
+          kind: private
 
   fuzz-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -223,13 +227,33 @@ jobs:
           STRESS_OUTCOME: ${{ steps.dataframe_fuzz.outcome == 'success' && 'passed' || 'failed' }}
         run: python3 scripts/ci/stress_guarded_command.py --case dataframe_conversion --phase seal -- python3 scripts/ci/stress_finalize_case.py --case dataframe_conversion --outcome "${STRESS_OUTCOME}"
 
-      - name: Upload fuzz reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+      - name: Upload SQL fuzz public status
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
         with:
-          name: fuzz-reports
-          path: target/stress-reports/fuzz
-          if-no-files-found: ignore
+          case_id: sql_parser
+          kind: public
+
+      - name: Upload SQL fuzz encrypted evidence
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
+        with:
+          case_id: sql_parser
+          kind: private
+
+      - name: Upload DataFrame fuzz public status
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
+        with:
+          case_id: dataframe_conversion
+          kind: public
+
+      - name: Upload DataFrame fuzz encrypted evidence
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
+        with:
+          case_id: dataframe_conversion
+          kind: private
 
   perf-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -289,43 +313,16 @@ jobs:
           STRESS_OUTCOME: ${{ steps.perf_case.outcome == 'success' && 'passed' || 'failed' }}
         run: python3 scripts/ci/stress_guarded_command.py --case perf --phase seal -- python3 scripts/ci/stress_finalize_case.py --case perf --outcome "${STRESS_OUTCOME}"
 
-      - name: Inspect perf outputs
-        if: ${{ always() }}
-        run: |
-          set -euo pipefail
-          for dir in \
-            "${GITHUB_WORKSPACE}/target/stress-baselines" \
-            "${GITHUB_WORKSPACE}/target/stress-reports" \
-            "${GITHUB_WORKSPACE}/target/stress-artifacts"; do
-            echo "::group::${dir}"
-            if [ -d "$dir" ]; then
-              find "$dir" -maxdepth 6 -type f -print | sort
-            else
-              echo "missing"
-            fi
-            echo "::endgroup::"
-          done
-
-      - name: Upload perf reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+      - name: Upload perf public status
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
         with:
-          name: perf-reports
-          path: ${{ github.workspace }}/target/stress-reports
-          if-no-files-found: ignore
+          case_id: perf
+          kind: public
 
-      - name: Upload perf artifacts
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+      - name: Upload perf encrypted evidence
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
         with:
-          name: perf-artifacts
-          path: ${{ github.workspace }}/target/stress-artifacts
-          if-no-files-found: ignore
-
-      - name: Upload perf baselines
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: perf-baselines
-          path: ${{ github.workspace }}/target/stress-baselines
-          if-no-files-found: ignore
+          case_id: perf
+          kind: private
