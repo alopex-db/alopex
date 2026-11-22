@@ -66,7 +66,7 @@ class SourceBuildAdmissionTests(unittest.TestCase):
 
     def test_exact_clean_source_and_changed_example(self):
         with tempfile.TemporaryDirectory() as tmp:
-            source = Path(tmp) / "source"
+            source = Path(tmp).resolve() / "source"
             source.mkdir(mode=0o700)
             for name, data in (
                 (produce.EXAMPLE, b"fn main() {}\n"),
@@ -85,12 +85,21 @@ class SourceBuildAdmissionTests(unittest.TestCase):
             git("-c", "user.name=test", "-c", "user.email=test@example.invalid",
                 "commit", "-qm", "source")
             commit, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+            git_home = Path(tmp).resolve() / "git-home"
+            git_home.mkdir(mode=0o700)
+            git_env = {"HOME": str(git_home), "XDG_CONFIG_HOME": str(git_home),
+                       "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+                       "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": "/dev/null",
+                       "GIT_CONFIG_NOSYSTEM": "1", "GIT_ASKPASS": "/bin/false"}
             produce.verify_source(source, commit, tree,
-                                  sha(b"fn main() {}\n"), sha(b"locked\n"))
+                                  sha(b"fn main() {}\n"), sha(b"locked\n"),
+                                  git_binary=Path("/usr/bin/git"), git_env=git_env)
             (source / produce.EXAMPLE).write_text("fn main() { panic!() }\n")
             with self.assertRaisesRegex(ValueError, "^PUBLIC_BUILD$"):
                 produce.verify_source(source, commit, tree,
-                                      sha(b"fn main() {}\n"), sha(b"locked\n"))
+                                      sha(b"fn main() {}\n"), sha(b"locked\n"),
+                                      git_binary=Path("/usr/bin/git"),
+                                      git_env=git_env)
 
     def test_parser_sidecars_must_match_record(self):
         with tempfile.TemporaryDirectory() as tmp:

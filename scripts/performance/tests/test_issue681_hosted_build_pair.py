@@ -41,7 +41,8 @@ class HostedBuildPairTest(unittest.TestCase):
                   "parser_sha256": "f" * 64, "rust_version": "1.90.0",
                   "additional_storage_bytes": 8_000_000_000,
                   "private_roots": (str(root),),
-                  "build_lock": root / "build.lock"}
+                  "build_lock": root / "build.lock",
+                  "git_binary": Path("/usr/bin/git"), "git_env": {}}
         return {
             "before": dict(common, source=root / "before", work=root / "work1",
                            source_commit="1" * 40,

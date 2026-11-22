@@ -53,14 +53,35 @@ def _run(args, *, cwd=None, env=None):
     return result.stdout.decode("ascii").strip()
 
 
-def verify_source(source, commit, tree, example_sha256, lock_sha256):
+def verify_source(source, commit, tree, example_sha256, lock_sha256, *,
+                  git_binary, git_env):
     owned_private_directory(source)
+    require(isinstance(git_binary, Path) and git_binary == Path("/usr/bin/git") and
+            git_binary.is_file() and not git_binary.is_symlink() and
+            git_binary.stat().st_uid == 0 and
+            not (git_binary.stat().st_mode & 0o022) and
+            type(git_env) is dict and set(git_env) == {
+                "HOME", "XDG_CONFIG_HOME", "PATH", "LANG",
+                "GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL",
+                "GIT_CONFIG_NOSYSTEM", "GIT_ASKPASS"} and
+            git_env["XDG_CONFIG_HOME"] == git_env["HOME"] and
+            git_env["PATH"] == "/usr/bin:/bin" and
+            git_env["GIT_CONFIG_GLOBAL"] == "/dev/null" and
+            git_env["GIT_CONFIG_NOSYSTEM"] == "1" and
+            git_env["GIT_TERMINAL_PROMPT"] == "0" and
+            git_env["GIT_ASKPASS"] == "/bin/false")
+    git_home = Path(git_env["HOME"])
+    owned_private_directory(git_home)
+    require(git_home.resolve(strict=True) == git_home and
+            not any(git_home.iterdir()))
     require(re.fullmatch(r"[0-9a-f]{40}", commit) and
             re.fullmatch(r"[0-9a-f]{40}", tree))
-    require(_run(["git", "rev-parse", "HEAD"], cwd=source) == commit and
-            _run(["git", "rev-parse", "HEAD^{tree}"], cwd=source) == tree and
-            _run(["git", "status", "--porcelain", "--untracked-files=all"],
-                 cwd=source) == "")
+    git = str(git_binary)
+    require(_run([git, "rev-parse", "HEAD"], cwd=source, env=git_env) == commit and
+            _run([git, "rev-parse", "HEAD^{tree}"], cwd=source,
+                 env=git_env) == tree and
+            _run([git, "status", "--porcelain", "--untracked-files=all"],
+                 cwd=source, env=git_env) == "")
     require(digest(source / EXAMPLE) == example_sha256 and
             digest(source / "Cargo.lock") == lock_sha256 and
             assets._read_file(source / CONTRACT, 64) == b"0.28.0\n")
@@ -167,7 +188,8 @@ def produce(*, source, target, work, output, parser_record, parser_root,
             parser_library,
             source_commit, source_tree, example_sha256, cargo_lock_sha256,
             parser_record_sha256, parser_sha256, rust_version,
-            additional_storage_bytes, private_roots, build_lock, host_guard):
+            additional_storage_bytes, private_roots, build_lock, host_guard,
+            git_binary, git_env):
     """Return exact public pins, or one fixed failure without a promoted bundle."""
     try:
         require(sys.platform == "linux" and platform.machine() == "x86_64")
@@ -189,7 +211,7 @@ def produce(*, source, target, work, output, parser_record, parser_root,
         require("release: " + rust_version in compiler.splitlines() and
                 "host: " + HOST in compiler.splitlines())
         verify_source(source, source_commit, source_tree, example_sha256,
-                      cargo_lock_sha256)
+                      cargo_lock_sha256, git_binary=git_binary, git_env=git_env)
         require(verify_parser(parser_record, parser_root, parser_library) ==
                 parser_record_sha256 and digest(parser_library) == parser_sha256)
         inventory_roots = [source, target, work, parser_root,
@@ -207,7 +229,8 @@ def produce(*, source, target, work, output, parser_record, parser_root,
                    baseline + additional_storage_bytes, rust_version, os.environ,
                    host_guard)
             verify_source(source, source_commit, source_tree, example_sha256,
-                          cargo_lock_sha256)
+                          cargo_lock_sha256, git_binary=git_binary,
+                          git_env=git_env)
             binary = target / "release/examples/issue681_hnsw_first_write"
             require(binary.is_file() and not binary.is_symlink() and
                     binary.stat().st_uid == os.geteuid())

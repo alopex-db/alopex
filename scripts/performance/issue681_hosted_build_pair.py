@@ -17,11 +17,11 @@ ARM_KEYS = {"source", "target", "work", "parser_record",
             "parser_root", "parser_library", "source_commit", "source_tree",
             "example_sha256", "cargo_lock_sha256", "parser_record_sha256",
             "parser_sha256", "rust_version", "additional_storage_bytes",
-            "private_roots", "build_lock"}
+            "private_roots", "build_lock", "git_binary", "git_env"}
 COMMON = {"target", "parser_record", "parser_root", "parser_library",
           "example_sha256", "parser_record_sha256", "parser_sha256",
           "rust_version", "additional_storage_bytes", "private_roots",
-          "build_lock"}
+          "build_lock", "git_binary", "git_env"}
 
 
 def require(value):
