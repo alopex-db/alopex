@@ -70,7 +70,7 @@ class Observer:
 
 
 class RunnerTests(unittest.TestCase):
-    def run_case(self, case):
+    def run_case(self, case, evidence_mode="public"):
         state = {"sql": [], "transactions": [], "closed": []}
         observer = Observer()
 
@@ -91,26 +91,39 @@ class RunnerTests(unittest.TestCase):
                                        SQL_STREAM_QUERY="STREAM_SQL")
         with tempfile.TemporaryDirectory() as directory:
             os.chmod(directory, 0o700)
-            paths = {mode: Path(directory) / f"{mode}.ndjson" for mode in ("on", "off")}
-            timing_root = Path(directory).resolve() / "public-timing"
-            timing_root.mkdir(mode=0o700)
-            observer.timing_root = timing_root
+            debug_root = Path(directory).resolve() if evidence_mode == "debug" else None
+            if debug_root is None:
+                paths = {mode: Path(directory) / f"{mode}.ndjson" for mode in ("on", "off")}
+                timing_root = Path(directory).resolve() / "public-timing"
+                timing_root.mkdir(mode=0o700)
+                observer.timing_root = timing_root
+            else:
+                paths = {}
+                timing_root = None
+                for mode in ("on", "off"):
+                    parent = debug_root / mode
+                    parent.mkdir(mode=0o700)
+                    paths[mode] = parent / "raw.ndjson"
             summary, clients = runner.measure_pair(module, case, 0, paths,
                 connect=connect, remote_type=Remote, url="same-qualified-server",
-                txn_mode="read_write", observer=observer, timing_root=timing_root)
+                txn_mode="read_write", observer=observer, timing_root=timing_root,
+                evidence_mode=evidence_mode, debug_root=debug_root)
             raw = {mode: [json.loads(line) for line in paths[mode].read_text().splitlines()]
                    for mode in paths}
-            timed = {mode: public_timing._read_cell(
+            timed = ({mode: public_timing._read_cell(
                 timing_root / public_timing.cell_filename(case, 0, mode), case, 0, mode)
-                for mode in paths}
+                for mode in paths} if timing_root is not None else None)
+            if debug_root is not None:
+                self.assertFalse((debug_root / "public-timing").exists())
             self.assertEqual({stat.S_IMODE(path.stat().st_mode) for path in paths.values()},
                              {0o600})
         self.assertEqual(state["closed"], ["off", "on"])
         self.assertEqual(len(observer.events), 84)
         for mode in ("on", "off"):
             self.assertEqual(len(raw[mode]), 21)
-            self.assertEqual([row["elapsed_seconds"] for row in timed[mode]],
-                             [row["seconds"] for row in raw[mode]])
+            if timed is not None:
+                self.assertEqual([row["elapsed_seconds"] for row in timed[mode]],
+                                 [row["seconds"] for row in raw[mode]])
             self.assertEqual(len(clients[mode]), adapter.expected_client_records(case, mode))
             self.assertEqual((summary[mode]["warmups"], summary[mode]["samples"]), (3, 21))
             self.assertEqual([row["pair_ordinal"] for row in raw[mode]],
@@ -130,6 +143,35 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(sum(sql == "STREAM_SQL" for _, sql in state["sql"]), 50)
         self.assertEqual(sum(sql == "CREATE TABLE bench" for _, sql in state["sql"]), 1)
         self.assertEqual(sum(row["phase"] == "measured" for row in clients["on"]), 21)
+
+    def test_explicit_local_debug_runs_same_workload_without_public_timing(self):
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "false", "CI": "false"}):
+            state, clients = self.run_case("select-all", evidence_mode="debug")
+        self.assertEqual(sum(sql == "STREAM_SQL" for _, sql in state["sql"]), 50)
+        self.assertEqual(sum(row["phase"] == "measured" for row in clients["on"]), 21)
+
+    def test_debug_mode_rejects_ci_and_mixed_public_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            os.chmod(root, 0o700)
+            paths = {}
+            for mode in ("on", "off"):
+                parent = root / mode
+                parent.mkdir(mode=0o700)
+                paths[mode] = parent / "raw.ndjson"
+            arguments = dict(connect=lambda *a, **k: self.fail("connected"),
+                             remote_type=Remote, url="same-qualified-server",
+                             observer=Observer(), evidence_mode="debug", debug_root=root)
+            with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+                with self.assertRaisesRegex(ValueError, "DEBUG_MODE"):
+                    runner.measure_pair(None, "aggregate", 0, paths, **arguments)
+            with patch.dict(os.environ, {"GITHUB_ACTIONS": "false", "CI": "false"}):
+                arguments["timing_root"] = root
+                with self.assertRaisesRegex(ValueError, "DEBUG_MODE"):
+                    runner.measure_pair(None, "aggregate", 0, paths, **arguments)
+                arguments["evidence_mode"] = "unknown"
+                with self.assertRaisesRegex(ValueError, "EVIDENCE_MODE"):
+                    runner.measure_pair(None, "aggregate", 0, paths, **arguments)
 
     def test_ordered_exact_values_and_shared_fixture(self):
         state, _ = self.run_case("ordered")

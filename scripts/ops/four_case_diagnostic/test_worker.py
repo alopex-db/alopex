@@ -58,6 +58,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIs(kwargs["connect"], self.connect)
         self.assertIs(kwargs["remote_type"], self.remote_type)
         self.assertEqual(kwargs["timing_root"], Path(self.temp.name).resolve() / "public-timing")
+        self.assertEqual(kwargs["evidence_mode"], "public")
         summaries = {}
         clients = {}
         for mode in ("on", "off"):

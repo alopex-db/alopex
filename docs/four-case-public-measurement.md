@@ -15,6 +15,15 @@ the fixed paired formula. It does not qualify product performance.
 | Private integrity audit | CI verifier checks the run before upload | Detailed client, server and resource records plus public timing rows | Owner-only audit of source, operation and timing consistency | Mismatch stops upload | Every public row agrees with the corresponding verified private measurement |
 | Local diagnosis | Developer explicitly uses a local debug path | Same workload and owner-only diagnostic destination | Detailed traces stay local | Retain failure context for investigation | Debug records and arbitrary local text are rejected by the public upload boundary |
 
+The pair runner selects `public` or `debug` before connecting to the server.
+The hosted worker explicitly selects `public`; this mode requires the fixed
+public timing root and writes a typed row at every timed call. A developer may
+select `debug` only outside GitHub Actions, with two raw paths under an
+owner-only local debug root. Debug mode writes detailed raw rows and produces
+no public timing files. Unknown modes, a mixed public/debug destination, or a
+debug request in CI fail before the workload starts. The public uploader
+accepts neither a debug root nor raw records.
+
 ## Public schema and verification
 
 The timing writer emits canonical JSONL with exactly `schema`, `case`,
@@ -37,7 +46,5 @@ remains `false` until the separate product-performance acceptance gate passes.
 
 ## Remaining acceptance work
 
-- Expose and verify an explicit local debug selection separately from public
-  measurement. Detailed local traces must never enter the public uploader.
 - Verify the full hosted run and public artifact against the exact source and
   qualification pins before treating these local checks as acceptance evidence.

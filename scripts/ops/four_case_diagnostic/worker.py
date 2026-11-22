@@ -183,7 +183,7 @@ def run_pair(config, *, subject, observer, parity, connect, remote_type, txn_mod
     summaries, clients = runner.measure_pair(parity, config["case"], config["trial"],
         {mode: paths[mode]["raw"] for mode in ("on", "off")}, connect=connect,
         remote_type=remote_type, url=server["url"], txn_mode=txn_mode,
-        observer=observer, timing_root=timing_root)
+        observer=observer, timing_root=timing_root, evidence_mode="public")
     require(type(summaries) is dict and set(summaries) == {"on", "off"} and
             type(clients) is dict and set(clients) == {"on", "off"}, "PAIR_RESULT")
     identity = (server["pid"], server["start_ticks"])

@@ -41,7 +41,8 @@ def _open_private_raw(path):
 
 def measure_pair(module, case, trial, raw_paths, *, connect, remote_type, url,
                  txn_mode=None, observer=None, timing_root=None,
-                 pair_limit_seconds=PAIR_LIMIT_SECONDS):
+                 pair_limit_seconds=PAIR_LIMIT_SECONDS, evidence_mode="public",
+                 debug_root=None):
     """Return per-mode summaries and callback records; write 21 raw rows each.
 
     ``connect`` accepts ``(url, keep_alive=True, sql_timing_sink=...)``. Only
@@ -60,8 +61,25 @@ def measure_pair(module, case, trial, raw_paths, *, connect, remote_type, url,
         raise ValueError("RESOURCE_OBSERVER")
     if case == "insert-rollback" and txn_mode is None:
         raise ValueError("TXN_MODE")
-    if timing_root is None:
-        raise ValueError("TIMING_ROOT")
+    if evidence_mode == "public":
+        if timing_root is None or debug_root is not None:
+            raise ValueError("TIMING_ROOT")
+    elif evidence_mode == "debug":
+        if timing_root is not None or debug_root is None or \
+                os.environ.get("GITHUB_ACTIONS") == "true" or \
+                os.environ.get("CI") == "true":
+            raise ValueError("DEBUG_MODE")
+        root = Path(debug_root)
+        try:
+            info = root.lstat()
+        except OSError as error:
+            raise ValueError("DEBUG_ROOT") from error
+        if not root.is_absolute() or not stat.S_ISDIR(info.st_mode) or \
+                info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700 or \
+                any(Path(path).parent != root / mode for mode, path in raw_paths.items()):
+            raise ValueError("DEBUG_ROOT")
+    else:
+        raise ValueError("EVIDENCE_MODE")
     started = time.monotonic()
 
     def deadline():
@@ -96,8 +114,9 @@ def measure_pair(module, case, trial, raw_paths, *, connect, remote_type, url,
         with ExitStack() as opened:
             streams = {mode: opened.enter_context(_open_private_raw(raw_paths[mode]))
                        for mode in clients}
-            timing = {mode: opened.enter_context(public_timing.TimingCellWriter(
+            timing = ({mode: opened.enter_context(public_timing.TimingCellWriter(
                 timing_root, case, trial, mode)) for mode in clients}
+                      if evidence_mode == "public" else {})
             for index in range(21):
                 for position, mode in enumerate(adapter.pair_order(trial, index)):
                     deadline()
@@ -106,7 +125,8 @@ def measure_pair(module, case, trial, raw_paths, *, connect, remote_type, url,
                                                       sample=index, measure=True,
                                                       defer_oracle=True)
                     ordinal = 2 * index + position
-                    timing[mode].append(index, ordinal, elapsed)
+                    if evidence_mode == "public":
+                        timing[mode].append(index, ordinal, elapsed)
                     cells[mode].calls[-1]["pair_ordinal"] = ordinal
                     row = {"sample": index, "seconds": elapsed,
                            "pair_ordinal": ordinal}
