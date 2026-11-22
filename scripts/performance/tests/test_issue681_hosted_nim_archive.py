@@ -5,6 +5,7 @@ import io
 from pathlib import Path
 import stat
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -48,6 +49,35 @@ class Connection:
 
 
 class HostedNimArchiveTest(unittest.TestCase):
+    def archive_fixture(self, root, *, extra=(), omit_nimble=False):
+        payload = io.BytesIO()
+        base = "nim-2.2.10"
+        with tarfile.open(fileobj=payload, mode="w:xz") as archive:
+            for directory in (base, base + "/bin"):
+                info = tarfile.TarInfo(directory)
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o755
+                archive.addfile(info)
+            for name in (("nim",) if omit_nimble else ("nim", "nimble")):
+                data = ("fixture " + name).encode()
+                info = tarfile.TarInfo(base + "/bin/" + name)
+                info.mode = 0o755
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+            for info, data in extra:
+                archive.addfile(info, io.BytesIO(data) if data is not None else None)
+        raw = payload.getvalue()
+        path = root / nim.NAME
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        patchers = [mock.patch.object(nim, "EXPECTED_BYTES", len(raw)),
+                    mock.patch.object(nim, "EXPECTED_SHA256",
+                                      hashlib.sha256(raw).hexdigest())]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return path
+
     def test_official_release_pins_are_literal(self):
         self.assertEqual(nim.DOWNLOAD_PATH,
                          "/nim-lang/nightlies/releases/download/"
@@ -177,6 +207,133 @@ class HostedNimArchiveTest(unittest.TestCase):
             self.assertFalse((root / (nim.NAME + ".partial")).exists())
             self.assertEqual((root / "download.private.log").read_text(),
                              "transfer:RuntimeError\n")
+
+    def test_exact_archive_extracts_owner_only_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self.archive_fixture(root)
+            output = nim.extract_archive(root, lambda: None)
+            self.assertEqual((output / "nim-2.2.10/bin/nim").read_bytes(),
+                             b"fixture nim")
+            self.assertEqual(stat.S_IMODE((output / "nim-2.2.10/bin/nim").stat().st_mode),
+                             0o700)
+            self.assertFalse((root / (nim.EXTRACTED_NAME + ".partial")).exists())
+
+    def test_changed_archive_digest_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self.archive_fixture(root)
+            with mock.patch.object(nim, "EXPECTED_SHA256", "0" * 64):
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_PARSER_INPUT$"):
+                    nim.extract_archive(root, lambda: None)
+            self.assertFalse((root / nim.EXTRACTED_NAME).exists())
+
+    def test_traversal_and_link_members_are_rejected(self):
+        for kind in ("traversal", "link"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                info = tarfile.TarInfo("nim-2.2.10/../escape")
+                data = b"bad"
+                info.size = len(data)
+                if kind == "link":
+                    info.name = "nim-2.2.10/bin/escape"
+                    info.type = tarfile.SYMTYPE
+                    info.linkname = "/private/escape"
+                    data = None
+                self.archive_fixture(root, extra=((info, data),))
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_PARSER_INPUT$"):
+                    nim.extract_archive(root, lambda: None)
+                self.assertFalse((root / nim.EXTRACTED_NAME).exists())
+
+    def test_duplicate_member_and_missing_nimble_are_rejected(self):
+        for duplicate in (True, False):
+            with self.subTest(duplicate=duplicate), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                extra = ()
+                if duplicate:
+                    info = tarfile.TarInfo("nim-2.2.10/bin/nim")
+                    info.size = 1
+                    extra = ((info, b"x"),)
+                self.archive_fixture(root, extra=extra,
+                                     omit_nimble=not duplicate)
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_PARSER_INPUT$"):
+                    nim.extract_archive(root, lambda: None)
+                self.assertFalse((root / nim.EXTRACTED_NAME).exists())
+
+    def test_guard_failure_during_extraction_removes_owned_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self.archive_fixture(root)
+            calls = 0
+
+            def guard():
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    raise RuntimeError("private path")
+
+            with self.assertRaisesRegex(ValueError, "^PUBLIC_PARSER_INPUT$"):
+                nim.extract_archive(root, guard)
+            self.assertFalse((root / nim.EXTRACTED_NAME).exists())
+            self.assertFalse((root / (nim.EXTRACTED_NAME + ".partial")).exists())
+
+    def test_existing_extraction_output_is_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self.archive_fixture(root)
+            output = root / nim.EXTRACTED_NAME
+            output.symlink_to(root / "missing")
+            with self.assertRaisesRegex(ValueError, "^PUBLIC_PARSER_INPUT$"):
+                nim.extract_archive(root, lambda: None)
+            self.assertTrue(output.is_symlink())
+
+    def test_extraction_uses_authenticated_snapshot_after_file_mutates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            archive = self.archive_fixture(root)
+            calls = 0
+
+            def guard():
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    archive.write_bytes(b"changed after authenticated read")
+
+            output = nim.extract_archive(root, guard)
+            self.assertEqual((output / "nim-2.2.10/bin/nim").read_bytes(),
+                             b"fixture nim")
+
+    def test_racing_output_directory_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            self.archive_fixture(root)
+            output = root / nim.EXTRACTED_NAME
+
+            def guard():
+                if ((root / (nim.EXTRACTED_NAME + ".partial") /
+                     "nim-2.2.10/bin/nimble").is_file() and
+                        not output.exists()):
+                    output.mkdir(mode=0o700)
+                    (output / "other-invocation").write_text("preserve")
+
+            with self.assertRaisesRegex(ValueError, "^PUBLIC_PARSER_INPUT$"):
+                nim.extract_archive(root, guard)
+            self.assertEqual((output / "other-invocation").read_text(),
+                             "preserve")
+            self.assertFalse((root / (nim.EXTRACTED_NAME + ".partial")).exists())
+
+    def test_empty_members_each_get_a_storage_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            extras = []
+            for index in range(12):
+                info = tarfile.TarInfo(f"nim-2.2.10/empty-{index}")
+                info.size = 0
+                extras.append((info, b""))
+            self.archive_fixture(root, extra=extras)
+            calls = []
+            nim.extract_archive(root, lambda: calls.append(True))
+            self.assertGreaterEqual(len(calls), 2 + 4 + len(extras) + 1)
 
 
 if __name__ == "__main__":

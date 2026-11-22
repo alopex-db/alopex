@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import ctypes
+import io
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
+import tarfile
 import time
 from urllib.parse import urlsplit
 
@@ -21,6 +25,11 @@ FIRST_HOST = "github.com"
 ASSET_HOST = "release-assets.githubusercontent.com"
 TIME_LIMIT = 180
 CHUNK = 1_048_576
+MAX_MEMBERS = 20_000
+MAX_MEMBER_BYTES = 100_000_000
+MAX_EXPANDED_BYTES = 500_000_000
+EXTRACTED_NAME = "nim-extracted"
+ARCHIVE_ROOTS = {"nim-2.2.10", "nim-2.2.10-linux_x64"}
 
 
 def require(value):
@@ -155,3 +164,148 @@ def fetch_archive(root, guard):
                 second.close()
             except Exception:
                 pass
+
+
+def _tar_name(member):
+    name = member.name
+    require(type(name) is str and name and "\\" not in name and
+            not name.startswith("/"))
+    canonical = name[:-1] if member.isdir() and name.endswith("/") else name
+    parts = PurePosixPath(canonical).parts
+    require(parts and parts[0] in ARCHIVE_ROOTS and
+            all(part not in ("", ".", "..") for part in parts) and
+            PurePosixPath(*parts).as_posix() == canonical)
+    return canonical, parts
+
+
+def _remove_owned_tree(path, identity):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    require(stat.S_ISDIR(info.st_mode) and
+            (info.st_dev, info.st_ino) == identity)
+    shutil.rmtree(path)
+
+
+def _promote_noreplace(source, target):
+    """Atomically publish a directory only when the target name is absent."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    old = os.fsencode(source)
+    new = os.fsencode(target)
+    if os.uname().sysname == "Linux":
+        rename = libc.renameat2
+        rename.argtypes = (ctypes.c_int, ctypes.c_char_p,
+                           ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+        rename.restype = ctypes.c_int
+        status = rename(-100, old, -100, new, 1)
+    elif os.uname().sysname == "Darwin":
+        rename = libc.renamex_np
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        rename.restype = ctypes.c_int
+        status = rename(old, new, 0x00000004)
+    else:
+        raise ValueError("PUBLIC_PARSER_INPUT")
+    if status != 0:
+        raise OSError(ctypes.get_errno(), "promotion")
+
+
+def extract_archive(root, guard):
+    """Reauthenticate and safely unpack one complete compiler input tree."""
+    partial = None
+    owned_partial = None
+    stage = "extract-admission"
+    try:
+        _owned_directory(root)
+        require(callable(guard))
+        archive_path = root / NAME
+        output = root / EXTRACTED_NAME
+        partial = root / (EXTRACTED_NAME + ".partial")
+        require(archive_path.is_file() and not archive_path.is_symlink() and
+                archive_path.stat().st_uid == os.geteuid() and
+                stat.S_IMODE(archive_path.stat().st_mode) == 0o600 and
+                archive_path.stat().st_size == EXPECTED_BYTES and
+                not output.exists() and not output.is_symlink() and
+                not partial.exists() and not partial.is_symlink())
+        guard()
+        digest = hashlib.sha256()
+        snapshot = bytearray()
+        with archive_path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            require(opened.st_uid == os.geteuid() and
+                    stat.S_ISREG(opened.st_mode) and
+                    stat.S_IMODE(opened.st_mode) == 0o600 and
+                    opened.st_size == EXPECTED_BYTES)
+            while block := stream.read(CHUNK):
+                require(len(snapshot) + len(block) <= EXPECTED_BYTES)
+                snapshot.extend(block)
+                digest.update(block)
+                guard()
+            require(len(snapshot) == EXPECTED_BYTES)
+            require(digest.hexdigest() == EXPECTED_SHA256)
+            stage = "extract-scan"
+            with tarfile.open(fileobj=io.BytesIO(bytes(snapshot)), mode="r:xz") as archive:
+                members = archive.getmembers()
+                require(1 <= len(members) <= MAX_MEMBERS)
+                names = set()
+                files = set()
+                roots = set()
+                total = 0
+                for member in members:
+                    name, parts = _tar_name(member)
+                    require(name not in names and
+                            (member.isfile() or member.isdir()) and
+                            not (member.mode & ~0o777))
+                    names.add(name)
+                    roots.add(parts[0])
+                    if member.isfile():
+                        files.add(name)
+                        require(len(parts) >= 2 and
+                                0 <= member.size <= MAX_MEMBER_BYTES)
+                        total += member.size
+                        require(total <= MAX_EXPANDED_BYTES)
+                require(len(roots) == 1 and
+                        all(next(iter(roots)) + "/bin/" + tool in files
+                            for tool in ("nim", "nimble")))
+                stage = "extract-write"
+                partial.mkdir(mode=0o700)
+                info = partial.lstat()
+                owned_partial = (info.st_dev, info.st_ino)
+                copied = 0
+                for member in members:
+                    guard()
+                    name, parts = _tar_name(member)
+                    destination = partial.joinpath(*parts)
+                    if member.isdir():
+                        destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        require(destination.is_dir() and not destination.is_symlink())
+                        continue
+                    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    mode = 0o700 if member.mode & 0o111 else 0o600
+                    fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY |
+                                 getattr(os, "O_NOFOLLOW", 0), mode)
+                    with os.fdopen(fd, "wb") as output_file:
+                        source_file = archive.extractfile(member)
+                        require(source_file is not None)
+                        remaining = member.size
+                        while remaining:
+                            block = source_file.read(min(CHUNK, remaining))
+                            require(block)
+                            remaining -= len(block)
+                            copied += len(block)
+                            output_file.write(block)
+                            guard()
+                    require(remaining == 0)
+                require(copied == total)
+        stage = "extract-promotion"
+        guard()
+        _promote_noreplace(partial, output)
+        return output
+    except BaseException as error:
+        _private_reason(root, stage, error)
+        if owned_partial is not None:
+            try:
+                _remove_owned_tree(partial, owned_partial)
+            except Exception:
+                pass
+        raise ValueError("PUBLIC_PARSER_INPUT") from None
