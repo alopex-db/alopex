@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from . import adapter, oracle, worker
+from . import adapter, oracle, public_timing, worker
 
 
 HEX = "1" * 63 + "2"
@@ -37,13 +37,15 @@ class WorkerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        root = Path(self.temp.name)
+        root = Path(self.temp.name).resolve()
         os.chmod(root, 0o700)
+        for mode in ("on", "off"):
+            (root / mode).mkdir(mode=0o700)
         self.config = {"schema": "alopex.sql-four-case-pair/v1", "case": "insert-rollback",
                        "engine": "alopex-server", "modes": ["on", "off"], "trial": 1,
                        "source": SUBJECT["source"], "assets_digest": HEX,
                        "same_job_id": "123", "fixture_sha256": "3" * 63 + "4",
-                       "outputs": {mode: {kind: str(root / f"{mode}.{kind}")
+                       "outputs": {mode: {kind: str(root / mode / f"{kind}.ndjson")
                                          for kind in ("raw", "client", "result")}
                                    for mode in ("on", "off")}}
         self.observer = Observer()
@@ -55,10 +57,12 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(kwargs["url"], SUBJECT["server"]["url"])
         self.assertIs(kwargs["connect"], self.connect)
         self.assertIs(kwargs["remote_type"], self.remote_type)
+        self.assertEqual(kwargs["timing_root"], Path(self.temp.name).resolve() / "public-timing")
         summaries = {}
         clients = {}
         for mode in ("on", "off"):
-            with worker.runner._open_private_raw(raw_paths[mode]) as stream:
+            with worker.runner._open_private_raw(raw_paths[mode]) as stream, \
+                    public_timing.TimingCellWriter(kwargs["timing_root"], case, trial, mode) as timing:
                 for sample in range(21):
                     resource = self.observer.end(None)
                     if hasattr(self, "mutate"):
@@ -66,6 +70,7 @@ class WorkerTests(unittest.TestCase):
                     row = {"sample": sample, "seconds": 0.001 * (sample + 1),
                            "pair_ordinal": 2 * sample + adapter.pair_order(trial, sample).index(mode),
                            "resources": resource}
+                    timing.append(sample, row["pair_ordinal"], row["seconds"])
                     stream.write(json.dumps(row) + "\n")
             summaries[mode] = {"case": case, "engine": "alopex-server", "server_client": True,
                                "fixture_rows": 1, "warmups": 3, "samples": 21,

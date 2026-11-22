@@ -66,7 +66,8 @@ class StagePairTests(unittest.TestCase):
         docs_root.mkdir(mode=0o700)
         package = {}
         for name in ("__init__", "adapter", "log_parser", "operation", "oracle",
-                     "runner", "worker", "supervisor", "container_pair_entrypoint"):
+                     "runner", "worker", "supervisor", "public_timing",
+                     "container_pair_entrypoint"):
             path = package_root / "four_case_diagnostic" / f"{name}.py"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"# {name}\n")
@@ -85,7 +86,7 @@ class StagePairTests(unittest.TestCase):
         files = stage_pair._extra_bundle(
             manifest, self.config, self.proof, {"platform": "linux/amd64"},
             bundle, Mock(), repo=repo, runner_temp=runner_temp)
-        self.assertEqual(len(files), 11)
+        self.assertEqual(len(files), 12)
         self.assertEqual(json.loads((bundle / "stage.json").read_text())["files"], files)
         (package_root / "four_case_diagnostic/worker.py").write_text("# changed\n")
         with self.assertRaisesRegex(ValueError, "MISSING_PIN"):

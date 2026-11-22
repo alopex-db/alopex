@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from . import adapter, oracle, supervisor
+from . import adapter, oracle, public_timing, supervisor
 from .test_log_parser import pair
 
 
@@ -47,7 +47,7 @@ class SupervisorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.output = self.root / "pair"
         self.output.mkdir(mode=0o700)
         for mode in ("on", "off"):
@@ -58,11 +58,13 @@ class SupervisorTests(unittest.TestCase):
         self.package.chmod(0o700)
         (self.package / "worker.py").write_text("# staged by trusted caller\n")
         (self.package / "worker.py").chmod(0o600)
+        (self.package / "public_timing.py").write_text("# staged by trusted caller\n")
+        (self.package / "public_timing.py").chmod(0o600)
         (self.package / "__init__.py").write_text("")
         (self.package / "__init__.py").chmod(0o600)
         self.package_files = {f"four_case_diagnostic/{name}":
                               supervisor.digest((self.package / name).read_bytes())
-                              for name in ("__init__.py", "worker.py")}
+                              for name in ("__init__.py", "worker.py", "public_timing.py")}
         self.subject = self.root / "subject.json"
         private_json(self.subject, {"source": SOURCE, "server": dict(IDENTITY, url=ENDPOINT)})
         self.resource = self.root / "resources.json"
@@ -83,6 +85,8 @@ class SupervisorTests(unittest.TestCase):
     def emit(self, case, *, omit_log=False, changed_resource=False,
              missing_client=False, changed_client=False, malformed_resource=None):
         clients, lines = pair(case)
+        timing_root = self.output / "public-timing"
+        timing_root.mkdir(mode=0o700, exist_ok=True)
         for mode in ("on", "off"):
             for row in clients[mode]:
                 if row["phase"] == "measured":
@@ -96,6 +100,11 @@ class SupervisorTests(unittest.TestCase):
         resource_digest = supervisor.digest(self.resource.read_bytes())
         for mode in ("on", "off"):
             root = self.output / mode
+            with public_timing.TimingCellWriter(timing_root, case, 0, mode) as timing:
+                for index in range(21):
+                    timing.append(index,
+                        2 * index + adapter.pair_order(0, index).index(mode),
+                        0.001 * (index + 1))
             with (root / "client.ndjson").open("w") as stream:
                 for row in clients[mode]:
                     stream.write(json.dumps(row) + "\n")

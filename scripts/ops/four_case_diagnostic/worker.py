@@ -77,6 +77,18 @@ def _paths(config):
         info = path.parent.lstat()
         require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and
                 stat.S_IMODE(info.st_mode) == 0o700, "OUTPUT_PARENT")
+    parents = {paths[mode][kind].parent for mode in ("on", "off")
+               for kind in ("result", "raw", "client")}
+    require(parents == {paths["on"]["raw"].parent,
+                        paths["off"]["raw"].parent} and
+            paths["on"]["raw"].parent != paths["off"]["raw"].parent and
+            paths["on"]["raw"].parent.parent == paths["off"]["raw"].parent.parent and
+            paths["on"]["raw"].parent.name == "on" and
+            paths["off"]["raw"].parent.name == "off", "OUTPUT_PATHS")
+    output = paths["on"]["raw"].parent.parent
+    info = output.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and
+            stat.S_IMODE(info.st_mode) == 0o700, "OUTPUT_PARENT")
     return paths
 
 
@@ -163,10 +175,15 @@ def run_pair(config, *, subject, observer, parity, connect, remote_type, txn_mod
             (observer.pid, observer.start) == (server["pid"], server["start_ticks"]),
             "RESOURCE_OBSERVER")
     paths = _paths(config)
+    output = paths["on"]["raw"].parent.parent
+    timing_root = output.resolve() / "public-timing"
+    require(not timing_root.exists() and not timing_root.is_symlink(), "TIMING_ROOT")
+    timing_root.mkdir(mode=0o700)
+    timing_root.chmod(0o700)
     summaries, clients = runner.measure_pair(parity, config["case"], config["trial"],
         {mode: paths[mode]["raw"] for mode in ("on", "off")}, connect=connect,
         remote_type=remote_type, url=server["url"], txn_mode=txn_mode,
-        observer=observer)
+        observer=observer, timing_root=timing_root)
     require(type(summaries) is dict and set(summaries) == {"on", "off"} and
             type(clients) is dict and set(clients) == {"on", "off"}, "PAIR_RESULT")
     identity = (server["pid"], server["start_ticks"])

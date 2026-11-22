@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 
-from . import adapter, log_parser, oracle, worker as pair_worker
+from . import adapter, log_parser, oracle, public_timing, worker as pair_worker
 
 WORKER_SECONDS = 300
 PAIR_SECONDS = 420
@@ -81,7 +81,8 @@ def verify_package(package_root, package_files):
     package = root / "four_case_diagnostic"
     require(type(package_files) is dict and package_files and
             {"four_case_diagnostic/__init__.py",
-             "four_case_diagnostic/worker.py"} <= set(package_files) and
+             "four_case_diagnostic/worker.py",
+             "four_case_diagnostic/public_timing.py"} <= set(package_files) and
             all(type(name) is str and name.startswith("four_case_diagnostic/") and
                 name.endswith(".py") and ".." not in Path(name).parts and
                 _hex(value, 64) for name, value in package_files.items()) and
@@ -243,6 +244,13 @@ def _verify_subject(env, config, identity, endpoint):
 def verify_output(config, output, identity, resource_digest):
     """Verify both cells and join the complete client inventory to the server log."""
     output = Path(output)
+    timing_root = output / "public-timing"
+    require(timing_root.is_dir() and not timing_root.is_symlink() and
+            timing_root.stat().st_uid == os.geteuid() and
+            stat.S_IMODE(timing_root.stat().st_mode) == 0o700 and
+            {path.name for path in timing_root.iterdir()} == {
+                public_timing.cell_filename(config["case"], config["trial"], mode)
+                for mode in ("on", "off")}, "TIMING_INVENTORY")
     clients = {}
     cells = {}
     tree = None
@@ -268,6 +276,13 @@ def verify_output(config, output, identity, resource_digest):
                 cell["pair_order"] == [list(adapter.pair_order(config["trial"], i))
                                        for i in range(21)], "CELL_IDENTITY")
         raw, raw_bytes = _ndjson(root / "raw.ndjson", RAW_BYTES, 21)
+        timed = public_timing._read_cell(
+            timing_root / public_timing.cell_filename(config["case"], config["trial"], mode),
+            config["case"], config["trial"], mode)
+        require([row["elapsed_seconds"] for row in timed] ==
+                [row.get("seconds") for row in raw] and
+                [row["pair_ordinal"] for row in timed] ==
+                [row.get("pair_ordinal") for row in raw], "TIMING_RAW_JOIN")
         require(cell.get("raw_sha256") == digest(raw_bytes) and
                 cell.get("raw_seconds") == [row.get("seconds") for row in raw] and
                 cell.get("raw_ordinals") == [row.get("pair_ordinal") for row in raw],

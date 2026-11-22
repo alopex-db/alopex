@@ -9,7 +9,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from . import adapter, operation, runner
+from . import adapter, operation, public_timing, runner
 
 
 class Remote:
@@ -61,6 +61,10 @@ class Observer:
 
     def end(self, token):
         assert token == 1
+        if hasattr(self, "timing_root"):
+            written = sum(len(path.read_text().splitlines())
+                          for path in self.timing_root.iterdir())
+            assert written == self.events.count("end") + 1
         self.events.append("end")
         return {"status": "observed"}
 
@@ -88,17 +92,25 @@ class RunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             os.chmod(directory, 0o700)
             paths = {mode: Path(directory) / f"{mode}.ndjson" for mode in ("on", "off")}
+            timing_root = Path(directory).resolve() / "public-timing"
+            timing_root.mkdir(mode=0o700)
+            observer.timing_root = timing_root
             summary, clients = runner.measure_pair(module, case, 0, paths,
                 connect=connect, remote_type=Remote, url="same-qualified-server",
-                txn_mode="read_write", observer=observer)
+                txn_mode="read_write", observer=observer, timing_root=timing_root)
             raw = {mode: [json.loads(line) for line in paths[mode].read_text().splitlines()]
                    for mode in paths}
+            timed = {mode: public_timing._read_cell(
+                timing_root / public_timing.cell_filename(case, 0, mode), case, 0, mode)
+                for mode in paths}
             self.assertEqual({stat.S_IMODE(path.stat().st_mode) for path in paths.values()},
                              {0o600})
         self.assertEqual(state["closed"], ["off", "on"])
         self.assertEqual(len(observer.events), 84)
         for mode in ("on", "off"):
             self.assertEqual(len(raw[mode]), 21)
+            self.assertEqual([row["elapsed_seconds"] for row in timed[mode]],
+                             [row["seconds"] for row in raw[mode]])
             self.assertEqual(len(clients[mode]), adapter.expected_client_records(case, mode))
             self.assertEqual((summary[mode]["warmups"], summary[mode]["samples"]), (3, 21))
             self.assertEqual([row["pair_ordinal"] for row in raw[mode]],
@@ -196,10 +208,12 @@ class RunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             os.chmod(directory, 0o700)
             paths = {mode: Path(directory) / f"{mode}.ndjson" for mode in ("on", "off")}
+            timing_root = Path(directory).resolve() / "public-timing"
+            timing_root.mkdir(mode=0o700)
             with self.assertRaises(BaseExceptionGroup) as caught:
                 runner.measure_pair(module, "aggregate", 0, paths, connect=connect,
                                     remote_type=Remote, url="same-qualified-server",
-                                    observer=Observer())
+                                    observer=Observer(), timing_root=timing_root)
         self.assertTrue(any("setup callback count mismatch" in str(error)
                             for error in caught.exception.exceptions))
         self.assertEqual(sum("close failed" in str(error)

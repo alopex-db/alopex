@@ -13,7 +13,7 @@ import stat
 import statistics
 import time
 
-from . import adapter, operation, oracle
+from . import adapter, operation, oracle, public_timing
 
 PAIR_LIMIT_SECONDS = 420
 
@@ -40,7 +40,8 @@ def _open_private_raw(path):
 
 
 def measure_pair(module, case, trial, raw_paths, *, connect, remote_type, url,
-                 txn_mode=None, observer=None, pair_limit_seconds=PAIR_LIMIT_SECONDS):
+                 txn_mode=None, observer=None, timing_root=None,
+                 pair_limit_seconds=PAIR_LIMIT_SECONDS):
     """Return per-mode summaries and callback records; write 21 raw rows each.
 
     ``connect`` accepts ``(url, keep_alive=True, sql_timing_sink=...)``. Only
@@ -59,6 +60,8 @@ def measure_pair(module, case, trial, raw_paths, *, connect, remote_type, url,
         raise ValueError("RESOURCE_OBSERVER")
     if case == "insert-rollback" and txn_mode is None:
         raise ValueError("TXN_MODE")
+    if timing_root is None:
+        raise ValueError("TIMING_ROOT")
     started = time.monotonic()
 
     def deadline():
@@ -93,6 +96,8 @@ def measure_pair(module, case, trial, raw_paths, *, connect, remote_type, url,
         with ExitStack() as opened:
             streams = {mode: opened.enter_context(_open_private_raw(raw_paths[mode]))
                        for mode in clients}
+            timing = {mode: opened.enter_context(public_timing.TimingCellWriter(
+                timing_root, case, trial, mode)) for mode in clients}
             for index in range(21):
                 for position, mode in enumerate(adapter.pair_order(trial, index)):
                     deadline()
@@ -100,9 +105,11 @@ def measure_pair(module, case, trial, raw_paths, *, connect, remote_type, url,
                     value, elapsed = cells[mode].call("measured", operations[mode],
                                                       sample=index, measure=True,
                                                       defer_oracle=True)
-                    cells[mode].calls[-1]["pair_ordinal"] = 2 * index + position
+                    ordinal = 2 * index + position
+                    timing[mode].append(index, ordinal, elapsed)
+                    cells[mode].calls[-1]["pair_ordinal"] = ordinal
                     row = {"sample": index, "seconds": elapsed,
-                           "pair_ordinal": 2 * index + position}
+                           "pair_ordinal": ordinal}
                     try:
                         row["resources"] = observer.end(before)
                     except Exception:
