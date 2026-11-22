@@ -42,6 +42,7 @@ class PublicRunPlanTests(unittest.TestCase):
                     additional_bytes=1_000_000_000,
                     admit_stage=lambda rows: stages.append(rows) or True,
                     admit_case=lambda rows, trial, arm: True,
+                    complete_case=lambda rows, trial, arm: True,
                     case_runner=execute)
             self.assertEqual(stages, [1_000, 10_000, 100_000])
             self.assertEqual(len(cases), 30)
@@ -76,6 +77,7 @@ class PublicRunPlanTests(unittest.TestCase):
                         additional_bytes=1_000_000_000,
                         admit_stage=lambda rows: rows == 1_000,
                         admit_case=lambda rows, trial, arm: True,
+                        complete_case=lambda rows, trial, arm: True,
                         case_runner=execute)
             self.assertEqual(calls, [1_000] * 10)
             self.assertEqual(list(export.iterdir()), [])

@@ -81,7 +81,7 @@ class PublicCollectorTests(unittest.TestCase):
 
     def measure(self, *, malformed=False, secret=False, stderr_secret=False,
                 capacity_error=False, counter_error=False, finish="rollback",
-                validated=True, tamper_private=None):
+                validated=True, tamper_private=None, exit_delay=0):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             binary = root / "fixture"
@@ -89,10 +89,11 @@ class PublicCollectorTests(unittest.TestCase):
                        events(finish=finish, malformed=malformed, secret=secret,
                               validated=validated)]
             binary.write_text(
-                f"#!{sys.executable}\nimport sys\nlines={payload!r}\n"
+                f"#!{sys.executable}\nimport sys,time\nlines={payload!r}\n"
                 + ("print('/private/host/stderr',file=sys.stderr)\n" if stderr_secret else "")
                 + "for line in lines:\n print(line,flush=True)\n"
-                  " if sys.stdin.readline().strip() != 'continue': sys.exit(9)\n")
+                  " if sys.stdin.readline().strip() != 'continue': sys.exit(9)\n"
+                + f"time.sleep({exit_delay!r})\n")
             binary.chmod(0o700)
             output = root / "export"
             output.mkdir(mode=0o700)
@@ -157,6 +158,13 @@ class PublicCollectorTests(unittest.TestCase):
             "phase", "elapsed_ns", "kernel_peak_rss_bytes",
             "cache_hits", "cache_misses", "graph_bytes"})
         self.assertEqual(result["phases"][4]["graph_bytes"], 123456)
+
+    def test_validated_child_may_exit_after_five_seconds(self):
+        self.assertEqual(self.measure(exit_delay=6)["status"], "measured")
+
+    def test_child_over_post_finish_grace_is_stopped(self):
+        with mock.patch.object(public, "POST_FINISH_SECONDS", 1):
+            self.assertEqual(self.measure(exit_delay=3)["status"], "failed")
 
     def test_commit_mode_requires_validated_completion(self):
         result = self.measure(finish="commit", stderr_secret=True)

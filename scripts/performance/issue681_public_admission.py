@@ -67,6 +67,77 @@ def quiet(before, after, selected):
     return minimum
 
 
+def eligible_cpus(before, after, allowed):
+    """Select only CPUs with a valid strict-idle three-second sample."""
+    require(bool(allowed) and len(set(allowed)) == len(allowed))
+    first = cpu_ticks(before, allowed)
+    last = cpu_ticks(after, allowed)
+    eligible = []
+    for number in sorted(allowed):
+        total = last[number][0] - first[number][0]
+        idle = last[number][1] - first[number][1]
+        require(total > 0 and 0 <= idle <= total)
+        if idle * 10_000 >= MIN_IDLE_BASIS_POINTS * total:
+            eligible.append(number)
+    return tuple(eligible)
+
+
+def parse_cpuset(raw):
+    value = raw.strip()
+    require(bool(value) and re.fullmatch(r"[0-9,-]+", value))
+    result = set()
+    for item in value.split(","):
+        limits = item.split("-")
+        require(len(limits) in (1, 2) and all(part.isdecimal() for part in limits))
+        start = int(limits[0])
+        end = int(limits[-1])
+        require(0 <= start <= end < 4096 and end - start < 4096)
+        selected = set(range(start, end + 1))
+        require(not result.intersection(selected))
+        result.update(selected)
+    return result
+
+
+def cgroup_allocation(root, relative, selected):
+    """Check the effective set and all visible v2 CPU quota ancestors."""
+    parts = [] if relative == "/" else relative.split("/")[1:]
+    require(isinstance(root, Path) and root.is_absolute() and root.is_dir() and
+            not root.is_symlink() and (root / "cgroup.controllers").is_file() and
+            type(relative) is str and relative.startswith("/") and
+            all(part not in (".", "..", "") for part in parts) and
+            bool(selected))
+    current = root.joinpath(*parts)
+    require(current.is_dir() and not current.is_symlink())
+    effective = parse_cpuset((current / "cpuset.cpus.effective").read_text())
+    require(set(selected).issubset(effective))
+    directory = current
+    while True:
+        fields = (directory / "cpu.max").read_text().split()
+        require(len(fields) == 2 and fields[1].isdecimal() and int(fields[1]) > 0)
+        if fields[0] != "max":
+            require(fields[0].isdecimal() and
+                    int(fields[0]) >= len(selected) * int(fields[1]))
+        if directory == root:
+            break
+        directory = directory.parent
+        require(directory == root or root in directory.parents)
+    counters = {}
+    for line in (current / "cpu.stat").read_text().splitlines():
+        parts = line.split()
+        require(len(parts) == 2 and parts[0] not in counters and
+                parts[1].isdecimal())
+        counters[parts[0]] = int(parts[1])
+    require("nr_throttled" in counters)
+    return counters["nr_throttled"]
+
+
+def current_allocation(selected):
+    lines = Path("/proc/self/cgroup").read_text().splitlines()
+    require(len(lines) == 1 and lines[0].startswith("0::"))
+    relative = lines[0][3:]
+    return relative, cgroup_allocation(Path("/sys/fs/cgroup"), relative, selected)
+
+
 def _unique(pairs):
     result = {}
     for key, value in pairs:
@@ -94,7 +165,7 @@ def verify_ledger(directory, additional_bytes):
             raw = stream.read(20_001)
             require(len(raw) == info.st_size)
         lines = raw.splitlines(keepends=True)
-        require(len(lines) == 34 and all(line.endswith(b"\n") for line in lines))
+        require(len(lines) == 64 and all(line.endswith(b"\n") for line in lines))
         expected = [("preflight", None, None, None)]
         last_rows = None
         for rows, trial, arm in pair._order():
@@ -102,15 +173,20 @@ def verify_ledger(directory, additional_bytes):
                 expected.append(("stage", rows, None, None))
                 last_rows = rows
             expected.append(("case", rows, trial, arm))
+            expected.append(("case_complete", rows, trial, arm))
         for line, (kind, rows, trial, arm) in zip(lines, expected):
             value = json.loads(line, object_pairs_hook=_unique)
             require(type(value) is dict and set(value) == LEDGER_FIELDS and
                     value["schema"] == LEDGER_SCHEMA and value["kind"] == kind and
                     value["rows"] == rows and value["trial"] == trial and
                     value["arm"] == arm and value["status"] == "passed" and
-                    value["idle_window_seconds"] == WINDOW_SECONDS and
-                    type(value["min_idle_basis_points"]) is int and
-                    MIN_IDLE_BASIS_POINTS <= value["min_idle_basis_points"] <= 10_000 and
+                    ((kind == "case_complete" and
+                      value["idle_window_seconds"] == 0 and
+                      value["min_idle_basis_points"] is None) or
+                     (kind != "case_complete" and
+                      value["idle_window_seconds"] == WINDOW_SECONDS and
+                      type(value["min_idle_basis_points"]) is int and
+                      MIN_IDLE_BASIS_POINTS <= value["min_idle_basis_points"] <= 10_000)) and
                     type(value["allocated_bytes"]) is int and
                     0 <= value["allocated_bytes"] and
                     value["allocated_bytes"] + additional_bytes <= case.STOP_BYTES and
@@ -178,6 +254,16 @@ class Admission:
         self.log = None
         self.previous = None
         self.selected = None
+        self.cgroup = None
+        self.pending = None
+
+    def _allocation(self):
+        require(self.selected is not None and
+                os.sched_getaffinity(0) == set(self.selected))
+        path, throttled = current_allocation(self.selected)
+        require(self.cgroup is None or path == self.cgroup)
+        self.cgroup = path
+        return throttled
 
     def _capacity(self):
         result = case.storage.inventory(self.roots)
@@ -194,11 +280,21 @@ class Admission:
         after = Path("/proc/stat").read_text()
         return quiet(before, after, self.selected)
 
+    def _select_cpus(self):
+        before = Path("/proc/stat").read_text()
+        started = time.monotonic()
+        time.sleep(WINDOW_SECONDS)
+        require(time.monotonic() - started >= WINDOW_SECONDS)
+        after = Path("/proc/stat").read_text()
+        eligible = eligible_cpus(before, after, tuple(self.previous))
+        require(len(eligible) >= 4)
+        return eligible[:4]
+
     def _record(self, kind, used, idle, *, rows=None, trial=None, arm=None):
         value = {"schema": LEDGER_SCHEMA,
                  "kind": kind, "rows": rows, "trial": trial, "arm": arm,
                  "allocated_bytes": used,
-                 "idle_window_seconds": WINDOW_SECONDS,
+                 "idle_window_seconds": 0 if kind == "case_complete" else WINDOW_SECONDS,
                  "min_idle_basis_points": idle, "status": "passed"}
         raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
         require(self.log is not None and os.write(self.log, raw) == len(raw))
@@ -219,9 +315,10 @@ class Admission:
                     os.environ.get("RUNNER_KIND") == self.profile["runner_kind"])
             self.previous = os.sched_getaffinity(0)
             require(len(self.previous) >= 4)
-            self.selected = tuple(sorted(self.previous)[:4])
+            self.selected = self._select_cpus()
             os.sched_setaffinity(0, self.selected)
             require(os.sched_getaffinity(0) == set(self.selected))
+            self._allocation()
             child_counter_probe()
             used = self._capacity()
             idle = self._quiet_window()
@@ -244,6 +341,8 @@ class Admission:
     def admit_stage(self, rows):
         try:
             require(self.previous is not None and rows in (1_000, 10_000, 100_000))
+            require(self.pending is None)
+            self._allocation()
             used = self._capacity()
             idle = self._quiet_window()
             self._record("stage", used, idle, rows=rows)
@@ -255,10 +354,25 @@ class Admission:
         try:
             require(self.previous is not None and rows in (1_000, 10_000, 100_000)
                     and type(trial) is int and 0 <= trial < 5 and
-                    arm in ("before", "candidate"))
+                    arm in ("before", "candidate") and self.pending is None)
+            throttled = self._allocation()
             used = self._capacity()
             idle = self._quiet_window()
             self._record("case", used, idle, rows=rows, trial=trial, arm=arm)
+            self.pending = (rows, trial, arm, throttled)
+            return True
+        except Exception:
+            raise ValueError("PUBLIC_ADMIT") from None
+
+    def complete_case(self, rows, trial, arm):
+        try:
+            require(self.pending is not None and
+                    self.pending[:3] == (rows, trial, arm) and
+                    self._allocation() == self.pending[3])
+            used = self._capacity()
+            self._record("case_complete", used, None,
+                         rows=rows, trial=trial, arm=arm)
+            self.pending = None
             return True
         except Exception:
             raise ValueError("PUBLIC_ADMIT") from None

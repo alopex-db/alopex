@@ -36,13 +36,15 @@ def _empty_private(directory):
 
 def _run_mode(*, pins, asset_locations, work, export, finish, private_roots,
               admission_dir, additional_bytes, admit_stage, admit_case,
+              complete_case,
               inventory_roots=(), case_runner=case.run_case):
     """Collect, audit and export exactly one completion mode in this job."""
     pair._pins(pins)
     require(finish in ("commit", "rollback") and
             type(asset_locations) is dict and set(asset_locations) == set(pair.ARMS) and
             type(private_roots) is tuple and callable(admit_stage) and
-            callable(admit_case) and callable(case_runner))
+            callable(admit_case) and callable(complete_case) and
+            callable(case_runner))
     _empty_private(work)
     _empty_private(export)
     require(work != export and work not in export.parents and
@@ -76,6 +78,7 @@ def _run_mode(*, pins, asset_locations, work, export, finish, private_roots,
             timeout=TIMEOUTS[rows], rss_limit=RSS_LIMIT,
             inventory_roots=inventory_roots)
         require(type(report) is dict and report.get("status") == "measured")
+        require(complete_case(rows, trial, arm) is True)
         require(audit.audit_case(public, private, admitted[arm]["binary"],
                                  pins[arm], rows, trial, finish) == report)
         reports.append(report)
@@ -124,6 +127,7 @@ def run_selected_mode(*, profile, pins, asset_locations, work, export,
                 admission_dir=admission_dir,
                 additional_bytes=profile["additional_bytes"],
                 admit_stage=gate.admit_stage, admit_case=gate.admit_case,
+                complete_case=gate.complete_case,
                 inventory_roots=roots)
     except Exception:
         raise ValueError("PUBLIC_STAGE") from None

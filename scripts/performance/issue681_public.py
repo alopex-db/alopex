@@ -36,6 +36,7 @@ ERRORS = frozenset({"PUBLIC_INPUT", "PUBLIC_CAPACITY", "PUBLIC_PROTOCOL",
                     "PUBLIC_COUNTER", "PUBLIC_TIMEOUT", "PUBLIC_CHILD"})
 MAX_EVENT_BYTES = 4096
 STOP_BYTES = 40_000_000_000
+POST_FINISH_SECONDS = 30
 
 
 class PublicFailure(Exception):
@@ -260,7 +261,8 @@ def run_case(*, binary, directory, private_dir, source_commit, binary_sha256, ro
             audit_stream.flush()
             process.stdin.write("continue\n")
             process.stdin.flush()
-        require(process.wait(timeout=5) == 0 and events.get(timeout=1) is None,
+        require(process.wait(timeout=POST_FINISH_SECONDS) == 0 and
+                events.get(timeout=1) is None,
                 "PUBLIC_CHILD")
         reader.join(timeout=2)
         require(len(records) == len(phases) and not reader.is_alive() and

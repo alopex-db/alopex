@@ -18,6 +18,38 @@ def stat(values):
 
 
 class AdmissionTests(unittest.TestCase):
+    def test_cgroup_quota_and_effective_cpuset_are_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "cgroup.controllers").write_text("cpu cpuset\n")
+            (root / "cpu.max").write_text("max 100000\n")
+            child = root / "selected"
+            child.mkdir()
+            (child / "cpuset.cpus.effective").write_text("2-5\n")
+            (child / "cpu.max").write_text("400000 100000\n")
+            (child / "cpu.stat").write_text("usage_usec 100\nnr_throttled 0\n")
+            self.assertEqual(admission.cgroup_allocation(
+                root, "/selected", (2, 3, 4, 5)), 0)
+            (child / "cpu.max").write_text("300000 100000\n")
+            with self.assertRaisesRegex(ValueError, "^PUBLIC_ADMIT$"):
+                admission.cgroup_allocation(root, "/selected", (2, 3, 4, 5))
+            (child / "cpu.max").write_text("max 100000\n")
+            (root / "cpu.max").write_text("200000 100000\n")
+            with self.assertRaisesRegex(ValueError, "^PUBLIC_ADMIT$"):
+                admission.cgroup_allocation(root, "/selected", (2, 3, 4, 5))
+
+    def test_case_completion_rejects_throttling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = {"schema": admission.SCHEMA,
+                       "runner_kind": "selected_linux",
+                       "cpu_count": 4, "additional_bytes": 1_000}
+            gate = admission.Admission(profile, roots=(Path(tmp),),
+                                       log_dir=Path(tmp))
+            gate.pending = (1_000, 0, "before", 0)
+            with mock.patch.object(gate, "_allocation", return_value=1):
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_ADMIT$"):
+                    gate.complete_case(1_000, 0, "before")
+
     def test_each_selected_cpu_must_be_idle(self):
         before = stat({2: (100, 100), 3: (100, 100)})
         passing = stat({2: (100, 200), 3: (100, 200)})
@@ -27,6 +59,7 @@ class AdmissionTests(unittest.TestCase):
             admission.quiet(before, busy, (2, 3))
         with self.assertRaisesRegex(ValueError, "^PUBLIC_ADMIT$"):
             admission.quiet(before, stat({2: (100, 200)}), (2, 3))
+        self.assertEqual(admission.eligible_cpus(before, busy, (2, 3)), (2,))
 
     def test_affinity_restored_after_private_admission(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -51,6 +84,10 @@ class AdmissionTests(unittest.TestCase):
                     mock.patch.object(admission.os, "sched_setaffinity",
                                       side_effect=set_affinity, create=True), \
                     mock.patch.object(admission, "child_counter_probe"), \
+                    mock.patch.object(admission, "current_allocation",
+                                      return_value=("/", 0)), \
+                    mock.patch.object(admission.Admission, "_select_cpus",
+                                      return_value=(2, 3, 4, 5)), \
                     mock.patch.object(admission.Admission, "_capacity",
                                       return_value=1_000), \
                     mock.patch.object(admission.Admission, "_quiet_window",
@@ -60,9 +97,10 @@ class AdmissionTests(unittest.TestCase):
                     self.assertEqual(state["affinity"], {2, 3, 4, 5})
                     self.assertTrue(admitted.admit_stage(1_000))
                     self.assertTrue(admitted.admit_case(1_000, 0, "before"))
+                    self.assertTrue(admitted.complete_case(1_000, 0, "before"))
                 self.assertEqual(state["affinity"], {2, 3, 4, 5, 6})
             self.assertEqual(len((log_dir / "admission.jsonl").read_text().splitlines()),
-                             3)
+                             4)
 
 
 if __name__ == "__main__":

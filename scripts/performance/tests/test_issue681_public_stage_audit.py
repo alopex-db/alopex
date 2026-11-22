@@ -66,6 +66,7 @@ class PublicStageAuditTests(unittest.TestCase):
                     schedule.append(("stage", rows, None, None))
                     last_rows = rows
                 schedule.append(("case", rows, trial, arm))
+                schedule.append(("case_complete", rows, trial, arm))
             ledger = admission_dir / "admission.jsonl"
             with ledger.open("wb") as stream:
                 for kind, rows, trial, arm in schedule:
@@ -73,8 +74,8 @@ class PublicStageAuditTests(unittest.TestCase):
                         "schema": admission.LEDGER_SCHEMA,
                         "kind": kind, "rows": rows, "trial": trial,
                         "arm": arm, "allocated_bytes": 1_000,
-                        "idle_window_seconds": 3,
-                        "min_idle_basis_points": 10_000,
+                        "idle_window_seconds": 0 if kind == "case_complete" else 3,
+                        "min_idle_basis_points": None if kind == "case_complete" else 10_000,
                         "status": "passed"}))
             ledger.chmod(0o600)
             def admit_asset(root, pin, *, private_roots):
