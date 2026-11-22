@@ -111,6 +111,8 @@ def verify(lock, proof, receipt, observations, *, expected, environment):
                              "repeat": observations["repeat"]["collection_sha256"]}},
             "R01")
     return {**qualified, "controller_digest": lock["pin"]["controller_digest"],
+            "profile_sha256": proof["profile_sha256"],
+            "storage": proof["profile"]["storage"],
             "run_attempt": environment["GITHUB_RUN_ATTEMPT"],
             "qualification_cases": sorted(qualification.CASES)}
 

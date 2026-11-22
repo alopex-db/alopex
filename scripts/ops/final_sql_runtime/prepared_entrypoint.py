@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import (admission, collection_attestor, controller, docs_harness,
                product_harness, profile_factory, public_upload,
-               subject_binding)
+               selected_profile, subject_binding)
 
 
 class PreparedFailure(ValueError):
@@ -27,9 +27,7 @@ class PreparedFailure(ValueError):
 def run(*, qualification_args, manifests, reviewed_pins, selected_image_digest,
         controller_digest, worker_path, worker_sha256, controller_path,
         controller_sha256, docs_checkout, product_checkout, docs_archive,
-        harness_path, qualified_profile, qualified_profile_sha256,
-        expected_backing_root, profile_dir, staging_root, public_dir,
-        declared_seconds):
+        harness_path, profile_dir, staging_root, public_dir, declared_seconds):
     """Return only the verified public file path after fresh private audits.
 
     ``manifests`` contains the two admitted public references and the
@@ -57,6 +55,8 @@ def run(*, qualification_args, manifests, reviewed_pins, selected_image_digest,
             if (path.is_symlink() or not path.is_file() or
                     hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]):
                 raise ValueError("OPERATOR_PIN")
+        qualified_profile, qualified_profile_sha256, expected_backing_root = (
+            selected_profile.from_live(qualification_args))
         # The binder reattests the current #804 job before any SQL staging.
         subjects, product_manifests, audit_pins = subject_binding.assemble(
             manifests=manifests, reviewed_pins=reviewed_pins,

@@ -33,9 +33,6 @@ class PreparedEntrypointTests(unittest.TestCase):
             controller_sha256=hashlib.sha256(operator.read_bytes()).hexdigest(),
             docs_checkout=self.root / "docs", product_checkout=self.root / "product",
             docs_archive=self.root / "docs.tar", harness_path=self.root / "combined.tar",
-            qualified_profile=self.root / "profile.json",
-            qualified_profile_sha256="c" * 64,
-            expected_backing_root=self.root / "backing",
             profile_dir=self.root / "profiles", staging_root=self.root / "staging",
             public_dir=self.root / "public", declared_seconds={"preflight": 60, "cell": 120})
 
@@ -44,14 +41,18 @@ class PreparedEntrypointTests(unittest.TestCase):
         evidence = []
         class Profiles:
             profile_hashes = {"fixed-run": "d" * 64}
-            def __init__(self, *_args, **_kwargs):
+            def __init__(self, qualified, **kwargs):
+                self_test.assertEqual(qualified, self_test.root / "profile.json")
+                self_test.assertEqual(kwargs["expected_profile_sha256"], "c" * 64)
                 events.append("profiles")
             def profile_for(self, *_args):
                 return Path("/profile")
             def destination_for(self, *_args):
                 return Path("/destination")
         class Storage:
-            def __init__(self, *_args, **_kwargs):
+            def __init__(self, qualified, **kwargs):
+                self_test.assertEqual(qualified, self_test.root / "profile.json")
+                self_test.assertEqual(kwargs["expected_backing_root"], self_test.root / "backing")
                 events.append("storage")
             def admit_storage(self, *_args):
                 return True
@@ -79,8 +80,11 @@ class PreparedEntrypointTests(unittest.TestCase):
             events.append("verify")
             self.assertEqual(independent_evidence({}), {"fresh": 2})
         subjects, manifests, audit_pins = {}, {}, {}
+        self_test = self
         product_files = {"fixed": "hash"}
-        with patch.object(entry.subject_binding, "assemble", side_effect=lambda **_:
+        with patch.object(entry.selected_profile, "from_live", return_value=(
+            self.root / "profile.json", "c" * 64, self.root / "backing")), patch.object(
+            entry.subject_binding, "assemble", side_effect=lambda **_:
                           (subjects, manifests, audit_pins)) as bind, patch.object(
             entry.docs_harness, "build", side_effect=lambda *_: events.append("docs")), patch.object(
             entry.product_harness, "verify", return_value=(self.root, product_files)), patch.object(
@@ -107,6 +111,16 @@ class PreparedEntrypointTests(unittest.TestCase):
         self.assertIn(b'"status":"failed"', caught.exception.public_line)
         self.assertFalse((self.root / "public/public.json").exists())
 
+    def test_missing_live_profile_stops_before_subject_binding(self):
+        with patch.object(entry.selected_profile, "from_live",
+                          side_effect=ValueError("SELECTED_PROFILE")), patch.object(
+            entry.subject_binding, "assemble") as bind:
+            with self.assertRaises(entry.PreparedFailure) as caught:
+                entry.run(**self.arguments)
+        bind.assert_not_called()
+        self.assertIn(b'"status":"failed"', caught.exception.public_line)
+        self.assertFalse((self.root / "public/public.json").exists())
+
     def test_missing_required_input_is_fixed_failure(self):
         self.arguments["qualification_args"] = {}
         with self.assertRaises(entry.PreparedFailure) as caught:
@@ -117,7 +131,9 @@ class PreparedEntrypointTests(unittest.TestCase):
     def test_failed_final_recheck_removes_public_file(self):
         def write_public(*_args):
             (self.root / "public/public.json").write_bytes(b"pending verification")
-        with patch.object(entry.subject_binding, "assemble", return_value=({}, {}, {})), patch.object(
+        with patch.object(entry.selected_profile, "from_live", return_value=(
+            self.root / "profile.json", "c" * 64, self.root / "backing")), patch.object(
+            entry.subject_binding, "assemble", return_value=({}, {}, {})), patch.object(
             entry.docs_harness, "build"), patch.object(
             entry.product_harness, "verify", return_value=(self.root, {})), patch.object(
             entry.profile_factory, "ProfileFactory", return_value=MagicMock()), patch.object(
@@ -134,7 +150,9 @@ class PreparedEntrypointTests(unittest.TestCase):
         def write_then_fail(*_args):
             (self.root / "public/public.json").write_bytes(b"incomplete")
             raise RuntimeError("private diagnostic")
-        with patch.object(entry.subject_binding, "assemble", return_value=({}, {}, {})), patch.object(
+        with patch.object(entry.selected_profile, "from_live", return_value=(
+            self.root / "profile.json", "c" * 64, self.root / "backing")), patch.object(
+            entry.subject_binding, "assemble", return_value=({}, {}, {})), patch.object(
             entry.docs_harness, "build"), patch.object(
             entry.product_harness, "verify", return_value=(self.root, {})), patch.object(
             entry.profile_factory, "ProfileFactory", return_value=MagicMock()), patch.object(

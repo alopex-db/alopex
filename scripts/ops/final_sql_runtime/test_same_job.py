@@ -61,6 +61,8 @@ class SameJobTests(unittest.TestCase):
         result = checked(fixture_live())
         self.assertEqual((result["job_id"], result["run_attempt"]), (JOB, "2"))
         self.assertEqual(result["controller_digest"], fixture_live()[0]["pin"]["controller_digest"])
+        self.assertEqual(result["profile_sha256"], fixture_live()[1]["profile_sha256"])
+        self.assertEqual(result["storage"], fixture_live()[1]["profile"]["storage"])
         self.assertEqual(len(result["qualification_cases"]), 14)
 
     def test_stale_job_attempt_and_source(self):
