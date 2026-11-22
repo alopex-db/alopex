@@ -12,6 +12,7 @@ import statistics
 import tarfile
 
 from .worker import ISOLATED, result_digest
+from . import docs_harness
 
 SUBJECTS = ("published", "before", "candidate", "postgresql")
 CASES = tuple(ISOLATED)
@@ -51,16 +52,18 @@ def compose_harness(docs_archive, product_root, product_files, destination):
         require(len(members) < 256 and sum(m.size for m in members) < 8_000_000, "harness bound")
         for member in members:
             name = safe_name(member.name)
-            require(member.isfile() or member.isdir(), "non-regular harness input")
-            if member.isdir():
-                continue
+            require(member.isfile(), "non-regular harness input")
             require(name.startswith("scripts/performance/") and "docs/" + name not in contents,
                     "unexpected docs harness member")
             data = source.extractfile(member).read()
+            pinned = docs_harness.FILES.get(name.removeprefix("scripts/performance/"))
+            require(pinned is not None and len(data) == pinned[0] and
+                    hashlib.sha256(data).hexdigest() == pinned[1],
+                    "docs harness identity mismatch")
             contents["docs/" + name] = data
             docs_files[name.removeprefix("scripts/performance/")] = hashlib.sha256(data).hexdigest()
-    require({"sql_resources.py", "subject_identity.py", "server-sql-isolated-v0816.py"}.issubset(docs_files),
-            "missing pinned v0816 SQL harness or observer")
+    require(set(docs_files) == set(docs_harness.FILES),
+            "missing or extra pinned v0816 SQL harness source")
     required_product = {"parity_v0811_measure.py", "parity_v0811_gate.py", "fixtures/sql-v0.8.11-curated.json"}
     require(set(product_files) == required_product, "product dependency closure mismatch")
     product_hashes = {}

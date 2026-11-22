@@ -11,7 +11,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from scripts.ops.final_sql_runtime import matrix, worker
+from scripts.ops.final_sql_runtime import docs_harness, matrix, worker
 
 
 class MatrixTests(unittest.TestCase):
@@ -47,9 +47,11 @@ class MatrixTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             docs = root / "docs.tar"
+            docs_records = {}
             with tarfile.open(docs, "w") as archive:
                 for name in ("sql_resources.py", "subject_identity.py", "server-sql-isolated-v0816.py"):
                     data = b"pinned harness\n"
+                    docs_records[name] = (len(data), hashlib.sha256(data).hexdigest())
                     item = tarfile.TarInfo("scripts/performance/" + name)
                     item.size = len(data)
                     archive.addfile(item, io.BytesIO(data))
@@ -61,18 +63,29 @@ class MatrixTests(unittest.TestCase):
                 data = b"fixture\n"
                 path.write_bytes(data)
                 records[name] = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-            result = matrix.compose_harness(docs, product, records, root / "bundle.tar")
+            with patch.object(docs_harness, "FILES", docs_records):
+                result = matrix.compose_harness(docs, product, records, root / "bundle.tar")
             self.assertEqual(len(result["docs_files"]), 3)
             self.assertEqual(stat.S_IMODE((root / "bundle.tar").stat().st_mode), 0o600)
             (product / "parity_v0811_measure.py").write_text("changed")
-            with self.assertRaises(ValueError):
+            with patch.object(docs_harness, "FILES", docs_records), self.assertRaises(ValueError):
                 matrix.compose_harness(docs, product, records, root / "bad.tar")
+            (product / "parity_v0811_measure.py").write_bytes(b"fixture\n")
+            with tarfile.open(docs, "w") as archive:
+                for name in docs_records:
+                    data = b"changed harness\n" if name == "sql_resources.py" else b"pinned harness\n"
+                    item = tarfile.TarInfo("scripts/performance/" + name)
+                    item.size = len(data)
+                    archive.addfile(item, io.BytesIO(data))
+            with patch.object(docs_harness, "FILES", docs_records), self.assertRaisesRegex(
+                    ValueError, "docs harness identity mismatch"):
+                matrix.compose_harness(docs, product, records, root / "changed.tar")
             with tarfile.open(docs, "w") as archive:
                 data = b"only observer"
                 item = tarfile.TarInfo("scripts/performance/sql_resources.py")
                 item.size = len(data)
                 archive.addfile(item, io.BytesIO(data))
-            with self.assertRaises(ValueError):
+            with patch.object(docs_harness, "FILES", docs_records), self.assertRaises(ValueError):
                 matrix.compose_harness(docs, product, records, root / "missing.tar")
 
     def test_prepare_cell_requires_independent_subject_pin_before_copy(self):
