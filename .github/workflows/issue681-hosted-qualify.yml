@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   qualify:
-    if: ${{ github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'prep/v0817-681-public-harness' }}
+    if: ${{ github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'prep/v0817-681-hosted-build' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -164,3 +164,5 @@ jobs:
                     '"error_code":"EXECUTION"}')
               sys.exit(1)
           PY
+      - name: Check exact installed Rust without network
+        run: python3 -B scripts/performance/issue681_hosted_rust_preflight.py
