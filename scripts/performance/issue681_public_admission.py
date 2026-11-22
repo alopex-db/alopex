@@ -98,17 +98,43 @@ def parse_cpuset(raw):
     return result
 
 
-def cgroup_allocation(root, relative, selected):
-    """Check the effective set and all visible v2 CPU quota ancestors."""
+def resolve_cgroup(root, relative, pid):
+    """Bind a visible cgroup directory to this process, even under a remount."""
     parts = [] if relative == "/" else relative.split("/")[1:]
     require(isinstance(root, Path) and root.is_absolute() and root.is_dir() and
             not root.is_symlink() and (root / "cgroup.controllers").is_file() and
             type(relative) is str and relative.startswith("/") and
             all(part not in (".", "..", "") for part in parts) and
-            bool(selected))
-    current = root.joinpath(*parts)
-    require(current.is_dir() and not current.is_symlink())
-    effective = parse_cpuset((current / "cpuset.cpus.effective").read_text())
+            type(pid) is int and pid > 0)
+    members = []
+    for index in range(len(parts) + 1):
+        candidate = root.joinpath(*parts[index:])
+        if not candidate.is_dir() or candidate.is_symlink():
+            continue
+        entry = candidate / "cgroup.procs"
+        if not entry.is_file() or entry.is_symlink():
+            continue
+        with entry.open("rb") as stream:
+            raw = stream.read(1_000_001)
+        require(len(raw) <= 1_000_000)
+        values = raw.splitlines()
+        require(all(value.isdigit() for value in values))
+        if str(pid).encode() in values:
+            members.append(candidate)
+    require(len(members) == 1)
+    return members[0]
+
+
+def cgroup_allocation(root, relative, selected, *, pid=None):
+    """Check inherited cpuset, visible quota ancestors and current throttle."""
+    require(bool(selected))
+    current = resolve_cgroup(root, relative, os.getpid() if pid is None else pid)
+    directory = current
+    while not (directory / "cpuset.cpus.effective").is_file():
+        require(directory != root)
+        directory = directory.parent
+        require(directory == root or root in directory.parents)
+    effective = parse_cpuset((directory / "cpuset.cpus.effective").read_text())
     require(set(selected).issubset(effective))
     directory = current
     while True:
@@ -128,14 +154,19 @@ def cgroup_allocation(root, relative, selected):
                 parts[1].isdecimal())
         counters[parts[0]] = int(parts[1])
     require("nr_throttled" in counters)
-    return counters["nr_throttled"]
+    mapped = current.relative_to(root)
+    return "/" + ("/".join(mapped.parts) if mapped.parts else ""), counters["nr_throttled"]
 
 
 def current_allocation(selected):
     lines = Path("/proc/self/cgroup").read_text().splitlines()
     require(len(lines) == 1 and lines[0].startswith("0::"))
     relative = lines[0][3:]
-    return relative, cgroup_allocation(Path("/sys/fs/cgroup"), relative, selected)
+    mounts = [line for line in Path("/proc/self/mountinfo").read_text().splitlines()
+              if " - cgroup2 " in line and
+              len(line.split()) > 5 and line.split()[4] == "/sys/fs/cgroup"]
+    require(len(mounts) == 1)
+    return cgroup_allocation(Path("/sys/fs/cgroup"), relative, selected)
 
 
 def _unique(pairs):

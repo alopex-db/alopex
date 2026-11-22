@@ -23,20 +23,42 @@ class AdmissionTests(unittest.TestCase):
             root = Path(tmp)
             (root / "cgroup.controllers").write_text("cpu cpuset\n")
             (root / "cpu.max").write_text("max 100000\n")
+            (root / "cpuset.cpus.effective").write_text("2-5\n")
+            (root / "cgroup.procs").write_text("")
             child = root / "selected"
             child.mkdir()
             (child / "cpuset.cpus.effective").write_text("2-5\n")
+            (child / "cgroup.procs").write_text("123\n")
             (child / "cpu.max").write_text("400000 100000\n")
             (child / "cpu.stat").write_text("usage_usec 100\nnr_throttled 0\n")
             self.assertEqual(admission.cgroup_allocation(
-                root, "/selected", (2, 3, 4, 5)), 0)
+                root, "/selected", (2, 3, 4, 5), pid=123), ("/selected", 0))
+            (child / "cpuset.cpus.effective").unlink()
+            self.assertEqual(admission.cgroup_allocation(
+                root, "/hidden/selected", (2, 3, 4, 5), pid=123),
+                ("/selected", 0))
+            (root / "cpuset.cpus.effective").write_text("2-4\n")
+            with self.assertRaisesRegex(ValueError, "^PUBLIC_ADMIT$"):
+                admission.cgroup_allocation(root, "/hidden/selected",
+                                            (2, 3, 4, 5), pid=123)
+            (root / "cpuset.cpus.effective").write_text("2-5\n")
             (child / "cpu.max").write_text("300000 100000\n")
             with self.assertRaisesRegex(ValueError, "^PUBLIC_ADMIT$"):
-                admission.cgroup_allocation(root, "/selected", (2, 3, 4, 5))
+                admission.cgroup_allocation(root, "/selected", (2, 3, 4, 5),
+                                            pid=123)
             (child / "cpu.max").write_text("max 100000\n")
             (root / "cpu.max").write_text("200000 100000\n")
             with self.assertRaisesRegex(ValueError, "^PUBLIC_ADMIT$"):
-                admission.cgroup_allocation(root, "/selected", (2, 3, 4, 5))
+                admission.cgroup_allocation(root, "/selected", (2, 3, 4, 5),
+                                            pid=123)
+            (root / "cpu.max").write_text("max 100000\n")
+            with self.assertRaisesRegex(ValueError, "^PUBLIC_ADMIT$"):
+                admission.cgroup_allocation(root, "/hidden/selected",
+                                            (2, 3, 4, 5), pid=999)
+            (root / "cgroup.procs").write_text("123\n")
+            with self.assertRaisesRegex(ValueError, "^PUBLIC_ADMIT$"):
+                admission.cgroup_allocation(root, "/hidden/selected",
+                                            (2, 3, 4, 5), pid=123)
 
     def test_case_completion_rejects_throttling(self):
         with tempfile.TemporaryDirectory() as tmp:
