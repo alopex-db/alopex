@@ -31,6 +31,7 @@ MAX_FILES_PER_PAIR = 64
 MAX_RECEIPT_FILES = 16
 MAX_PRIVATE_FILES = 12 * MAX_FILES_PER_PAIR + MAX_RECEIPT_FILES
 MAX_PRIVATE_BYTES = 200_000_000
+MAX_PUBLIC_BYTES = 250_000
 
 
 def require(value, code):
@@ -131,6 +132,8 @@ def run_job(environment):
         require(CERT.is_file() and _digest(CERT.read_bytes()) == CERT_SHA256,
                 "EVIDENCE_BOUND")
         _capacity_before_seal(root, intake.MAX_CMS + 10_000_000)
+        evidence_assembly.assemble_public_timing(
+            runs, root / MATRIX_DIR / "public-timing")
         evidence_assembly.seal_runs(
             runs, lock=reviewed_lock, manifest=reviewed_manifest,
             proof=proof, receipt=receipt, job_id=job_id,
@@ -187,11 +190,17 @@ def _matrix_outcome(private, environment):
                     type(receipt.get("qualification_binding_sha256")) is str and
                     HEX64.fullmatch(receipt["qualification_binding_sha256"]),
                     "RECEIPT_IDENTITY")
-            controller.verify_public_receipt(
+            accepted = controller.verify_public_receipt(
                 private, job_id=environment["GITHUB_RUN_ID"],
                 run_attempt=environment["GITHUB_RUN_ATTEMPT"],
                 binding_sha256=receipt["qualification_binding_sha256"])
-            return {"matrix_status": "passed", "matrix_error_code": None}
+            require(type(accepted.get("source_commit")) is str and
+                    re.fullmatch(r"[0-9a-f]{40}", accepted["source_commit"]) and
+                    type(accepted.get("assets_digest")) is str and
+                    HEX64.fullmatch(accepted["assets_digest"]), "RECEIPT_IDENTITY")
+            return {"matrix_status": "passed", "matrix_error_code": None,
+                    "source_commit": accepted["source_commit"],
+                    "assets_digest": accepted["assets_digest"]}
         allowed = {"MISSING_PIN", "PRIVATE_MANIFEST", "SAME_JOB", "QUALIFICATION",
                    "QUALIFICATION_BINDING", "POLICY", "CLEANUP", "IDENTITY",
                    "OPERATOR_IDENTITY", "OUTPUT_STATE", "PAIR_STAGE", "PAIR_FAILED"}
@@ -232,21 +241,26 @@ def seal_job(environment):
             not ciphertext.exists(), "EVIDENCE_STATE")
     matrix = _matrix_outcome(private, environment)
     if matrix["matrix_status"] == "passed":
-        from four_case_diagnostic import intake, supervisor
+        from four_case_diagnostic import intake, public_timing, supervisor
         strict = private / "strict-evidence.cms"
         encrypted = supervisor._private_file(strict, intake.MAX_CMS)
         require(encrypted, "EVIDENCE_BOUND")
+        timings = public_timing.load_timing_inventory(private / "public-timing")
+        measurement = {"schema": "alopex.sql-four-case-measurement/v1",
+                       "timings": timings,
+                       "paired": public_timing.summarize_timing_records(timings)}
         _capacity_before_seal(root, len(encrypted) + 10_000_000)
         try:
             _write_private(pending, encrypted)
             pending.replace(ciphertext)
         finally:
             pending.unlink(missing_ok=True)
-        public = {"schema": "alopex.sql-four-case-export/v1", "status": "sealed",
+        public = {"schema": "alopex.sql-four-case-export/v2", "status": "sealed",
                   "evidence_schema": intake.SCHEMA,
                   "performance_qualification": False,
                   "ciphertext_sha256": _digest(encrypted),
-                  "ciphertext_size": len(encrypted), **matrix}
+                  "ciphertext_size": len(encrypted),
+                  "measurement": measurement, **matrix}
         _write_private(export / "public.json",
                        (json.dumps(public, sort_keys=True) + "\n").encode())
         return public
@@ -272,22 +286,78 @@ def seal_job(environment):
     finally:
         archive.unlink(missing_ok=True)
         pending.unlink(missing_ok=True)
-    public = {"schema": "alopex.sql-four-case-export/v1", "status": "sealed",
+    public = {"schema": "alopex.sql-four-case-export/v2", "status": "sealed",
               "performance_qualification": False,
-              "ciphertext_sha256": _digest(ciphertext.read_bytes())}
+              "ciphertext_sha256": _digest(ciphertext.read_bytes()),
+              "measurement": None}
     public.update(matrix)
     _write_private(export / "public.json",
                    (json.dumps(public, sort_keys=True) + "\n").encode())
     return public
 
 
+def verify_public_export(environment):
+    """Rebuild the public allowlist before any workflow artifact upload."""
+    from four_case_diagnostic import intake, public_timing, supervisor
+
+    root = _runner_temp(environment)
+    private = root / MATRIX_DIR
+    export = REPO / "native-sql-four-case-export"
+    require(export.is_dir() and not export.is_symlink() and
+            export.stat().st_uid == os.geteuid() and
+            stat.S_IMODE(export.stat().st_mode) == 0o700 and
+            {path.name for path in export.iterdir()} == {
+                "public.json", "private-evidence.cms"}, "PUBLIC_OUTPUT")
+    path = export / "public.json"
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+                info.st_uid == os.geteuid() and
+                stat.S_IMODE(info.st_mode) == 0o600 and
+                0 < info.st_size <= MAX_PUBLIC_BYTES, "PUBLIC_OUTPUT")
+        body = stream.read(MAX_PUBLIC_BYTES + 1)
+        require(len(body) == info.st_size, "PUBLIC_OUTPUT")
+    try:
+        public = json.loads(body,
+                            object_pairs_hook=entrypoint.acquire.acquisition._unique_pairs)
+    except (ValueError, UnicodeError) as error:
+        raise ValueError("PUBLIC_OUTPUT") from error
+    require(type(public) is dict and
+            body == (json.dumps(public, sort_keys=True, allow_nan=False) + "\n").encode(),
+            "PUBLIC_OUTPUT")
+    matrix = _matrix_outcome(private, environment)
+    ciphertext = supervisor._private_file(export / "private-evidence.cms", 205_000_000)
+    if matrix["matrix_status"] == "passed":
+        strict = supervisor._private_file(private / "strict-evidence.cms", intake.MAX_CMS)
+        require(ciphertext == strict, "PUBLIC_OUTPUT")
+        records = public_timing.load_timing_inventory(private / "public-timing")
+        expected = {"schema": "alopex.sql-four-case-export/v2", "status": "sealed",
+                    "evidence_schema": intake.SCHEMA,
+                    "performance_qualification": False,
+                    "ciphertext_sha256": _digest(ciphertext),
+                    "ciphertext_size": len(ciphertext),
+                    "measurement": {
+                        "schema": "alopex.sql-four-case-measurement/v1",
+                        "timings": records,
+                        "paired": public_timing.summarize_timing_records(records)},
+                    **matrix}
+    else:
+        expected = {"schema": "alopex.sql-four-case-export/v2", "status": "sealed",
+                    "performance_qualification": False,
+                    "ciphertext_sha256": _digest(ciphertext),
+                    "measurement": None, **matrix}
+    require(public == expected, "PUBLIC_OUTPUT")
+    return True
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("install", "run", "seal"))
+    parser.add_argument("phase", choices=("install", "run", "seal", "verify-public"))
     args = parser.parse_args(argv)
     try:
-        result = {"install": install_inputs, "run": run_job,
-                  "seal": seal_job}[args.phase](dict(os.environ))
+        {"install": install_inputs, "run": run_job,
+         "seal": seal_job, "verify-public": verify_public_export}[args.phase](dict(os.environ))
         print(json.dumps({"status": "passed" if args.phase != "seal" else "sealed",
                           "performance_qualification": False}, sort_keys=True))
         return 0

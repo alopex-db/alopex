@@ -16,6 +16,19 @@ from four_case_diagnostic.test_qualification import fixture, JOB
 
 
 class FourCaseJobTests(unittest.TestCase):
+    @staticmethod
+    def timing_fixture(private):
+        from four_case_diagnostic import adapter, public_timing
+        root = private / "public-timing"
+        root.mkdir(mode=0o700)
+        for case in adapter.CASES:
+            for trial in range(3):
+                for mode in ("on", "off"):
+                    with public_timing.TimingCellWriter(root, case, trial, mode) as writer:
+                        for sample in range(21):
+                            ordinal = 2 * sample + adapter.pair_order(trial, sample).index(mode)
+                            writer.append(sample, ordinal, .011 if mode == "on" else .010)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -32,7 +45,7 @@ class FourCaseJobTests(unittest.TestCase):
                     "package_files": {f"four_case_diagnostic/{name}.py": "b" * 64
                                       for name in ("__init__", "adapter",
                                                    "container_pair_entrypoint", "log_parser",
-                                                   "operation", "oracle", "runner",
+                                                   "operation", "oracle", "public_timing", "runner",
                                                    "supervisor", "worker")},
                     "docs_files": {"subject_identity.py": "c" * 64,
                                    "sql_resources.py": "d" * 64},
@@ -76,6 +89,8 @@ class FourCaseJobTests(unittest.TestCase):
         self.assertIn("scripts/ops/four_case_job.py install", qualification)
         self.assertIn("scripts/ops/four_case_job.py run", qualification)
         self.assertIn("scripts/ops/four_case_job.py seal", qualification)
+        self.assertIn("scripts/ops/four_case_job.py verify-public", qualification)
+        self.assertIn("steps.matrix_public.outcome == 'success'", qualification)
         self.assertNotIn("scripts/ops/same_job_four_case.py", qualification)
         self.assertIn("native-sql-four-case-export/private-evidence.cms",
                       qualification)
@@ -139,6 +154,7 @@ class FourCaseJobTests(unittest.TestCase):
         strict = private / "strict-evidence.cms"
         strict.write_bytes(b"strict cms bytes")
         strict.chmod(0o600)
+        self.timing_fixture(private)
         cert = self.root / "cert.pem"
         cert.write_bytes(b"test certificate")
         with patch.object(job, "REPO", self.root), \
@@ -154,8 +170,21 @@ class FourCaseJobTests(unittest.TestCase):
         self.assertEqual(public["ciphertext_size"], len(strict.read_bytes()))
         self.assertEqual(public["ciphertext_sha256"], hashlib.sha256(strict.read_bytes()).hexdigest())
         self.assertEqual(public["matrix_status"], "passed")
+        self.assertEqual(len(public["measurement"]["timings"]), 504)
+        self.assertEqual(set(public["measurement"]["paired"]),
+                         set(job.controller.adapter.CASES))
         self.assertEqual((self.root / "native-sql-four-case-export/private-evidence.cms").read_bytes(),
                          strict.read_bytes())
+        with patch.object(job, "REPO", self.root), \
+             patch.object(job, "_matrix_outcome", return_value={
+                 "matrix_status": "passed", "matrix_error_code": None}):
+            self.assertTrue(job.verify_public_export(self.env))
+            public_path = self.root / "native-sql-four-case-export/public.json"
+            altered = json.loads(public_path.read_text())
+            altered["local_path"] = "/private/sensitive"
+            public_path.write_text(json.dumps(altered, sort_keys=True) + "\n")
+            with self.assertRaisesRegex(ValueError, "PUBLIC_OUTPUT"):
+                job.verify_public_export(self.env)
         self.assertEqual(capacity.call_count, 1)
         archive.assert_not_called()
         encrypt.assert_not_called()
@@ -207,6 +236,8 @@ class FourCaseJobTests(unittest.TestCase):
         with patch.object(job, "CERT", cert), \
              patch.object(job, "CERT_SHA256", hashlib.sha256(cert.read_bytes()).hexdigest()), \
              patch.object(job, "_capacity_before_seal", return_value={}), \
+             patch.object(evidence_assembly, "assemble_public_timing",
+                          side_effect=lambda *a, **kw: order.append("public")), \
              patch.object(evidence_assembly, "seal_runs",
                           side_effect=lambda *a, **kw: order.append("assemble")) as assembled, \
              patch.object(job.entrypoint, "attest_current_job", side_effect=attest) as attested, \
@@ -223,7 +254,7 @@ class FourCaseJobTests(unittest.TestCase):
         self.assertEqual(assembled.call_count, 1)
         self.assertEqual(len(assembled.call_args.args[0]), 12)
         self.assertEqual(order, ["attest", "docs", *("pair" for _ in range(12)),
-                                 "assemble"])
+                                 "public", "assemble"])
 
     def test_failed_attestation_never_stages_docs(self):
         from four_case_diagnostic import docs_stage
@@ -253,9 +284,11 @@ class FourCaseJobTests(unittest.TestCase):
         save({"schema": job.controller.SCHEMA, "status": "passed",
               "performance_qualification": False, "job_id": JOB,
               "run_attempt": "2", "qualification_binding_sha256": "a" * 64})
-        with patch.object(job.controller, "verify_public_receipt") as verified:
+        with patch.object(job.controller, "verify_public_receipt", return_value={
+                "source_commit": "a" * 40, "assets_digest": "b" * 64}) as verified:
             self.assertEqual(job._matrix_outcome(private, self.env), {
-                "matrix_status": "passed", "matrix_error_code": None})
+                "matrix_status": "passed", "matrix_error_code": None,
+                "source_commit": "a" * 40, "assets_digest": "b" * 64})
         self.assertEqual(verified.call_count, 1)
         self.env["GITHUB_RUN_ATTEMPT"] = "3"
         self.assertEqual(job._matrix_outcome(private, self.env), {

@@ -629,14 +629,19 @@ jobs:
           ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
         run: python3 -B scripts/ops/four_case_job.py run
       - name: Seal private four-case evidence
+        id: matrix_seal
         if: always() && inputs.sql_four_case_mode && steps.matrix.outcome != 'skipped'
         env:
           ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
           ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
         run: python3 -B scripts/ops/four_case_job.py seal
-      - name: Preserve encrypted four-case evidence
-        if: always() && inputs.sql_four_case_mode && steps.matrix.outcome != 'skipped'
-        uses: actions/upload-artifact@v4
+      - name: Verify four-case public measurement
+        id: matrix_public
+        if: always() && inputs.sql_four_case_mode && steps.matrix_seal.outcome == 'success'
+        run: python3 -B scripts/ops/four_case_job.py verify-public
+      - name: Publish verified four-case measurement and audit evidence
+        if: always() && inputs.sql_four_case_mode && steps.matrix_public.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-sql-four-case-matrix
           path: |

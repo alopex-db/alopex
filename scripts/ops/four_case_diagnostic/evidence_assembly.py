@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import stat
 
-from . import adapter, audit, intake, producer, qualification, supervisor
+from . import adapter, audit, intake, producer, public_timing, qualification, supervisor
 
 
 def require(value, code="EVIDENCE_INCOMPLETE"):
@@ -144,3 +146,44 @@ def seal_runs(runs, *, lock, manifest, proof, receipt, job_id,
         files, binding=binding, expected_fixtures=fixtures,
         recipient_certificate=recipient_certificate, output_path=output_path)
     return {**result, "binding": binding}
+
+
+def assemble_public_timing(runs, destination):
+    """Join only fixed public timing cells from the verified pair collections."""
+    expected = {(case, trial) for case in adapter.CASES for trial in range(3)}
+    require(type(runs) is dict and set(runs) == expected, "TIMING_INVENTORY")
+    destination = Path(destination)
+    parent = destination.parent
+    require(destination.is_absolute() and not destination.exists() and
+            not destination.is_symlink() and parent.is_dir() and
+            not parent.is_symlink() and parent.stat().st_uid == os.geteuid() and
+            stat.S_IMODE(parent.stat().st_mode) == 0o700, "TIMING_PARENT")
+    destination.mkdir(mode=0o700)
+    require(destination.stat().st_uid == os.geteuid() and
+            stat.S_IMODE(destination.stat().st_mode) == 0o700, "TIMING_PARENT")
+    for case in adapter.CASES:
+        for trial in range(3):
+            root = Path(runs[(case, trial)].root)
+            require(root.is_absolute() and not root.is_symlink(), "TIMING_INVENTORY")
+            collected = root / "collected" / "public-timing"
+            require(collected.is_dir() and not collected.is_symlink(), "TIMING_INVENTORY")
+            for mode in ("on", "off"):
+                name = public_timing.cell_filename(case, trial, mode)
+                source = collected / name
+                descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(descriptor, "rb") as stream:
+                    info = os.fstat(stream.fileno())
+                    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+                            info.st_uid == os.geteuid() and
+                            0 < info.st_size <= 8_192, "TIMING_INVENTORY")
+                    body = stream.read(8_193)
+                    require(len(body) == info.st_size, "TIMING_INVENTORY")
+                output = destination / name
+                output_fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                    os.O_NOFOLLOW, 0o600)
+                with os.fdopen(output_fd, "wb") as stream:
+                    stream.write(body)
+    records = public_timing.load_timing_inventory(destination)
+    return {"schema": "alopex.sql-four-case-measurement/v1",
+            "timings": records,
+            "paired": public_timing.summarize_timing_records(records)}

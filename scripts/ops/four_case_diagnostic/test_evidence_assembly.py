@@ -7,7 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from . import adapter, evidence_assembly, intake, test_contract, test_producer
+from . import adapter, evidence_assembly, intake, public_timing, test_contract, test_producer
 from .test_qualification import fixture, JOB
 
 
@@ -15,7 +15,7 @@ class EvidenceAssemblyTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.files = test_producer.evidence_files()
         self.cells = [json.loads(line) for line in self.files["cells.ndjson"].splitlines()]
         self.clients = [json.loads(line) for line in self.files["client.ndjson"].splitlines()]
@@ -94,6 +94,27 @@ class EvidenceAssemblyTests(unittest.TestCase):
         self.runs.pop(("aggregate", 0))
         with self.assertRaisesRegex(ValueError, "PAIR_INVENTORY"):
             self.assemble()
+
+    def test_public_timing_assembles_all_504_verified_samples(self):
+        for case in adapter.CASES:
+            for trial in range(3):
+                collected = self.runs[(case, trial)].root / "collected"
+                timing_root = collected / "public-timing"
+                timing_root.mkdir(mode=0o700)
+                for mode in ("on", "off"):
+                    raw = collected / mode / "raw.ndjson"
+                    rows = [json.loads(line) for line in raw.read_bytes().splitlines()]
+                    with public_timing.TimingCellWriter(timing_root, case, trial, mode) as writer:
+                        for row in rows:
+                            writer.append(row["sample"], row["pair_ordinal"], row["seconds"])
+        destination = self.root / "public-timing"
+        result = evidence_assembly.assemble_public_timing(self.runs, destination)
+        self.assertEqual(len(result["timings"]), 504)
+        self.assertEqual(set(result["paired"]), set(adapter.CASES))
+        self.assertEqual(public_timing.load_timing_inventory(destination), result["timings"])
+        (destination / "aggregate-trial-0-on.jsonl").unlink()
+        with self.assertRaisesRegex(ValueError, "timing_file_inventory"):
+            public_timing.load_timing_inventory(destination)
 
     def test_binding_is_derived_from_reviewed_lock_and_same_job_proof(self):
         lock, proof, receipt = fixture()

@@ -63,7 +63,7 @@ def load_manifest(path, expected_digest):
             set(manifest["package_files"]) == {
                 f"four_case_diagnostic/{name}.py" for name in
                 ("__init__", "adapter", "container_pair_entrypoint",
-                 "log_parser", "operation", "oracle", "runner", "supervisor",
+                 "log_parser", "operation", "oracle", "public_timing", "runner", "supervisor",
                  "worker")} and
             all(type(value) is str and qualification.HEX64.fullmatch(value)
                 for value in manifest["package_files"].values()) and
