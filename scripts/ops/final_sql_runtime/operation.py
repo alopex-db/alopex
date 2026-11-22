@@ -50,7 +50,9 @@ def run(*, qualification, subjects, product_manifests, destination_for,
     ``cleanup`` is called even after failed execution or collection. All
     callbacks operate on caller-owned resources and must enforce their timeout.
     """
-    evidence = {"preflights": [], "cells": [], "performance_acceptance": False}
+    evidence = {"preflights": [], "cells": [], "public_operations": [],
+                "verified_runs": 0,
+                "performance_acceptance": False}
     phase = "admission"
     try:
         _require(type(qualification) is dict and
@@ -115,6 +117,14 @@ def run(*, qualification, subjects, product_manifests, destination_for,
                 else:
                     worker.verify_cell(observed["cell_result"], observed["raw"],
                                        config, observed["resource_digest"])
+                    public = observed["public"]
+                    _require(type(public) is list and len(public) == 21 and
+                             all(item == worker.public_record(config, sample,
+                                 observed["raw"][sample]["seconds"],
+                                 observed["raw"][sample]["resources"])
+                                 for sample, item in enumerate(public)),
+                             "public/private observation mismatch")
+                    evidence["public_operations"].extend(public)
                     evidence["cells"].append(dict(row, status="passed",
                         result_checksum=worker.result_digest(row["case"]),
                         trial_median_seconds=observed["cell_result"]["latency_p50_ms"] / 1000))
@@ -134,13 +144,17 @@ def run(*, qualification, subjects, product_manifests, destination_for,
             _require(type(after) in (int, float) and math.isfinite(after) and
                      after >= now and after - now <= run_bound and
                      after - start <= MATRIX_SECONDS, "run or matrix deadline exceeded")
+            evidence["verified_runs"] += 1
         phase = "summary"
         _require(len(evidence["preflights"]) == 4 and
                  {item["subject"] for item in evidence["preflights"]} == set(matrix.SUBJECTS),
                  "incomplete or duplicate preflights")
+        _require(evidence["verified_runs"] == 52, "incomplete verified run schedule")
         _require(len(evidence["cells"]) == 48 and
                  [_identity(item) for item in evidence["cells"]] ==
                  [_identity(item) for item in rows], "incomplete or reordered matrix")
+        _require(len(evidence["public_operations"]) == 1008,
+                 "incomplete public observations")
         summary = matrix.summarize(evidence["cells"])
         _require(summary.get("performance_acceptance") is False,
                  "unexpected performance acceptance")

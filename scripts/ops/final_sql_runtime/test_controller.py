@@ -78,10 +78,14 @@ class ControllerTests(unittest.TestCase):
                              side_effect=lambda *args, **kwargs: self.events.append("audit") or
                                  {"performance_acceptance": False}))
 
+    def set_public_stub(self):
+        return patch.object(controller.public_export, "completed",
+                            return_value={"schema": "alopex.public-sql-comparison/v1"})
+
     def test_orders_live_attestation_storage_execution_and_independent_audit(self):
         patches = self.patches()
         with patches[0] as attest, patches[1] as compose, patches[2], \
-             patches[3] as operate, patches[4] as audit:
+             patches[3] as operate, patches[4] as audit, self.set_public_stub():
             result = controller.run(**self.args)
         self.assertEqual([event if isinstance(event, str) else event[0]
                           for event in self.events],
@@ -97,8 +101,10 @@ class ControllerTests(unittest.TestCase):
         patches = self.patches()
         with patch.object(controller.same_job, "attest_live", side_effect=ValueError("SAME_JOB")), \
              patches[1] as compose, patches[3] as operate:
-            with self.assertRaisesRegex(ValueError, "SAME_JOB"):
+            with self.assertRaisesRegex(controller.ControllerFailure, "PUBLIC_INCOMPLETE") as caught:
                 controller.run(**self.args)
+        self.assertEqual(caught.exception.public_status["completed_runs"], 0)
+        self.assertEqual(str(caught.exception.cause), "SAME_JOB")
         compose.assert_not_called()
         operate.assert_not_called()
 
@@ -120,15 +126,53 @@ class ControllerTests(unittest.TestCase):
     def test_storage_denial_and_missing_receipts_fail_closed(self):
         patches = self.patches()
         with patches[0], patches[1] as compose, patches[3] as operate:
-            with self.assertRaisesRegex(ValueError, "STORAGE_ADMISSION"):
+            with self.assertRaisesRegex(controller.ControllerFailure, "PUBLIC_INCOMPLETE"):
                 controller.run(**dict(self.args, admit_storage=lambda _: False))
         compose.assert_not_called()
         operate.assert_not_called()
         patches = self.patches()
-        with patches[0], patches[1], patches[2], patches[3], patches[4] as audit:
-            with self.assertRaisesRegex(ValueError, "MISSING_AUDIT_EVIDENCE"):
+        with patches[0], patches[1], patches[2], patches[3], patches[4] as audit, self.set_public_stub():
+            with self.assertRaisesRegex(controller.ControllerFailure, "PRIVATE_AUDIT_FAILED") as caught:
                 controller.run(**dict(self.args, independent_evidence=lambda _: None))
+        self.assertEqual(caught.exception.public_status["completed_runs"], 52)
         audit.assert_not_called()
+
+    def test_arbitrary_exception_text_stays_out_of_failure_status(self):
+        patches = self.patches()
+        with patch.object(controller.same_job, "attest_live",
+                          side_effect=ValueError("/private/host secret exception")), \
+             self.assertRaises(controller.ControllerFailure) as caught:
+            controller.run(**self.args)
+        self.assertNotIn("private", str(caught.exception.public_status))
+        self.assertNotIn("secret", str(caught.exception.public_status))
+
+    def test_partial_matrix_failure_reports_only_bounded_completion(self):
+        private = controller.operation.OperationFailure(
+            "cell:/private/host", {"preflights": [{}] * 4, "cells": [{}] * 5,
+                                   "verified_runs": 9},
+            RuntimeError("private exception text"))
+        patches = self.patches()
+        with patches[0], patches[1], patches[2], \
+             patch.object(controller.operation, "run", side_effect=private), \
+             self.assertRaises(controller.ControllerFailure) as caught:
+            controller.run(**self.args)
+        self.assertEqual(caught.exception.public_status,
+                         {"schema": controller.public_export.SCHEMA, "status": "failed",
+                          "error_code": "PUBLIC_INCOMPLETE", "completed_runs": 9,
+                          "performance_acceptance": False})
+
+    def test_cleanup_failure_does_not_count_observed_unverified_run(self):
+        private = controller.operation.OperationFailure(
+            "preflight:select-all", {"preflights": [{"subject": "published"}],
+                                      "cells": [], "verified_runs": 0},
+            RuntimeError("private cleanup path"))
+        patches = self.patches()
+        with patches[0], patches[1], patches[2], \
+             patch.object(controller.operation, "run", side_effect=private), \
+             self.assertRaises(controller.ControllerFailure) as caught:
+            controller.run(**self.args)
+        self.assertEqual(caught.exception.public_status["completed_runs"], 0)
+        self.assertEqual(caught.exception.public_status["error_code"], "PUBLIC_INCOMPLETE")
 
     def test_preflight_and_cell_cannot_reuse_staging_destination(self):
         row = next(item for item in matrix.plan() if item["case"] == "select-all")
@@ -141,7 +185,7 @@ class ControllerTests(unittest.TestCase):
                     "evidence": {"performance_acceptance": False}}
         patches = self.patches()
         with patches[0], patches[1], patches[2], \
-             patch.object(controller.operation, "run", side_effect=inspect), patches[4]:
+             patch.object(controller.operation, "run", side_effect=inspect), patches[4], self.set_public_stub():
             controller.run(**self.args)
 
 

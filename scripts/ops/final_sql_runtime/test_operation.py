@@ -25,6 +25,13 @@ class OperationTests(unittest.TestCase):
             self.events.append(("collect", kind, row["id"]))
             if kind == "preflight":
                 return {"rows": 34250, "result": worker.expected("select-all")}
+            raw = [{"sample": index, "seconds": .001,
+                    "resources": {"schema": "alopex.sql-operation-resources/v1",
+                                  "status": "observed", "coverage": "stable_pid_namespace_allocation",
+                                  "manifest_sha256": "a" * 64,
+                                  "client": self.process(1),
+                                  "server_processes": [self.process(2)]}}
+                   for index in range(21)]
             return {"cell_result": {"case": row["case"], "engine": row["engine"],
                     "server_client": True, "warmups": 3, "samples": 21,
                     "fixture_rows": worker.ISOLATED[row["case"]],
@@ -34,14 +41,9 @@ class OperationTests(unittest.TestCase):
                             "select-all": "SELECT id, value FROM bench WHERE enabled = true",
                             "insert-rollback": "INSERT INTO perf_items VALUES (3, 'returning') RETURNING id"}[row["case"]],
                     "latency_p50_ms": 1.0},
-                    "raw": [{"sample": index, "seconds": .001,
-                             "resources": {"schema": "alopex.sql-operation-resources/v1",
-                                           "status": "observed",
-                                           "coverage": "stable_pid_namespace_allocation",
-                                           "manifest_sha256": "a" * 64,
-                                           "client": self.process(1),
-                                           "server_processes": [self.process(2)]}}
-                            for index in range(21)],
+                    "raw": raw,
+                    "public": [worker.public_record(row, index, item["seconds"],
+                              item["resources"]) for index, item in enumerate(raw)],
                     "resource_digest": "a" * 64}
 
         def cleanup(staged, kind, row):
@@ -76,6 +78,8 @@ class OperationTests(unittest.TestCase):
         self.assertEqual([item["subject"] for item in result["evidence"]["preflights"]],
                          list(matrix.SUBJECTS))
         self.assertEqual(len(result["evidence"]["cells"]), 48)
+        self.assertEqual(len(result["evidence"]["public_operations"]), 1008)
+        self.assertEqual(result["evidence"]["verified_runs"], 52)
         self.assertFalse(result["summary"]["performance_acceptance"])
         self.assertEqual(sum(event[0] == "cleanup" for event in self.events), 52)
         self.assertEqual(sum(event[0] == "execute" for event in self.events), 52)
@@ -115,6 +119,7 @@ class OperationTests(unittest.TestCase):
             with self.assertRaises(operation.OperationFailure) as caught:
                 operation.run(**self.args(collect=fail_on_last))
         self.assertEqual(len(caught.exception.evidence["cells"]), 47)
+        self.assertEqual(caught.exception.evidence["verified_runs"], 51)
         self.assertFalse(caught.exception.evidence["performance_acceptance"])
         summarize.assert_not_called()
 
@@ -125,6 +130,7 @@ class OperationTests(unittest.TestCase):
             with self.assertRaises(operation.OperationFailure) as caught:
                 operation.run(**self.args(cleanup=fail))
         self.assertEqual(len(caught.exception.evidence["preflights"]), 1)
+        self.assertEqual(caught.exception.evidence["verified_runs"], 0)
         self.assertEqual(sum(event[0] == "execute" for event in self.events), 1)
         summarize.assert_not_called()
 

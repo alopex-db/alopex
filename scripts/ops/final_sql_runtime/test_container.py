@@ -87,17 +87,36 @@ class CollectedTests(unittest.TestCase):
 
     def test_cell_returns_resource_bound_raw(self):
         self.config["phase"] = "cell"
+        self.config["subject"] = "candidate"
+        resource = {"schema": "alopex.sql-operation-resources/v1", "status": "observed",
+                    "coverage": worker.PUBLIC_COVERAGE,
+                    "client": {name: 0 for name in worker.COUNTERS},
+                    "server_processes": [{name: 0 for name in worker.COUNTERS}]}
+        self.raw = [{"sample": i, "seconds": .001, "resources": resource}
+                    for i in range(21)]
+        (self.cell / "raw.ndjson").write_text("".join(json.dumps(row) + "\n"
+                                                  for row in self.raw))
+        self.result["raw_sha256"] = digest(self.cell / "raw.ndjson")
+        write_json(self.cell / "measurement.json", self.result)
+        public = [worker.public_record(self.config, i, .001, resource)
+                  for i in range(21)]
+        (self.cell / "public.ndjson").write_text("".join(
+            json.dumps(row, separators=(",", ":")) + "\n" for row in public))
         report = json.loads((self.root / "result.json").read_text())
         report["phase"] = "cell"
         write_json(self.root / "result.json", report)
         status = json.loads((self.cell / "status.json").read_text())
         status["measurement"]["phase"] = "cell"
+        status["measurement"]["raw_sha256"] = self.result["raw_sha256"]
+        status["measurement"]["result_sha256"] = digest(self.cell / "measurement.json")
+        status["measurement"]["public_sha256"] = digest(self.cell / "public.ndjson")
         write_json(self.cell / "status.json", status)
         report["cell_status_sha256"] = digest(self.cell / "status.json")
         write_json(self.root / "result.json", report)
         value = self.verify("cell")
         self.assertEqual(value["resource_digest"], digest(self.cell / "resources.json"))
         self.assertEqual(value["raw"], self.raw)
+        self.assertEqual(value["public"], public)
 
     def test_report_and_exit_must_be_complete(self):
         self.config["phase"] = "cell"

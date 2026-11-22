@@ -118,7 +118,16 @@ def verify_collected(run, config, kind, assets_digest, *, common):
                        result["result_sha256"], "CASE")
         return exact
     common.require(kind == "cell", "INPUT")
-    return {"cell_result": result, "raw": raw, "resource_digest": resource_digest}
+    public_path = cell / "public.ndjson"
+    common.require(public_path.is_file() and
+                   common.digest(public_path) == status["measurement"].get("public_sha256"),
+                   "PUBLIC_IDENTITY")
+    public = worker.read_public(public_path, config)
+    common.require(all(public[index] == worker.public_record(config, index,
+                   row["seconds"], row["resources"]) for index, row in enumerate(raw)),
+                   "PUBLIC_PRIVATE_MISMATCH")
+    return {"cell_result": result, "raw": raw, "resource_digest": resource_digest,
+            "public": public}
 
 
 class ContainerCallbacks:

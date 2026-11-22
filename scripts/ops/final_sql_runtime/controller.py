@@ -11,7 +11,16 @@ import math
 from pathlib import Path
 import time
 
-from . import audit_bridge, container, matrix, operation, same_job
+from . import audit_bridge, container, matrix, operation, public_export, same_job
+
+
+class ControllerFailure(ValueError):
+    """Private cause retained locally; only public_status may be exported."""
+
+    def __init__(self, code, completed_runs, cause):
+        super().__init__(code)
+        self.public_status = public_export.failed(code, completed_runs)
+        self.cause = cause
 
 
 def _require(ok, code):
@@ -71,7 +80,7 @@ def _reviewed(subjects, manifests, audit_pins, operators, declared_seconds):
              operation.MATRIX_SECONDS, "PHASE_BOUNDS")
 
 
-def run(*, lock_path, expected, repo, runner_temp, environment,
+def _run_private(*, _completed_runs, lock_path, expected, repo, runner_temp, environment,
         subjects, product_manifests, audit_pins, docs_archive, product_root,
         product_files, harness_path, operators, destination_for, profile_for,
         admit_storage, capacity, independent_evidence, declared_seconds,
@@ -123,6 +132,7 @@ def run(*, lock_path, expected, repo, runner_temp, environment,
         prepare=matrix.prepare_cell, execute=callbacks.execute,
         collect=callbacks.collect, cleanup=callbacks.cleanup,
         capacity=capacity, clock=clock, declared_seconds=declared_seconds)
+    _completed_runs[0] = 52
     _require(result["summary"].get("performance_acceptance") is False and
              result["evidence"].get("performance_acceptance") is False,
              "OPERATION_ACCEPTANCE")
@@ -137,5 +147,25 @@ def run(*, lock_path, expected, repo, runner_temp, environment,
         preflight_collections=evidence["preflight_collections"],
         preflight_receipts=evidence["preflight_receipts"])
     _require(audited.get("performance_acceptance") is False, "AUDIT_ACCEPTANCE")
+    public = public_export.completed(result, audited, audit_pins)
     return {"qualification": qualification, "operation": result,
-            "audit": audited, "performance_acceptance": False}
+            "audit": audited, "public": public, "performance_acceptance": False}
+
+
+def run(**kwargs):
+    """Return a public success report or raise with fixed public failure status."""
+    completed_runs = [0]
+    try:
+        return _run_private(_completed_runs=completed_runs, **kwargs)
+    except Exception as error:
+        if isinstance(error, ControllerFailure):
+            raise
+        if isinstance(error, operation.OperationFailure):
+            evidence = error.evidence
+            verified = evidence.get("verified_runs") if type(evidence) is dict else None
+            completed_runs[0] = verified if type(verified) is int and 0 <= verified <= 52 else 0
+        code = (str(error) if type(error) is ValueError and
+                str(error) in public_export.ERROR_CODES else
+                "PRIVATE_AUDIT_FAILED" if completed_runs[0] == 52 else
+                "PUBLIC_INCOMPLETE")
+        raise ControllerFailure(code, completed_runs[0], error) from error

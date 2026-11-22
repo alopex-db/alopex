@@ -111,6 +111,9 @@ def audit_completed(operation_result, collections, receipts, pins, authenticate_
                 operated["result_checksum"], "PREFLIGHT_RESULT")
     require(operation_result["summary"] == runtime_matrix.summarize(operation_cells),
             "OPERATION_SUMMARY")
+    public_rows = operation_result["evidence"].get("public_operations")
+    require(type(public_rows) is list and len(public_rows) == 1008,
+            "PUBLIC_COVERAGE")
     cells = []
     resource_digests = {}
     seen_private = set()
@@ -155,6 +158,15 @@ def audit_completed(operation_result, collections, receipts, pins, authenticate_
                 type(latency) in (int, float) and
                 operated["trial_median_seconds"] == latency / 1000,
                 "OPERATION_COLLECTION_BINDING")
+        try:
+            private_rows = [json.loads(line) for line in data["raw"].splitlines()]
+        except (UnicodeError, ValueError) as error:
+            raise ValueError("PUBLIC_PRIVATE_MISMATCH") from error
+        offset = len(cells) * 21
+        require(len(private_rows) == 21 and all(
+            public_rows[offset + sample] == worker.public_record(operated, sample,
+                private_rows[sample]["seconds"], private_rows[sample]["resources"])
+            for sample in range(21)), "PUBLIC_PRIVATE_MISMATCH")
         cells.append({"case": key[0], "trial": key[1], "subject": key[2],
                       "engine": operated["engine"], "status": "passed",
                       "cleanup": "deleted", "source": pin["source"],
@@ -169,4 +181,6 @@ def audit_completed(operation_result, collections, receipts, pins, authenticate_
             result.get("verified_samples") == 1008 and
             result.get("performance_acceptance") is False,
             "AUDIT_CONTRACT")
+    result["public_sha256"] = hashlib.sha256(json.dumps(
+        public_rows, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     return result

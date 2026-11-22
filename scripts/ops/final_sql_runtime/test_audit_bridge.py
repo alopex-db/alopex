@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from scripts.ops import final_sql_matrix as independent
-from scripts.ops.final_sql_runtime import audit_bridge, matrix
+from scripts.ops.final_sql_runtime import audit_bridge, matrix, worker
 
 
 WORKER = b"reviewed worker bytes"
@@ -23,7 +23,7 @@ class AuditBridgeTests(unittest.TestCase):
             "worker_sha256": hashlib.sha256(WORKER).hexdigest(),
             "harness_sha256": hashlib.sha256(HARNESS).hexdigest(),
         } for subject in independent.SUBJECTS}
-        self.collections, self.receipts, operated = [], [], []
+        self.collections, self.receipts, operated, public = [], [], [], []
         for index, row in enumerate(matrix.plan()):
             case, subject, trial = row["case"], row["subject"], row["trial"]
             resources = json.dumps({"schema": "alopex.sql-resource-servers/v1",
@@ -36,6 +36,8 @@ class AuditBridgeTests(unittest.TestCase):
             raw = b"".join(json.dumps({"sample": n, "seconds": .001,
                                        "resources": resource}).encode() + b"\n"
                            for n in range(21))
+            public.extend(worker.public_record(row, n, .001, resource)
+                          for n in range(21))
             measurement = {"case": case, "trial": trial, "engine": row["engine"],
                            "server_client": True,
                            "subject_identity": {"source": self.pins[subject]["source"]},
@@ -71,7 +73,8 @@ class AuditBridgeTests(unittest.TestCase):
             {"subject": subject, "result_checksum":
              independent.digest(independent.expected("select-all"))}
             for subject in independent.SUBJECTS],
-            "cells": operated, "performance_acceptance": False},
+            "cells": operated, "public_operations": public,
+            "performance_acceptance": False},
             "summary": matrix.summarize(operated)}
         self.preflight_collections, self.preflight_receipts = [], []
         full_result = json.dumps({"rows": 34250,
@@ -134,6 +137,11 @@ class AuditBridgeTests(unittest.TestCase):
         path.write_bytes(data)
         self.receipts[0]["sha256"]["measurement"] = hashlib.sha256(data).hexdigest()
         with self.assertRaisesRegex(ValueError, "OPERATION_COLLECTION_BINDING"):
+            self.audit()
+
+    def test_public_row_must_equal_authenticated_private_observation(self):
+        self.operation["evidence"]["public_operations"][0]["elapsed_seconds"] = 9
+        with self.assertRaisesRegex(ValueError, "PUBLIC_PRIVATE_MISMATCH"):
             self.audit()
 
     def test_missing_duplicate_substituted_and_stale_preflights_fail(self):

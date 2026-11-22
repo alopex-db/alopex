@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import tempfile
 import types
 import unittest
 from unittest.mock import patch
@@ -36,6 +37,180 @@ def cell(case="aggregate", subject="candidate"):
 
 
 class WorkerTests(unittest.TestCase):
+    def test_public_capture_at_timed_call_and_private_equality(self):
+        _, _, config = cell()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "public.ndjson"
+            raw_path = Path(directory) / "raw.ndjson"
+            calls = []
+
+            class Connection:
+                def execute_sql(self, sql):
+                    calls.append(sql)
+                    if sql.startswith("SELECT"):
+                        return [{"count": 17125}]
+                    return []
+
+                def close(self):
+                    calls.append("close")
+
+            class ResourceObserver:
+                @staticmethod
+                def from_environment(*_):
+                    return types.SimpleNamespace(begin=lambda: None,
+                                                 end=lambda _: resource())
+            alopex = types.ModuleType("alopex")
+            alopex.RemoteDatabase = Connection
+            alopex.connect = lambda *_, **__: Connection()
+            parity = types.SimpleNamespace(
+                _populate_sql=lambda *args: calls.append("populate"),
+                SQL_AGGREGATE_QUERY="SELECT COUNT(*) AS count FROM bench WHERE enabled = true",
+                SQL_STREAM_QUERY="SELECT id, value FROM bench WHERE enabled = true")
+            isolated = types.SimpleNamespace(
+                validate=worker.validate_exact, OperationResources=ResourceObserver,
+                measure=lambda *_: self.fail("private debug harness was called"))
+            with patch.dict(sys.modules, {"alopex": alopex}), \
+                 patch.dict("os.environ", {"ALOPEX_PERF_SERVER_URL": "http://127.0.0.1"}):
+                result = worker.public_measure(parity, isolated, config, raw_path, path,
+                                                clock=iter([1.0, 1.001] * 21).__next__)
+            public = worker.read_public(path, config)
+            raw = [json.loads(line) for line in raw_path.read_text().splitlines()]
+            self.assertEqual(len(public), 21)
+            self.assertTrue(all(item == worker.public_record(config, index,
+                            raw[index]["seconds"], raw[index]["resources"])
+                            for index, item in enumerate(public)))
+            self.assertEqual(result["samples"], 21)
+            self.assertEqual(calls.count(parity.SQL_AGGREGATE_QUERY), 25)
+            self.assertEqual(calls[-1], "close")
+
+    def test_public_record_allowlist_excludes_private_identifiers(self):
+        _, raw, config = cell()
+        private = raw[0]["resources"]
+        private["local_path"] = "/private/secret"
+        private["error"] = "exception: /private/secret"
+        private["client"]["pid"] = 9988
+        private["server_processes"][0]["hostname"] = "private-host"
+        row = worker.public_record(config, 0, .001, private)
+        self.assertEqual(tuple(row), worker.PUBLIC_FIELDS)
+        encoded = json.dumps(row)
+        self.assertNotIn("/private/", encoded)
+        self.assertNotIn("exception", encoded)
+        self.assertFalse(any("pid" in key for key in row))
+        self.assertNotIn("hostname", encoded)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "public.ndjson"
+            valid = [worker.public_record(config, i, .001, resource()) for i in range(21)]
+            path.write_text("".join(json.dumps(item, separators=(",", ":")) + "\n"
+                                    for item in valid))
+            self.assertEqual(worker.read_public(path, config), valid)
+            valid[0]["local_path"] = "/private/secret"
+            path.write_text("".join(json.dumps(item, separators=(",", ":")) + "\n"
+                                    for item in valid))
+            with self.assertRaises(ValueError):
+                worker.read_public(path, config)
+
+    def test_public_insert_harness_rolls_back_every_call(self):
+        _, _, config = cell("insert-rollback")
+        rollbacks = []
+
+        class Transaction:
+            def execute_sql(self, sql):
+                self.sql = sql
+                return [{"id": 3}]
+
+            def rollback(self):
+                rollbacks.append(self.sql)
+
+        class Connection:
+            def execute_sql(self, sql):
+                if sql == "SELECT id, value FROM perf_items ORDER BY id":
+                    return [{"id": 1, "value": "old"}]
+                return []
+
+            def begin(self, mode):
+                return Transaction()
+
+            def close(self):
+                pass
+
+        class ResourceObserver:
+            @staticmethod
+            def from_environment(*_):
+                return types.SimpleNamespace(begin=lambda: None, end=lambda _: resource())
+
+        alopex = types.ModuleType("alopex")
+        alopex.RemoteDatabase = Connection
+        alopex.TxnMode = types.SimpleNamespace(READ_WRITE="read_write")
+        alopex.connect = lambda *_, **__: Connection()
+        isolated = types.SimpleNamespace(validate=worker.validate_exact,
+                                         OperationResources=ResourceObserver,
+                                         measure=lambda *_: self.fail("private harness called"))
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(sys.modules, {"alopex": alopex}), \
+             patch.dict("os.environ", {"ALOPEX_PERF_SERVER_URL": "http://127.0.0.1"}):
+            root = Path(directory)
+            result = worker.public_measure(types.SimpleNamespace(), isolated, config,
+                                           root / "raw.ndjson", root / "public.ndjson",
+                                           clock=iter([1.0, 1.001] * 21).__next__)
+            self.assertEqual(len(worker.read_public(root / "public.ndjson", config)), 21)
+        self.assertEqual(len(rollbacks), 25)
+        self.assertEqual(set(rollbacks),
+                         {"INSERT INTO perf_items VALUES (3, 'returning') RETURNING id"})
+        self.assertEqual(result["result_sha256"], worker.result_digest("insert-rollback"))
+
+    def test_public_postgresql_client_uses_version_and_observed_pid(self):
+        _, _, config = cell("aggregate", "postgresql")
+        observed_pids = []
+
+        class Cursor:
+            description = True
+
+            def __init__(self, sql):
+                self.sql = sql
+
+            def fetchone(self):
+                return {"server_version": "16.14"}
+
+            def fetchall(self):
+                return [{"count": 17125}]
+
+        class Connection:
+            info = types.SimpleNamespace(backend_pid=72)
+
+            def execute(self, sql):
+                return Cursor(sql)
+
+            def close(self):
+                pass
+
+        class ResourceObserver:
+            @staticmethod
+            def from_environment(engine, pid):
+                observed_pids.append((engine, pid))
+                return types.SimpleNamespace(begin=lambda: None, end=lambda _: resource())
+
+        psycopg = types.ModuleType("psycopg")
+        psycopg.connect = lambda *_, **__: Connection()
+        rows = types.ModuleType("psycopg.rows")
+        rows.dict_row = object()
+        isolated = types.SimpleNamespace(validate=worker.validate_exact,
+                                         OperationResources=ResourceObserver,
+                                         measure=lambda *_: self.fail("private harness called"))
+        parity = types.SimpleNamespace(
+            _populate_sql=lambda *_: None,
+            SQL_AGGREGATE_QUERY="SELECT COUNT(*) AS count FROM bench WHERE enabled = true",
+            SQL_STREAM_QUERY="SELECT id, value FROM bench WHERE enabled = true")
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(sys.modules, {"psycopg": psycopg, "psycopg.rows": rows}), \
+             patch.dict("os.environ", {"ALOPEX_PERF_POSTGRES_DSN": "private socket"}):
+            root = Path(directory)
+            result = worker.public_measure(parity, isolated, config,
+                                           root / "raw.ndjson", root / "public.ndjson",
+                                           clock=iter([1.0, 1.001] * 21).__next__)
+            self.assertEqual(len(worker.read_public(root / "public.ndjson", config)), 21)
+        self.assertEqual(observed_pids, [("postgresql", 72)])
+        self.assertEqual(result["engine"], "postgresql")
+
     def test_preflight_captures_one_exact_validated_result(self):
         module = types.SimpleNamespace()
         captured = worker.enforce_complete_result_order(module, capture_exact=True)

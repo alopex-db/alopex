@@ -123,6 +123,8 @@ def main():
                       product_harness_root=str(contained(WORK / "harness", config["product_subdirectory"])))
         if phase == "preflight":
             worker["exact_result"] = str(output / "exact-result.json")
+        else:
+            worker["public"] = str(output / "public.ndjson")
         worker_path = output / "worker.json"
         atomic_json(worker_path, worker)
         command([str(python), "-B", str(INPUT / "worker.py"), str(worker_path)],
@@ -145,6 +147,8 @@ def main():
             result["exact_result_sha256"] = digest(exact_path)
         else:
             require(not (output / "exact-result.json").exists(), "IDENTITY")
+            require((output / "public.ndjson").is_file(), "IDENTITY")
+            result["public_sha256"] = digest(output / "public.ndjson")
         require(all(digest(contained(INPUT, item["path"])) == item["sha256"] for item in assets["files"]), "IDENTITY")
         return result
 
