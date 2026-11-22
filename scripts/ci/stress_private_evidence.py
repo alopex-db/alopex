@@ -69,7 +69,8 @@ def read_regular(path: Path) -> bytes:
         raise ValueError("INPUT") from None
 
 
-def collect_files(workspace: Path, case_id: str) -> list[tuple[str, bytes]]:
+def collect_files(workspace: Path, case_id: str,
+                  command_log: Path | None = None) -> list[tuple[str, bytes]]:
     if workspace.is_symlink() or not workspace.is_dir():
         raise ValueError("INPUT")
     files: list[tuple[str, bytes]] = []
@@ -104,13 +105,28 @@ def collect_files(workspace: Path, case_id: str) -> list[tuple[str, bytes]]:
                         raise ValueError("BOUND")
                 else:
                     raise ValueError("INPUT")
+    if command_log is not None:
+        parent = command_log.parent
+        if (command_log.name != f"{case_id}-test.output.private.log"
+                or parent.name != "stress-private" or parent.is_symlink()
+                or command_log.is_symlink() or not parent.is_dir()):
+            raise ValueError("INPUT")
+        info = parent.stat()
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError("INPUT")
+        body = read_regular(command_log)
+        files.append(("command.log", body))
+        total += len(body)
+        if len(files) > MAX_FILES or total > MAX_RAW_BYTES:
+            raise ValueError("BOUND")
     if not files:
         raise ValueError("EMPTY")
     return sorted(files, key=lambda item: item[0])
 
 
 def seal(*, workspace: Path, case_id: str, source_commit: str,
-         certificate: Path, expected_cert_sha256: str, output: Path) -> dict:
+         certificate: Path, expected_cert_sha256: str, output: Path,
+         command_log: Path | None = None) -> dict:
     if (not hasattr(os, "O_NOFOLLOW") or case_id not in CASE_IDS
             or not SHA40.fullmatch(source_commit)
             or not SHA256.fullmatch(expected_cert_sha256)
@@ -141,7 +157,7 @@ def seal(*, workspace: Path, case_id: str, source_commit: str,
     )
     if valid.returncode:
         raise ValueError("CERT")
-    files = collect_files(workspace, case_id)
+    files = collect_files(workspace, case_id, command_log)
     manifest = {
         "schema": "alopex.stress-private/v1", "case_id": case_id,
         "source_commit": source_commit,
@@ -207,11 +223,13 @@ def main() -> None:
     parser.add_argument("--certificate", required=True, type=Path)
     parser.add_argument("--expected-cert-sha256", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--command-log", type=Path)
     args = parser.parse_args()
     try:
         seal(workspace=args.workspace, case_id=args.case_id,
              source_commit=args.source_commit, certificate=args.certificate,
-             expected_cert_sha256=args.expected_cert_sha256, output=args.output)
+             expected_cert_sha256=args.expected_cert_sha256, output=args.output,
+             command_log=args.command_log)
     except (OSError, ValueError):
         raise SystemExit("STRESS_PRIVATE_EVIDENCE_REJECTED") from None
 

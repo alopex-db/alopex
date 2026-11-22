@@ -43,6 +43,20 @@ def certificate_pair(root: Path) -> tuple[Path, Path]:
 
 
 class PrivateEvidenceTests(unittest.TestCase):
+    def test_rejects_symlinked_private_command_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "checkout"
+            workspace.mkdir()
+            private = root / "stress-private"
+            private.mkdir(mode=0o700)
+            raw = root / "raw.log"
+            raw.write_bytes(b"machine detail")
+            log = private / "sql_parser-test.output.private.log"
+            log.symlink_to(raw)
+            with self.assertRaises(ValueError):
+                evidence.collect_files(workspace, "sql_parser", log)
+
     def test_exact_case_is_encrypted_and_decryptable(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

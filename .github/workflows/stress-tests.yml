@@ -25,6 +25,7 @@ jobs:
     steps:
       - &monitored_checkout
         name: Monitored exact-source checkout
+        id: bootstrap
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
@@ -67,12 +68,19 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 scripts/ci/stress_guarded_command.py --case stress --phase parser -- bash scripts/build-nim-parser.sh --backend docker
       - name: Run stress tests (short)
+        id: stress_case
         env:
           RUST_BACKTRACE: 1
           STRESS_TEST_TIMEOUT: 120
           STRESS_REPORT_DIR: target/stress-reports # set empty string to skip artifact upload
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: python3 scripts/ci/stress_guarded_command.py --case stress --phase test -- cargo test --features test-hooks,lane_ci --test 'stress_*' -- --test-threads=1
+
+      - name: Finalize stress evidence privately
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          STRESS_OUTCOME: ${{ steps.stress_case.outcome == 'success' && 'passed' || 'failed' }}
+        run: python3 scripts/ci/stress_guarded_command.py --case stress --phase seal -- python3 scripts/ci/stress_finalize_case.py --case stress --outcome "${STRESS_OUTCOME}"
 
       - name: Upload stress reports
         if: ${{ always() }}
@@ -127,6 +135,7 @@ jobs:
         shell: bash
         run: bash scripts/build-nim-parser.sh --backend host
       - name: Run sanitizer lane
+        id: sanitizer_case
         env:
           STRESS_CASE_ID: ${{ matrix.sanitizer }}
           RUST_BACKTRACE: 1
@@ -134,6 +143,13 @@ jobs:
           STRESS_ARTIFACTS_DIR: target/stress-artifacts/${{ matrix.sanitizer }}
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: python3 scripts/ci/stress_guarded_command.py --case "${STRESS_CASE_ID}" --phase test -- ./scripts/run-sanitizer-lane.sh "${STRESS_CASE_ID}"
+
+      - name: Finalize sanitizer evidence privately
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          STRESS_CASE_ID: ${{ matrix.sanitizer }}
+          STRESS_OUTCOME: ${{ steps.sanitizer_case.outcome == 'success' && 'passed' || 'failed' }}
+        run: python3 scripts/ci/stress_guarded_command.py --case "${STRESS_CASE_ID}" --phase seal -- python3 scripts/ci/stress_finalize_case.py --case "${STRESS_CASE_ID}" --outcome "${STRESS_OUTCOME}"
 
       - name: Upload sanitizer reports
         if: ${{ always() }}
@@ -170,26 +186,42 @@ jobs:
         run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase fuzz_install -- cargo install cargo-fuzz --locked
 
       - name: Run SQL fuzz target
+        id: sql_fuzz
         env:
           STRESS_REPORT_DIR: target/stress-reports/fuzz/sql_parser
+          STRESS_ARTIFACTS_DIR: target/stress-artifacts/fuzz/sql_parser
           FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.fuzz_seconds || '600' }}
           ASAN_OPTIONS: detect_odr_violation=0:detect_leaks=0
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
           python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase test -- \
-            bash -c 'cd crates/alopex-sql/fuzz && cargo fuzz run sql_parser -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}"'
+            bash -c 'mkdir -p "${GITHUB_WORKSPACE}/${STRESS_ARTIFACTS_DIR}" && cd crates/alopex-sql/fuzz && cargo fuzz run sql_parser -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}" -artifact_prefix="${GITHUB_WORKSPACE}/${STRESS_ARTIFACTS_DIR}/"'
+
+      - name: Finalize SQL fuzz evidence privately
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          STRESS_OUTCOME: ${{ steps.sql_fuzz.outcome == 'success' && 'passed' || 'failed' }}
+        run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase seal -- python3 scripts/ci/stress_finalize_case.py --case sql_parser --outcome "${STRESS_OUTCOME}"
 
       - name: Run DataFrame fuzz target
+        id: dataframe_fuzz
         env:
           STRESS_REPORT_DIR: target/stress-reports/fuzz/dataframe_conversion
+          STRESS_ARTIFACTS_DIR: target/stress-artifacts/fuzz/dataframe_conversion
           FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.fuzz_seconds || '600' }}
           ASAN_OPTIONS: detect_odr_violation=0:detect_leaks=0
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
           python3 scripts/ci/stress_guarded_command.py --case dataframe_conversion --phase test -- \
-            bash -c 'cd crates/alopex-dataframe/fuzz && cargo fuzz run dataframe_conversion -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}"'
+            bash -c 'mkdir -p "${GITHUB_WORKSPACE}/${STRESS_ARTIFACTS_DIR}" && cd crates/alopex-dataframe/fuzz && cargo fuzz run dataframe_conversion -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}" -artifact_prefix="${GITHUB_WORKSPACE}/${STRESS_ARTIFACTS_DIR}/"'
+
+      - name: Finalize DataFrame fuzz evidence privately
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          STRESS_OUTCOME: ${{ steps.dataframe_fuzz.outcome == 'success' && 'passed' || 'failed' }}
+        run: python3 scripts/ci/stress_guarded_command.py --case dataframe_conversion --phase seal -- python3 scripts/ci/stress_finalize_case.py --case dataframe_conversion --outcome "${STRESS_OUTCOME}"
 
       - name: Upload fuzz reports
         if: ${{ always() }}
@@ -240,6 +272,7 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 scripts/ci/stress_guarded_command.py --case perf --phase parser -- bash scripts/build-nim-parser.sh --backend docker
       - name: Run perf baseline checks
+        id: perf_case
         env:
           RUST_BACKTRACE: 1
           STRESS_BASELINE_REQUIRED: ${{ steps.perf-baseline.outputs.found == 'true' && 'true' || 'false' }}
@@ -249,6 +282,12 @@ jobs:
           STRESS_ARTIFACTS_DIR: ${{ github.workspace }}/target/stress-artifacts/perf
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: python3 scripts/ci/stress_guarded_command.py --case perf --phase test -- cargo test -p alopex-core --features lane_perf --test stress_perf_baseline -- --test-threads=1
+
+      - name: Finalize perf evidence privately
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          STRESS_OUTCOME: ${{ steps.perf_case.outcome == 'success' && 'passed' || 'failed' }}
+        run: python3 scripts/ci/stress_guarded_command.py --case perf --phase seal -- python3 scripts/ci/stress_finalize_case.py --case perf --outcome "${STRESS_OUTCOME}"
 
       - name: Inspect perf outputs
         if: ${{ always() }}
