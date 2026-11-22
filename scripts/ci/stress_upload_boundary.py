@@ -19,43 +19,14 @@ sys.path.insert(0, str(WORKSPACE / "scripts/compatibility"))
 sys.path.insert(0, str(WORKSPACE / "scripts/release"))
 import release_storage  # noqa: E402
 import storage  # noqa: E402
-from stress_public_evidence import build_status, CASE_IDS, SHA40
+from stress_public_case import (assemble, CASES, MAX_CASE_BYTES, read_json,
+                                SHA40)
 
 
 STOP_BYTES = 40_000_000_000
 UPLOAD_RESERVE_BYTES = 1_000_000_000
-MAX_STATUS_BYTES = 4_096
-
-
-def read_status(path: Path) -> dict:
-    if not hasattr(os, "O_NOFOLLOW"):
-        raise ValueError("STATUS")
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(descriptor, "rb", buffering=0) as stream:
-            info = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                    or not 0 < info.st_size <= MAX_STATUS_BYTES):
-                raise ValueError("STATUS")
-            body = stream.read(MAX_STATUS_BYTES + 1)
-            after = os.fstat(stream.fileno())
-            if (len(body) != info.st_size or after.st_size != info.st_size
-                    or after.st_mtime_ns != info.st_mtime_ns):
-                raise ValueError("STATUS")
-    except OSError:
-        raise ValueError("STATUS") from None
-    try:
-        value = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        raise ValueError("STATUS") from None
-    if not isinstance(value, dict):
-        raise ValueError("STATUS")
-    return value
-
-
-def verify_output(*, workspace: Path, case_id: str, kind: str,
-                  source: str) -> Path:
-    if case_id not in CASE_IDS or kind not in {"public", "private"}:
+def verify_output(*, workspace: Path, case_id: str, source: str) -> Path:
+    if case_id not in CASES:
         raise ValueError("STATE")
     case_dir = workspace / "target/stress-publish" / case_id
     for parent in (workspace / "target", workspace / "target/stress-publish", case_dir):
@@ -65,23 +36,20 @@ def verify_output(*, workspace: Path, case_id: str, kind: str,
     if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
         raise ValueError("OUTPUT")
     status_path = case_dir / f"{case_id}.json"
-    cms_path = case_dir / f"{case_id}.cms"
-    status = read_status(status_path)
-    if (not isinstance(status.get("outcome"), str)
-            or not isinstance(status.get("error_code"), str)):
+    if set(os.listdir(case_dir)) != {status_path.name}:
+        raise ValueError("OUTPUT")
+    status = read_json(status_path, limit=MAX_CASE_BYTES, canonical=True)
+    if status.get("outcome") not in {"passed", "failed"}:
         raise ValueError("STATUS")
-    cms_exists = cms_path.exists() or cms_path.is_symlink()
-    expected = build_status(
-        case_id=case_id, source_commit=source,
-        outcome=status.get("outcome"), error_code=status.get("error_code"),
-        ciphertext=cms_path if cms_exists else None)
-    if status != expected or (kind == "private" and not cms_exists):
+    expected = assemble(workspace=workspace, case_id=case_id,
+                        source=source, outcome=status["outcome"])
+    if status != expected:
         raise ValueError("STATUS")
-    return status_path if kind == "public" else cms_path
+    return status_path
 
 
 def measure(*, workspace: Path, runner_temp: Path, private: Path,
-            case_id: str, kind: str, stage: str) -> int:
+            case_id: str, stage: str) -> int:
     home = Path.home()
     roots = [workspace, runner_temp, home / ".cargo", home / ".cache",
              home / ".local", home / ".rustup", Path("/tmp"),
@@ -89,7 +57,7 @@ def measure(*, workspace: Path, runner_temp: Path, private: Path,
     local = storage.inventory(roots)
     external = release_storage.docker_inventory()
     total = local["allocated_bytes"] + external["allocated_bytes"]
-    log = private / f"{case_id}-{kind}-{stage}.storage.private.json"
+    log = private / f"{case_id}-public-{stage}.storage.private.json"
     descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                          os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
@@ -105,10 +73,10 @@ def measure(*, workspace: Path, runner_temp: Path, private: Path,
 def main() -> None:
     os.umask(0o077)
     args = sys.argv[1:]
-    if (len(args) != 6 or args[0] != "--case" or args[2] != "--kind"
-            or args[4] != "--stage" or args[5] not in {"before", "after"}):
+    if (len(args) != 4 or args[0] != "--case" or args[2] != "--stage"
+            or args[3] not in {"before", "after"}):
         raise ValueError("ARGUMENT")
-    case_id, kind, stage = args[1], args[3], args[5]
+    case_id, stage = args[1], args[3]
     source = os.environ.get("GITHUB_SHA", "")
     if (not SHA40.fullmatch(source)
             or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
@@ -126,15 +94,16 @@ def main() -> None:
             or private.stat().st_uid != os.getuid()
             or stat.S_IMODE(private.stat().st_mode) != 0o700):
         raise ValueError("STATE")
-    verify_output(workspace=WORKSPACE, case_id=case_id, kind=kind,
-                  source=source)
+    verify_output(workspace=WORKSPACE, case_id=case_id, source=source)
     measure(workspace=WORKSPACE, runner_temp=runner_temp, private=private,
-            case_id=case_id, kind=kind, stage=stage)
+            case_id=case_id, stage=stage)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, TypeError, KeyError, subprocess.CalledProcessError,
+    except (OSError, ValueError, TypeError, KeyError, UnicodeDecodeError,
+            json.JSONDecodeError,
+            subprocess.CalledProcessError,
             subprocess.TimeoutExpired):
         raise SystemExit("STRESS_UPLOAD_BOUNDARY_REJECTED") from None

@@ -12,6 +12,7 @@ on:
     - cron: "0 3 * * 0"
 
 env:
+  STRESS_EVIDENCE_MODE: public
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
   ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
   NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
@@ -71,7 +72,7 @@ jobs:
         id: stress_case
         env:
           STRESS_EVIDENCE_MODE: public
-          STRESS_ARTIFACTS_DIR: target/stress-public-artifacts/stress
+          STRESS_ARTIFACTS_DIR: ${{ github.workspace }}/target/stress-public-artifacts/stress
           RUST_BACKTRACE: 1
           STRESS_TEST_TIMEOUT: 120
           STRESS_REPORT_DIR: target/stress-reports
@@ -142,7 +143,7 @@ jobs:
           STRESS_EVIDENCE_MODE: public
           RUST_BACKTRACE: 1
           STRESS_REPORT_DIR: target/stress-reports/${{ matrix.sanitizer }}
-          STRESS_ARTIFACTS_DIR: target/stress-public-artifacts/${{ matrix.sanitizer }}
+          STRESS_ARTIFACTS_DIR: ${{ github.workspace }}/target/stress-public-artifacts/${{ matrix.sanitizer }}
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: python3 scripts/ci/stress_guarded_command.py --case "${STRESS_CASE_ID}" --phase test -- ./scripts/run-sanitizer-lane.sh "${STRESS_CASE_ID}"
 

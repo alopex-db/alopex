@@ -9,8 +9,10 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -20,11 +22,11 @@ from urllib.request import (HTTPRedirectHandler, Request, build_opener,
                             urlopen)
 import zipfile
 
-from stress_perf_baseline import BASELINES, _valid_baseline
-from stress_public_evidence import SHA40
-
-
 WORKSPACE = Path(__file__).resolve().parents[2]
+BASELINES = frozenset({"perf_mixed_point_latency.json",
+                       "perf_sequential_throughput_and_amplification.json"})
+SHA40 = re.compile(r"[0-9a-f]{40}\Z")
+MAX_BASELINE_BYTES = 1_000_000
 RUN_ID = 44059890460
 ARTIFACT_ID = 14317682831
 SOURCE_SHA = "a5fb412bb826689bb685c98d73213b5153bf1e22"
@@ -33,6 +35,20 @@ REPOSITORY_ID = 1100234936
 API = "https://api.github.com/repos/alopex-db/alopex"
 MAX_METADATA_BYTES = 1_000_000
 MAX_ZIP_BYTES = 1_000_000
+
+
+def _valid_baseline(body: bytes) -> bool:
+    if not 0 < len(body) <= MAX_BASELINE_BYTES:
+        return False
+    try:
+        value = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    metrics = value.get("metrics") if isinstance(value, dict) else None
+    return (set(value) == {"metrics"} and isinstance(metrics, dict)
+            and bool(metrics) and all(
+                isinstance(key, str) and key and type(number) in (int, float)
+                and math.isfinite(number) for key, number in metrics.items()))
 
 
 class NoRedirect(HTTPRedirectHandler):

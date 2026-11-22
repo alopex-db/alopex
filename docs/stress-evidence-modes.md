@@ -18,8 +18,8 @@ pass criteria.
   specifications or environment variables for its public record. Its run and
   check records contain no arbitrary topology, path, command or error text.
   Metrics and performance comparisons retain finite numeric values and fixed
-  identifiers. Fuzz and sanitizer jobs provide a fixed case result and bounded
-  execution counts or duration; raw stacks and crash inputs are not public.
+  identifiers. Fuzz jobs record a bounded execution count and duration;
+  sanitizer jobs record duration. Raw stacks and crash inputs are not public.
 - `STRESS_EVIDENCE_MODE=debug` is explicit local opt-in. It may collect detailed
   diagnostics under an owner-only local root, and CI rejects this mode. The
   Stage 2 uploader accepts only the public output root and checks source,
