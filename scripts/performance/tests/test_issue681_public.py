@@ -32,12 +32,13 @@ class Counter:
         pass
 
 
-def events(*, malformed=False, secret=False):
+def events(*, finish="rollback", malformed=False, secret=False,
+           validated=True):
     result = []
-    for phase in (*public.PHASES, "rollback"):
+    for phase in (*public.PHASES, finish):
         result.append({"phase": phase, "data": {"event": "start"}})
         data = {"event": "end"}
-        if phase not in ("warm", "rollback"):
+        if phase != "warm":
             data["elapsed_ns"] = 12345
         if phase in ("cold_transaction_1", "cold_transaction_2", "warm",
                      "first_insert", "second_insert"):
@@ -49,6 +50,7 @@ def events(*, malformed=False, secret=False):
             data["local_path"] = "/private/host/unpublishable"
         result.append({"phase": phase, "data": data})
     result.append({"phase": "complete", "data": {
+        "finish": finish, "result_validated": validated,
         "stats": {"hits": 2, "misses": 1}}})
     if malformed:
         result[3]["phase"] = "unknown/private/path"
@@ -57,12 +59,14 @@ def events(*, malformed=False, secret=False):
 
 class PublicCollectorTests(unittest.TestCase):
     def measure(self, *, malformed=False, secret=False, stderr_secret=False,
-                capacity_error=False, counter_error=False):
+                capacity_error=False, counter_error=False, finish="rollback",
+                validated=True):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             binary = root / "fixture"
             payload = [json.dumps(row, separators=(",", ":")) for row in
-                       events(malformed=malformed, secret=secret)]
+                       events(finish=finish, malformed=malformed, secret=secret,
+                              validated=validated)]
             binary.write_text(
                 f"#!{sys.executable}\nimport sys\nlines={payload!r}\n"
                 + ("print('/private/host/stderr',file=sys.stderr)\n" if stderr_secret else "")
@@ -82,7 +86,7 @@ class PublicCollectorTests(unittest.TestCase):
                 result = public.run_case(
                     binary=binary, directory=output, source_commit="a" * 40,
                     binary_sha256=digest, rows=1000, dimensions=384, trial=0,
-                    timeout=5, rss_limit=1_000_000,
+                    finish=finish, timeout=5, rss_limit=1_000_000,
                     counter_factory=counter)
             content = (output / "public.json").read_bytes()
             self.assertEqual(list(output.iterdir()), [output / "public.json"])
@@ -101,6 +105,20 @@ class PublicCollectorTests(unittest.TestCase):
             "phase", "elapsed_ns", "kernel_peak_rss_bytes",
             "cache_hits", "cache_misses", "graph_bytes"})
         self.assertEqual(result["phases"][4]["graph_bytes"], 123456)
+
+    def test_commit_mode_requires_validated_completion(self):
+        result = self.measure(finish="commit", stderr_secret=True)
+        self.assertEqual(result["status"], "measured")
+        self.assertEqual(result["finish"], "commit")
+        self.assertTrue(result["result_validated"])
+        self.assertEqual(result["phases"][-1]["phase"], "commit")
+        self.assertEqual(result["phases"][-1]["elapsed_ns"], 12345)
+
+    def test_unvalidated_completion_is_not_measured(self):
+        result = self.measure(finish="commit", validated=False)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "PUBLIC_PROTOCOL")
+        self.assertEqual(result["completed_phases"], 9)
 
     def test_invalid_event_fails_with_fixed_code_only(self):
         result = self.measure(malformed=True, stderr_secret=True)

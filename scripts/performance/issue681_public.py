@@ -64,8 +64,8 @@ def _record(phase, data, counter):
     """Project one checked phase end directly into an allowlisted public row."""
     require(type(data) is dict and data.get("event") == "end")
     elapsed = data.get("elapsed_ns")
-    require((elapsed is None and phase in ("warm", "rollback")) or
-            (phase not in ("warm", "rollback") and
+    require((elapsed is None and phase == "warm") or
+            (phase != "warm" and
              _uint(elapsed, 3_600_000_000_000) and elapsed > 0))
     require(type(counter) is dict and counter.get("phase") == phase and
             _uint(counter.get("kernel_reported_peak_rss_bytes"), 8_000_000_000),
@@ -99,7 +99,8 @@ def _event(line, expected_phase, expected_kind):
     data = value["data"]
     if expected_phase == "complete":
         stats = data.get("stats")
-        require(type(stats) is dict and _uint(stats.get("hits"), 1_000_000_000) and
+        require(data.get("result_validated") is True and
+                type(stats) is dict and _uint(stats.get("hits"), 1_000_000_000) and
                 _uint(stats.get("misses"), 1_000_000_000))
     else:
         require(data.get("event") == expected_kind)
@@ -155,7 +156,7 @@ def _inventory(directory):
 
 
 def run_case(*, binary, directory, source_commit, binary_sha256, rows, dimensions,
-             trial, timeout, rss_limit, counter_factory=PhaseRss):
+             trial, finish, timeout, rss_limit, counter_factory=PhaseRss):
     """Run one bounded case; make typed rows at each phase end, never from a raw log."""
     _directory(directory)
     records = []
@@ -169,15 +170,16 @@ def run_case(*, binary, directory, source_commit, binary_sha256, rows, dimension
     try:
         require(sys.platform == "linux" and rows in (1_000, 10_000, 100_000) and
                 dimensions == 384 and _uint(trial, 4) and
+                finish in ("commit", "rollback") and
                 _uint(timeout, 1800) and timeout > 0 and
                 _uint(rss_limit, 8_000_000_000) and rss_limit > 0,
                 "PUBLIC_INPUT")
         _identity(binary, source_commit, binary_sha256)
         _inventory(directory)
-        phases = (*PHASES, "rollback")
+        phases = (*PHASES, finish)
         expected = tuple((phase, kind) for phase in phases for kind in ("start", "end")) + (
             ("complete", None),)
-        process = subprocess.Popen([str(binary), str(rows), str(dimensions)],
+        process = subprocess.Popen([str(binary), str(rows), str(dimensions), finish],
                                    cwd=ROOT, env=dict(os.environ, ALOPEX_MANUAL_681="1",
                                                       RAYON_NUM_THREADS="2", OMP_NUM_THREADS="2"),
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -214,7 +216,7 @@ def run_case(*, binary, directory, source_commit, binary_sha256, rows, dimension
             require(line is not None, "PUBLIC_CHILD")
             data = _event(line, phase, kind)
             if phase == "complete":
-                require(observer.active is None)
+                require(observer.active is None and data.get("finish") == finish)
             elif kind == "start":
                 try:
                     observer.begin(phase)
@@ -240,7 +242,8 @@ def run_case(*, binary, directory, source_commit, binary_sha256, rows, dimension
         report = {"schema": SCHEMA, "status": "measured",
                   "source_commit": source_commit, "binary_sha256": binary_sha256,
                   "rows": rows, "dimensions": dimensions, "trial": trial,
-                  "finish": "rollback", "phases": records,
+                  "finish": finish, "phases": records,
+                  "result_validated": True,
                   "rss_scope": "Linux VmHWM reset at phase handshakes"}
         _write(directory, report)
         return report
@@ -281,6 +284,7 @@ def main(argv=None):
     parser.add_argument("--binary-sha256", required=True)
     parser.add_argument("--rows", type=int, required=True)
     parser.add_argument("--trial", type=int, required=True)
+    parser.add_argument("--finish", choices=("commit", "rollback"), required=True)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--rss-limit", type=int, default=8_000_000_000)
     try:
@@ -288,7 +292,7 @@ def main(argv=None):
         report = run_case(binary=args.binary, directory=args.output,
                           source_commit=args.source_commit,
                           binary_sha256=args.binary_sha256, rows=args.rows,
-                          dimensions=384, trial=args.trial,
+                          dimensions=384, trial=args.trial, finish=args.finish,
                           timeout=args.timeout, rss_limit=args.rss_limit)
         return 0 if report["status"] == "measured" else 1
     except Exception:
