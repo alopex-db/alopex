@@ -38,6 +38,22 @@ succeed; a collected row from a failed cleanup is not counted.
 Local tests establish code behavior only; selected-host execution, current
 subject pins and #804 qualification remain required for release acceptance.
 
+## Same-job workflow route
+
+The dedicated `sql_final_mode` for issue #712 first completes the source-pinned
+#804 qualification, then checks storage before two exact source checkouts. A
+canonical SHA-256-pinned final lock supplies reviewed public reference artifact
+and product identities, operator hashes, redirect hosts and declared run bounds.
+The lock contains no machine paths, token, profile, image digest or diagnostic
+data. The runner derives the private profile and image identity from the live
+#804 proof and rechecks capacity after checkout. Only a successful final run
+can upload `native-final-sql-export/public.json`. The separate #804
+qualification artifact also contains only its public `public.json`.
+
+The final lock and time declarations require independent source-bound review
+before dispatch. Local workflow and unit checks do not establish a hosted
+build, selected-runner qualification or final comparison result.
+
 ## Public artifact boundary before workflow integration
 
 | Use case | Actor and trigger | Inputs | Output and exposure | Failure | Acceptance |

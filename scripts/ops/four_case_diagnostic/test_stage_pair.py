@@ -51,6 +51,11 @@ class StagePairTests(unittest.TestCase):
             stage_pair.validate_stage_binding(
                 self.config, self.output, self.proof, self.receipt)
         self.proof["profile"]["security"]["lsm_profile"] = "docker-default"
+        self.proof["profile"]["storage"]["runtime_storage_roots"] = []
+        with self.assertRaisesRegex(ValueError, "^PAIR_STAGE$"):
+            stage_pair.validate_stage_binding(
+                self.config, self.output, self.proof, self.receipt)
+        self.proof["profile"]["storage"]["runtime_storage_roots"] = ["/tmp/docker"]
         self.output.chmod(0o755)
         with self.assertRaisesRegex(ValueError, "^PAIR_STAGE$"):
             stage_pair.validate_stage_binding(

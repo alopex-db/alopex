@@ -174,7 +174,7 @@ class FourCaseJobTests(unittest.TestCase):
                          qualification)
         self.assertIn("native-sql-four-case-export/public.json", qualification)
         self.assertNotIn("native-sql-four-case-export/\n", qualification)
-        self.assertIn("if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}",
+        self.assertIn("if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode }}",
                       qualification)
 
     def test_seal_allows_bounded_twelve_pair_inventory_and_checks_capacity(self):
