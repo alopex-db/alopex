@@ -23,6 +23,7 @@ import tomllib
 import issue681_public as case
 import issue681_public_assets as assets
 import issue681_public_assets_build as pack
+import issue681_hosted_vendor_tree as vendor_tree
 
 EXAMPLE = "crates/alopex-embedded/examples/issue681_hnsw_first_write.rs"
 CONTRACT = "crates/alopex-sql/nim-sql-parser/PARSER_CONTRACT_VERSION"
@@ -208,7 +209,7 @@ def produce(*, source, target, work, output, parser_record, parser_root,
             source_commit, source_tree, example_sha256, cargo_lock_sha256,
             parser_record_sha256, parser_sha256, rust_version,
             additional_storage_bytes, private_roots, build_lock, host_guard,
-            git_binary, git_env, cargo_home):
+            git_binary, git_env, cargo_home, vendor_mode_sha256):
     """Return exact public pins, or one fixed failure without a promoted bundle."""
     try:
         require(sys.platform == "linux" and platform.machine() == "x86_64")
@@ -245,9 +246,13 @@ def produce(*, source, target, work, output, parser_record, parser_root,
                     stat.S_IMODE(info.st_mode) == 0o600)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             baseline = _storage(inventory_roots, additional_storage_bytes)
+            vendor_tree.verify_tree(cargo_home / "vendor", host_guard,
+                                    vendor_mode_sha256)
             _build(source, target, work, parser_library, inventory_roots,
                    baseline + additional_storage_bytes, rust_version, os.environ,
                    host_guard, cargo_home)
+            vendor_tree.verify_tree(cargo_home / "vendor", host_guard,
+                                    vendor_mode_sha256)
             verify_source(source, source_commit, source_tree, example_sha256,
                           cargo_lock_sha256, git_binary=git_binary,
                           git_env=git_env)

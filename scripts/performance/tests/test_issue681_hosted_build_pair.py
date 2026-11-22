@@ -43,6 +43,7 @@ class HostedBuildPairTest(unittest.TestCase):
                   "private_roots": (str(root),),
                   "build_lock": root / "build.lock",
                   "cargo_home": root / "cargo-home",
+                  "vendor_mode_sha256": "c" * 64,
                   "git_binary": Path("/usr/bin/git"), "git_env": {}}
         return {
             "before": dict(common, source=root / "before", work=root / "work1",

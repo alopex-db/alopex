@@ -74,6 +74,17 @@ class HostedVendorConsumeTests(unittest.TestCase):
                              "vendored-sources")
             self.assertEqual(config["source"]["vendored-sources"]["directory"],
                              str(result["vendor_root"]))
+            modes = hashlib.sha256()
+            for path in sorted(
+                    (item for item in result["vendor_root"].rglob("*")
+                     if item.is_file()),
+                    key=lambda item: item.relative_to(
+                        result["vendor_root"]).as_posix()):
+                relative = path.relative_to(result["vendor_root"]).as_posix()
+                mode = path.stat().st_mode & 0o777
+                modes.update(json.dumps([relative, mode],
+                                        separators=(",", ":")).encode() + b"\n")
+            self.assertEqual(result["vendor_mode_sha256"], modes.hexdigest())
             self.assertGreater(len(calls), 4)
             self.assertEqual(list(cargo_home.glob(".vendor.*")), [])
 

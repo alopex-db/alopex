@@ -85,7 +85,8 @@ class SourceBuildAdmissionTests(unittest.TestCase):
                 rust_version="1.90.0", additional_storage_bytes=8_000_000_000,
                 private_roots=(str(root),), build_lock=root / "build.lock",
                 host_guard=lambda: None, git_binary=Path("/usr/bin/git"),
-                git_env={}, cargo_home=cargo_home)
+                git_env={}, cargo_home=cargo_home,
+                vendor_mode_sha256="c" * 64)
             with mock.patch.object(produce.sys, "platform", "linux"), \
                  mock.patch.object(produce.platform, "machine",
                                    return_value="x86_64"), \
@@ -98,6 +99,57 @@ class SourceBuildAdmissionTests(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, "^PUBLIC_BUILD$"):
                             produce.produce(**inputs)
                 popen.assert_not_called()
+
+    def test_vendor_tree_is_checked_before_and_after_each_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            for name in ("source", "target", "work", "parser", "output",
+                         "cargo-home", "cargo-home/vendor"):
+                (root / name).mkdir(mode=0o700, parents=True)
+                (root / name).chmod(0o700)
+            cargo_home = root / "cargo-home"
+            vendor = cargo_home / "vendor"
+            config = cargo_home / "config.toml"
+            config.write_text("[source.crates-io]\n"
+                              "replace-with = \"vendored-sources\"\n\n"
+                              "[source.vendored-sources]\n"
+                              "directory = " + json.dumps(str(vendor)) + "\n")
+            config.chmod(0o600)
+            binary = root / "target/release/examples/issue681_hnsw_first_write"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"binary")
+            inputs = dict(
+                source=root / "source", target=root / "target",
+                work=root / "work", output=root / "output/bundle",
+                parser_record=root / "record", parser_root=root / "parser",
+                parser_library=root / "parser/lib.so",
+                source_commit="1" * 40, source_tree="2" * 40,
+                example_sha256="3" * 64, cargo_lock_sha256="4" * 64,
+                parser_record_sha256="5" * 64, parser_sha256="6" * 64,
+                rust_version="1.90.0", additional_storage_bytes=8_000_000_000,
+                private_roots=(str(root),), build_lock=root / "build.lock",
+                host_guard=lambda: None, git_binary=Path("/usr/bin/git"),
+                git_env={}, cargo_home=cargo_home,
+                vendor_mode_sha256="c" * 64)
+            events = []
+            with mock.patch.object(produce.sys, "platform", "linux"), \
+                 mock.patch.object(produce.platform, "machine",
+                                   return_value="x86_64"), \
+                 mock.patch.object(produce.Path, "home", return_value=root), \
+                 mock.patch.object(produce, "_run",
+                                   return_value="release: 1.90.0\nhost: x86_64-unknown-linux-gnu"), \
+                 mock.patch.object(produce, "verify_source"), \
+                 mock.patch.object(produce, "verify_parser",
+                                   return_value="5" * 64), \
+                 mock.patch.object(produce, "digest", return_value="6" * 64), \
+                 mock.patch.object(produce, "_storage", return_value=0), \
+                 mock.patch.object(produce.vendor_tree, "verify_tree",
+                                   side_effect=lambda *_: events.append("tree")), \
+                 mock.patch.object(produce, "_build",
+                                   side_effect=lambda *_: events.append("build")), \
+                 mock.patch.object(produce.pack, "_package", return_value={}):
+                produce.produce(**inputs)
+            self.assertEqual(events, ["tree", "build", "tree"])
 
     def test_active_host_guard_failure_reaps_cargo_group(self):
         with tempfile.TemporaryDirectory() as tmp:

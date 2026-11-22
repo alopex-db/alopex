@@ -174,6 +174,7 @@ def install_vendor(zip_path, sources, cargo_home, guard):
                               getattr(os, "O_NOFOLLOW", 0))
             try:
                 rows = {}
+                mode_rows = {}
                 total = 0
                 with zipfile.ZipFile(bundle_stream) as source_zip:
                     modes = _archive_modes(source_zip)
@@ -196,6 +197,7 @@ def install_vendor(zip_path, sources, cargo_home, guard):
                             guard, manifest["vendor_content_bytes"] - total)
                         total += size
                         rows[relative] = (size, file_digest)
+                        mode_rows[relative] = mode
                         guard()
             finally:
                 os.close(root_fd)
@@ -207,6 +209,10 @@ def install_vendor(zip_path, sources, cargo_home, guard):
         require(len(rows) == manifest["vendor_file_count"] and
                 total == manifest["vendor_content_bytes"] and
                 tree.hexdigest() == manifest["vendor_tree_sha256"])
+        mode_tree = hashlib.sha256()
+        for name, mode in sorted(mode_rows.items()):
+            mode_tree.update(json.dumps([name, mode],
+                                        separators=(",", ":")).encode() + b"\n")
         guard()
         vendor = cargo_home / "vendor"
         archive_tools._promote_noreplace(partial, vendor)
@@ -227,7 +233,8 @@ def install_vendor(zip_path, sources, cargo_home, guard):
         return {"cargo_home": cargo_home,
                 "vendor_root": vendor,
                 "bundle_sha256": ZIP_SHA256,
-                "vendor_tree_sha256": manifest["vendor_tree_sha256"]}
+                "vendor_tree_sha256": manifest["vendor_tree_sha256"],
+                "vendor_mode_sha256": mode_tree.hexdigest()}
     except BaseException:
         if config is not None and owned_config is not None:
             try:
