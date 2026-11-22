@@ -65,6 +65,9 @@ fn write_check<T: Serialize>(ctx: &TestContext, name: &str, report: &T) {
     let Some(paths) = ctx.artifact_paths.as_ref() else {
         return;
     };
+    if paths.mode != super::artifacts::EvidenceMode::Debug {
+        return;
+    }
     let path = paths.checks_dir.join(name);
     if let Ok(body) = serde_json::to_string_pretty(report) {
         let _ = fs::write(path, body);

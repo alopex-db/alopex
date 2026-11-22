@@ -1498,8 +1498,14 @@ fn run_chaos_matrix(model: ExecutionModel) -> Vec<(usize, TestResult)> {
         matrix_cfg.nodes = scale.max(3);
         matrix_cfg.zones = matrix_cfg.zones.min(matrix_cfg.nodes).max(1);
         let started_at = Utc::now();
-        let timeline_path = prepare_artifacts(Lane::Nightly, &test_name, &started_at)
-            .map(|paths| log_path(&paths, "chaos_timeline.log"));
+        let timeline_path = if common::artifacts::EvidenceMode::from_environment().unwrap()
+            == common::artifacts::EvidenceMode::Debug
+        {
+            prepare_artifacts(Lane::Nightly, &test_name, &started_at)
+                .map(|paths| log_path(&paths, "chaos_timeline.log"))
+        } else {
+            None
+        };
         let result = harness.run(|ctx| {
             let _op = begin_op(ctx);
             let mut matrix = ChaosMatrix::new(&matrix_cfg, timeline_path.clone())?;
