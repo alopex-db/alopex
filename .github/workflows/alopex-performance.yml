@@ -638,6 +638,8 @@ jobs:
       - name: Verify four-case public measurement
         id: matrix_public
         if: always() && inputs.sql_four_case_mode && steps.matrix_seal.outcome == 'success'
+        env:
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
         run: python3 -B scripts/ops/four_case_job.py verify-public
       - name: Publish verified four-case measurement and audit evidence
         if: always() && inputs.sql_four_case_mode && steps.matrix_public.outcome == 'success'

@@ -41,7 +41,8 @@ requires exact canonical bytes. It rejects extra fields, files and text.
 The private audit checks each public elapsed value and ordinal against the
 same operation's raw record before publication and again at the final export
 boundary. The fixed subject digests are checked against the independently
-pinned lock. `performance_qualification`
+pinned lock. The public timing writer belongs to both the pinned operator
+inventory and the staged package inventory. `performance_qualification`
 remains `false` until the separate product-performance acceptance gate passes.
 
 ## Remaining acceptance work

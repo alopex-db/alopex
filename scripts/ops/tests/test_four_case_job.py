@@ -112,6 +112,11 @@ class FourCaseJobTests(unittest.TestCase):
         self.assertIn("scripts/ops/four_case_job.py run", qualification)
         self.assertIn("scripts/ops/four_case_job.py seal", qualification)
         self.assertIn("scripts/ops/four_case_job.py verify-public", qualification)
+        verify_step = qualification.split(
+            "      - name: Verify four-case public measurement\n", 1)[1].split(
+                "      - name:", 1)[0]
+        self.assertIn("ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}",
+                      verify_step)
         self.assertIn("steps.matrix_public.outcome == 'success'", qualification)
         self.assertNotIn("scripts/ops/same_job_four_case.py", qualification)
         self.assertIn("native-sql-four-case-export/private-evidence.cms",
