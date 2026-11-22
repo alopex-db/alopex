@@ -19,7 +19,7 @@ FILES = {"binary": "bin/issue681_hnsw_first_write",
          "receipt": "receipts/build.json"}
 MEMBERS = {"result.json", "assets/assets.json"} | {
     "assets/" + name for name in FILES.values()}
-COMMAND = ["cargo", "build", "--locked", "--release", "-p",
+COMMAND = ["cargo", "build", "--locked", "--offline", "--release", "-p",
            "alopex-embedded", "--example", "issue681_hnsw_first_write"]
 FIXED_PRIVATE_PREFIXES = (b"/Users/", b"/home/runner/", b"/private/var/folders/",
                           b"/tmp/alopex", b"C:\\Users\\", b"/_work/")
