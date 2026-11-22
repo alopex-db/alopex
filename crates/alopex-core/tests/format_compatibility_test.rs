@@ -139,6 +139,29 @@ fn overflow_fenced_version_is_rejected_by_generic_reader() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn newer_header_is_rejected_before_truncated_footer() {
+    for version in [FileVersion::WAL_OVERFLOW, FileVersion::new(0, 3, 0)] {
+        let (_dir, path) = generate_v0_1_test_file();
+        let changed = mutate_version(&path, version);
+        let mut bytes = std::fs::read(&changed).unwrap();
+        bytes.truncate(HEADER_SIZE);
+        std::fs::write(&changed, bytes).unwrap();
+        let err = match AlopexFileReader::open(FileSource::Path(changed)) {
+            Ok(_) => panic!("unsupported header must be rejected before footer"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            err,
+            FormatError::IncompatibleVersion {
+                file: version,
+                reader: FileVersion::CURRENT,
+            }
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn version_0_3_is_rejected_by_generic_reader() {
@@ -187,7 +210,30 @@ fn roundtrip_with_requested_compression() {
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use super::*;
+    use alopex_core::storage::format::{RangeLoader, WasmReaderConfig};
+    use std::sync::{Arc, Mutex};
     use wasm_bindgen_test::*;
+
+    struct RecordingLoader {
+        bytes: Vec<u8>,
+        reads: Arc<Mutex<Vec<(u64, u64)>>>,
+    }
+
+    impl RangeLoader for RecordingLoader {
+        fn load_range(&self, offset: u64, length: u64) -> Result<Vec<u8>, FormatError> {
+            self.reads.lock().unwrap().push((offset, length));
+            let start = usize::try_from(offset).map_err(|_| FormatError::IncompleteWrite)?;
+            let count = usize::try_from(length).map_err(|_| FormatError::IncompleteWrite)?;
+            let end = start
+                .checked_add(count)
+                .ok_or(FormatError::IncompleteWrite)?;
+            Ok(self
+                .bytes
+                .get(start..end)
+                .ok_or(FormatError::IncompleteWrite)?
+                .to_vec())
+        }
+    }
 
     #[wasm_bindgen_test]
     fn reads_v0_1_golden_file() {
@@ -250,6 +296,106 @@ mod wasm {
                 reader: FileVersion::CURRENT,
             }
         );
+    }
+
+    #[wasm_bindgen_test]
+    fn oversized_fenced_buffer_rejects_version_without_a_loader() {
+        let fenced = mutate_version_bytes(generate_v0_1_test_bytes(), FileVersion::WAL_OVERFLOW);
+        let err = match AlopexFileReader::open_with_config(
+            FileSource::Buffer(fenced),
+            WasmReaderConfig {
+                full_load_threshold_bytes: 1,
+                range_loader: None,
+            },
+        ) {
+            Ok(_) => panic!("unsupported header must be rejected before load threshold"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            err,
+            FormatError::IncompatibleVersion {
+                file: FileVersion::WAL_OVERFLOW,
+                reader: FileVersion::CURRENT,
+            }
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn newer_header_is_rejected_before_truncated_footer() {
+        for version in [FileVersion::WAL_OVERFLOW, FileVersion::new(0, 3, 0)] {
+            let mut bytes = mutate_version_bytes(generate_v0_1_test_bytes(), version);
+            bytes.truncate(HEADER_SIZE);
+            let err = match AlopexFileReader::open(FileSource::Buffer(bytes)) {
+                Ok(_) => panic!("unsupported header must be rejected before footer"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                err,
+                FormatError::IncompatibleVersion {
+                    file: version,
+                    reader: FileVersion::CURRENT,
+                }
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn buffer_rejects_unsupported_version_before_range_loader() {
+        let bytes = mutate_version_bytes(generate_v0_1_test_bytes(), FileVersion::WAL_OVERFLOW);
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let loader = RecordingLoader {
+            bytes: bytes.clone(),
+            reads: Arc::clone(&reads),
+        };
+        let err = match AlopexFileReader::open_with_config(
+            FileSource::Buffer(bytes),
+            WasmReaderConfig {
+                full_load_threshold_bytes: 1,
+                range_loader: Some(Box::new(loader)),
+            },
+        ) {
+            Ok(_) => panic!("unsupported header must be rejected before index fetch"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            err,
+            FormatError::IncompatibleVersion {
+                file: FileVersion::WAL_OVERFLOW,
+                reader: FileVersion::CURRENT,
+            }
+        );
+        assert!(reads.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "wasm-indexeddb")]
+    #[wasm_bindgen_test]
+    fn indexed_db_reads_only_header_for_unsupported_version() {
+        let bytes = mutate_version_bytes(generate_v0_1_test_bytes(), FileVersion::WAL_OVERFLOW);
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let loader = RecordingLoader {
+            bytes: bytes.clone(),
+            reads: Arc::clone(&reads),
+        };
+        let err = match AlopexFileReader::open_with_config(
+            FileSource::IndexedDb {
+                db_name: "test".into(),
+                key: "fenced".into(),
+                length: bytes.len() as u64,
+                loader: Box::new(loader),
+            },
+            WasmReaderConfig::default(),
+        ) {
+            Ok(_) => panic!("unsupported header must be rejected before full fetch"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            err,
+            FormatError::IncompatibleVersion {
+                file: FileVersion::WAL_OVERFLOW,
+                reader: FileVersion::CURRENT,
+            }
+        );
+        assert_eq!(*reads.lock().unwrap(), vec![(0, HEADER_SIZE as u64)]);
     }
 
     #[wasm_bindgen_test]

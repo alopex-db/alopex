@@ -137,9 +137,9 @@ impl AlopexFileReader {
 
     fn open_with_max_version(path: &Path, max_version: FileVersion) -> Result<Self, FormatError> {
         let mmap = Self::map_file(path)?;
+        let header = Self::read_header(&mmap, max_version)?;
         let footer = Self::read_footer(&mmap)?;
         let section_index = Self::read_section_index(&mmap, &footer)?;
-        let header = Self::read_header(&mmap, max_version)?;
         Ok(Self {
             mmap,
             header,
@@ -329,6 +329,11 @@ impl AlopexFileReader {
     }
 
     fn from_buffer(buffer: Vec<u8>, config: WasmReaderConfig) -> Result<Self, FormatError> {
+        if buffer.len() < HEADER_SIZE {
+            return Err(FormatError::IncompleteWrite);
+        }
+        let header = Self::read_header(&buffer)?;
+
         // 閾値超過時、range_loaderがあればIndexedDB経路へフォールバック。
         if buffer.len() > config.full_load_threshold_bytes {
             let mut cfg = config;
@@ -348,10 +353,8 @@ impl AlopexFileReader {
         if buffer.len() < HEADER_SIZE + FOOTER_SIZE {
             return Err(FormatError::IncompleteWrite);
         }
-
         let footer = Self::read_footer(&buffer)?;
         let section_index = Self::read_section_index(&buffer, &footer)?;
-        let header = Self::read_header(&buffer)?;
 
         Ok(Self {
             buffer: Some(buffer),
@@ -369,6 +372,14 @@ impl AlopexFileReader {
             .range_loader
             .take()
             .ok_or(FormatError::IncompleteWrite)?;
+
+        // Reject unsupported formats before requesting the full file or its index.
+        let header_bytes = loader.load_range(0, HEADER_SIZE as u64)?;
+        let header_array: [u8; HEADER_SIZE] = header_bytes
+            .try_into()
+            .map_err(|_| FormatError::IncompleteWrite)?;
+        let header = FileHeader::from_bytes(&header_array)?;
+        header.check_compatibility(&FileVersion::CURRENT)?;
 
         // サイズが閾値未満なら全体をロードしてバッファ経路に切替
         if (length as usize) <= config.full_load_threshold_bytes {
@@ -403,14 +414,6 @@ impl AlopexFileReader {
         let total_size = 4 + count as usize * SectionEntry::SIZE;
         let index_bytes = loader.load_range(index_offset, total_size as u64)?;
         let section_index = SectionIndex::from_bytes(&index_bytes)?;
-
-        // ヘッダー取得
-        let header_bytes = loader.load_range(0, HEADER_SIZE as u64)?;
-        let header_array: [u8; HEADER_SIZE] = header_bytes
-            .try_into()
-            .map_err(|_| FormatError::IncompleteWrite)?;
-        let header = FileHeader::from_bytes(&header_array)?;
-        header.check_compatibility(&FileVersion::CURRENT)?;
 
         Ok(Self {
             buffer: None,
