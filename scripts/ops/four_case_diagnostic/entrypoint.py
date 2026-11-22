@@ -168,7 +168,8 @@ def main(argv=None):
                          sort_keys=True))
         return 0
     except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
-        code = error.args[0] if type(error) is ValueError and error.args else "PREREQUISITE"
+        code = ("MISSING_PIN" if type(error) is ValueError and
+                error.args == ("MISSING_PIN",) else "PREREQUISITE")
         print(json.dumps({"status": "failed", "error_code": code}, sort_keys=True))
         return 1
 
