@@ -308,7 +308,7 @@ def assemble(*, workspace: Path, case_id: str, source: str, outcome: str) -> dic
         raise ValueError("EVIDENCE")
     runs = []
     for run_path, paths in sorted(groups.items()):
-        lane, test_name, _stamp = run_path.split("/")
+        lane, test_name, stamp = run_path.split("/")
         required = {"run.json", "checks/summary.json"}
         if not required <= paths.keys():
             raise ValueError("EVIDENCE")
@@ -323,7 +323,7 @@ def assemble(*, workspace: Path, case_id: str, source: str, outcome: str) -> dic
                 or case_id != "perf" and perf
                 or case_id == "perf" and check["success"] and not perf):
             raise ValueError("EVIDENCE")
-        runs.append({"run": run, "metrics": metrics, "check": check,
+        runs.append({"started_at_utc": stamp, "run": run, "metrics": metrics, "check": check,
                      "performance": perf})
     if (outcome == "passed" and case_id in {"stress", "perf"}
             and not any(item["check"]["success"] for item in runs)

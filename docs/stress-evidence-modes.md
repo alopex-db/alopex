@@ -27,6 +27,10 @@ pass criteria.
 - The legacy performance reference is an exact successful scheduled artifact
   with pinned run/source/ZIP digest. Public results include baseline identity,
   current values and comparison results; no run silently seeds or changes it.
+- Case-level `execution.duration_ms` measures the guarded command, including
+  the storage supervisor. Per-run `metrics.duration_ms` measures the Rust
+  workload. Fuzz `execution.fuzz_executions` is the final libFuzzer `DONE`
+  count, parsed into a bounded integer on the runner.
 - An unknown mode, missing required public record, unexpected field or file,
   nonfinite measurement, symlink, raw text or capacity check failure stops
   publication. A passing test without its required public measurement is not
