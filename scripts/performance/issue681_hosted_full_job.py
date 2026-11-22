@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import os
 from pathlib import Path
 import stat
@@ -12,6 +14,7 @@ import issue681_hosted_build_join as build_join
 import issue681_hosted_measure_join as measure_join
 import issue681_hosted_qualify as qualify
 import issue681_hosted_rust_preflight as rust
+import issue681_public_transport as transport
 
 ERROR = "PUBLIC_JOB"
 CASE = "HNSW_PUBLIC_JOB"
@@ -35,6 +38,19 @@ def _owned(path, parent, prefix, identity):
                 stat.S_IMODE(info.st_mode) == 0o700)
         identity = (info.st_dev, info.st_ino)
     acquire._remove_owned(path, identity)
+
+
+def _public_snapshot(path):
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+                info.st_uid == os.geteuid() and
+                stat.S_IMODE(info.st_mode) == 0o600 and
+                0 < info.st_size <= transport.MAX_BYTES)
+        raw = stream.read(transport.MAX_BYTES + 1)
+        require(len(raw) == info.st_size)
+        return raw
 
 
 def execute(env, workspace: Path, task_parent: Path, home_parent: Path,
@@ -81,8 +97,14 @@ def execute(env, workspace: Path, task_parent: Path, home_parent: Path,
                 isinstance(public, Path) and public.is_relative_to(task) and
                 public.is_file() and not public.is_symlink() and
                 public.stat().st_uid == os.geteuid())
+        raw = _public_snapshot(public)
+        digest = hashlib.sha256(raw).hexdigest()
+        pins = built["pair"]["pins"]
+        require(transport.validate(raw, expected_sha256=digest,
+                                   expected_pins=pins, finish=finish) == raw)
         acquired["guard"]()
         return {"case": CASE, "outcome": "passed", "public": public,
+                "public_sha256": digest, "pins": copy.deepcopy(pins),
                 "task_root": task, "home_root": home}
     except BaseException:
         for path, parent, prefix, identity in reversed(owned):
