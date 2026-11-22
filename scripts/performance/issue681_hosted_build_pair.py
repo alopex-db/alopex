@@ -29,7 +29,7 @@ def require(value):
         raise ValueError("PUBLIC_BUILD")
 
 
-def build_pair(inputs, workspace, output_parent, *, scanner=None):
+def build_pair(inputs, output_parent, guard):
     """Return private staged bundles only after both serial arms pass."""
     staging = None
     try:
@@ -48,6 +48,7 @@ def build_pair(inputs, workspace, output_parent, *, scanner=None):
                 output_parent.resolve(strict=True) == output_parent and
                 output_parent.stat().st_uid == os.geteuid() and
                 stat.S_IMODE(output_parent.stat().st_mode) == 0o700)
+        require(type(guard) is capacity.HostStorageGuard)
         roots = [before[key] for key in ("source", "work")]
         roots += [candidate[key] for key in ("source", "work")]
         roots += [before["target"], before["parser_root"], output_parent]
@@ -57,7 +58,7 @@ def build_pair(inputs, workspace, output_parent, *, scanner=None):
                     right not in left.parents
                     for index, left in enumerate(roots)
                     for right in roots[index + 1:]))
-        guard = capacity.HostStorageGuard(workspace, scanner=scanner)
+        guard()
         staging = Path(tempfile.mkdtemp(prefix="issue681-public-", dir=output_parent))
         require(staging.stat().st_uid == os.geteuid() and
                 stat.S_IMODE(staging.stat().st_mode) == 0o700)

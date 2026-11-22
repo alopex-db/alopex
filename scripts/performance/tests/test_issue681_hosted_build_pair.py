@@ -21,6 +21,17 @@ def pin(commit, tree, binary, asset, lock):
 
 
 class HostedBuildPairTest(unittest.TestCase):
+    def guard(self, root, events=None, samples=None):
+        device = root.stat().st_dev
+
+        def scan():
+            if events is not None:
+                events.append("guard")
+            used = next(samples) if samples is not None else 20_000_000_000
+            return used, {device: 20_000_000_000}
+
+        return build.capacity.HostStorageGuard(root, scanner=scan)
+
     def inputs(self, root):
         common = {"target": root / "target", "parser_record": root / "record",
                   "parser_root": root / "parser",
@@ -47,7 +58,8 @@ class HostedBuildPairTest(unittest.TestCase):
             output_parent = root / "public-staging"
             output_parent.mkdir(mode=0o700)
             events = []
-            guard = lambda: events.append("guard")
+            guard = self.guard(root, events)
+            events.clear()
             pins = [pin("1" * 40, "2" * 40, "7" * 64, "8" * 64, "3" * 64),
                     pin("4" * 40, "5" * 40, "9" * 64, "b" * 64, "6" * 64)]
 
@@ -60,14 +72,13 @@ class HostedBuildPairTest(unittest.TestCase):
                 events.append("verify:" + path.name)
                 self.assertEqual(private_roots, (str(root),))
 
-            with mock.patch.object(build.capacity, "HostStorageGuard",
-                                   return_value=guard), \
-                 mock.patch.object(build.producer, "produce", side_effect=produce), \
+            with mock.patch.object(build.producer, "produce", side_effect=produce), \
                  mock.patch.object(build.assets, "verify", side_effect=verify):
-                result = build.build_pair(inputs, root, output_parent)
+                result = build.build_pair(inputs, output_parent, guard)
             self.assertEqual(set(result["pins"]), {"before", "candidate"})
             self.assertEqual(result["staging"].parent, output_parent)
-            self.assertEqual(events, ["guard", "1" * 40, "guard", "verify:before",
+            self.assertEqual(events, ["guard", "guard", "1" * 40,
+                                      "guard", "verify:before",
                                       "guard", "4" * 40, "guard", "verify:candidate",
                                       "guard"])
 
@@ -77,21 +88,20 @@ class HostedBuildPairTest(unittest.TestCase):
             inputs = self.inputs(root)
             output_parent = root / "public-staging"
             output_parent.mkdir(mode=0o700)
+            guard = self.guard(root)
             bad = pin("4" * 40, "5" * 40, "9" * 64, "b" * 64, "6" * 64)
             bad["parser_sha256"] = "0" * 64
-            with mock.patch.object(build.capacity, "HostStorageGuard",
-                                   return_value=lambda: None), \
-                 mock.patch.object(build.producer, "produce",
+            with mock.patch.object(build.producer, "produce",
                                    side_effect=[pin("1" * 40, "2" * 40,
                                                     "7" * 64, "8" * 64,
                                                     "3" * 64), bad]), \
                  mock.patch.object(build.assets, "verify"):
                 with self.assertRaisesRegex(ValueError, "^PUBLIC_BUILD$"):
-                    build.build_pair(inputs, root, output_parent)
+                    build.build_pair(inputs, output_parent, guard)
             self.assertFalse(any(output_parent.iterdir()))
             with self.assertRaisesRegex(ValueError, "^PUBLIC_BUILD$"):
-                build.build_pair({"before": inputs["before"]}, root,
-                                 output_parent)
+                build.build_pair({"before": inputs["before"]}, output_parent,
+                                 guard)
 
     def test_second_arm_failure_removes_first_private_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,6 +109,7 @@ class HostedBuildPairTest(unittest.TestCase):
             inputs = self.inputs(root)
             output_parent = root / "public-staging"
             output_parent.mkdir(mode=0o700)
+            guard = self.guard(root)
 
             def produce(**kwargs):
                 if kwargs["source_commit"] == "4" * 40:
@@ -108,12 +119,10 @@ class HostedBuildPairTest(unittest.TestCase):
                 return pin("1" * 40, "2" * 40, "7" * 64,
                            "8" * 64, "3" * 64)
 
-            with mock.patch.object(build.capacity, "HostStorageGuard",
-                                   return_value=lambda: None), \
-                 mock.patch.object(build.producer, "produce", side_effect=produce), \
+            with mock.patch.object(build.producer, "produce", side_effect=produce), \
                  mock.patch.object(build.assets, "verify"):
                 with self.assertRaisesRegex(ValueError, "^PUBLIC_BUILD$"):
-                    build.build_pair(inputs, root, output_parent)
+                    build.build_pair(inputs, output_parent, guard)
             self.assertFalse(any(output_parent.iterdir()))
 
     def test_cross_arm_work_cannot_overlap_a_source(self):
@@ -122,11 +131,29 @@ class HostedBuildPairTest(unittest.TestCase):
             inputs = self.inputs(root)
             output_parent = root / "public-staging"
             output_parent.mkdir(mode=0o700)
+            events = []
+            guard = self.guard(root, events)
+            events.clear()
             inputs["candidate"]["work"] = inputs["before"]["source"] / "scratch"
-            with mock.patch.object(build.capacity, "HostStorageGuard") as guard:
+            with self.assertRaisesRegex(ValueError, "^PUBLIC_BUILD$"):
+                build.build_pair(inputs, output_parent, guard)
+            self.assertEqual(events, [])
+
+    def test_acquisition_growth_consumes_same_build_allowance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            inputs = self.inputs(root)
+            output_parent = root / "public-staging"
+            output_parent.mkdir(mode=0o700)
+            guard = self.guard(root, samples=iter((20_000_000_000,
+                                                   25_000_000_000,
+                                                   28_000_000_000)))
+            guard()  # Acquisition has consumed 5 GB since the original baseline.
+            with mock.patch.object(build.producer, "produce") as produce:
                 with self.assertRaisesRegex(ValueError, "^PUBLIC_BUILD$"):
-                    build.build_pair(inputs, root, output_parent)
-            guard.assert_not_called()
+                    build.build_pair(inputs, output_parent, guard)
+            produce.assert_not_called()
+            self.assertFalse(any(output_parent.iterdir()))
 
 
 if __name__ == "__main__":
