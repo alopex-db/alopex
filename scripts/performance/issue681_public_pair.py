@@ -38,14 +38,19 @@ def _pin(pin):
     require(type(pin) is dict and set(pin) == {
         "source_commit", "source_tree", "binary_sha256", "example_sha256",
         "parser_sha256", "assets_digest", "profile", "platform",
-        "parser_contract"})
+        "parser_contract", "parser_record_sha256", "cargo_lock_sha256",
+        "rust_version", "version"})
     require(all(type(pin[name]) is str and re.fullmatch(r"[0-9a-f]{40}", pin[name])
                 for name in ("source_commit", "source_tree")) and
             all(type(pin[name]) is str and re.fullmatch(r"[0-9a-f]{64}", pin[name])
                 for name in ("binary_sha256", "example_sha256", "parser_sha256",
-                             "assets_digest")) and
+                             "assets_digest", "parser_record_sha256",
+                             "cargo_lock_sha256")) and
             pin["profile"] == "release" and pin["platform"] == "linux/amd64" and
-            pin["parser_contract"] == "0.28.0")
+            pin["parser_contract"] == "0.28.0" and
+            pin["version"] == "0.8.17" and
+            type(pin["rust_version"]) is str and
+            re.fullmatch(r"1\.[0-9]{1,3}\.[0-9]{1,3}", pin["rust_version"]))
 
 
 def _pins(pins):
@@ -55,7 +60,8 @@ def _pins(pins):
     require(pins["before"] != pins["candidate"] and
             pins["before"]["source_commit"] != pins["candidate"]["source_commit"])
     for name in ("example_sha256", "parser_sha256", "profile", "platform",
-                 "parser_contract"):
+                 "parser_contract", "parser_record_sha256", "rust_version",
+                 "version"):
         require(pins["before"][name] == pins["candidate"][name])
 
 

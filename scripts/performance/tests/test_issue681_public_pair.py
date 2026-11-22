@@ -14,11 +14,17 @@ import issue681_public_pair as pair
 PINS = {"before": {"source_commit": "a" * 40, "source_tree": "1" * 40,
                    "binary_sha256": "b" * 64, "assets_digest": "2" * 64,
                    "example_sha256": "e" * 64, "parser_sha256": "f" * 64,
+                   "parser_record_sha256": "5" * 64,
+                   "cargo_lock_sha256": "6" * 64, "rust_version": "1.96.0",
+                   "version": "0.8.17",
                    "profile": "release", "platform": "linux/amd64",
                    "parser_contract": "0.28.0"},
         "candidate": {"source_commit": "c" * 40, "source_tree": "3" * 40,
                       "binary_sha256": "d" * 64, "assets_digest": "4" * 64,
                       "example_sha256": "e" * 64, "parser_sha256": "f" * 64,
+                      "parser_record_sha256": "5" * 64,
+                      "cargo_lock_sha256": "7" * 64, "rust_version": "1.96.0",
+                      "version": "0.8.17",
                       "profile": "release", "platform": "linux/amd64",
                       "parser_contract": "0.28.0"}}
 
