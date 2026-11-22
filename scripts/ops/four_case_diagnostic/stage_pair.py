@@ -108,7 +108,7 @@ def _extra_bundle(manifest, config, proof, profile, bundle, budget, *, repo,
                   runner_temp):
     """Stage only allowlisted Python/harness files under /input/four-case."""
     required = {"__init__", "adapter", "log_parser", "operation", "oracle",
-                "runner", "worker", "supervisor", "public_timing",
+                "runner", "worker", "supervisor", "public_attribution", "public_timing",
                 "container_pair_entrypoint"}
     package = manifest.get("package_files")
     docs, product = manifest.get("docs_files"), manifest.get("product_files")

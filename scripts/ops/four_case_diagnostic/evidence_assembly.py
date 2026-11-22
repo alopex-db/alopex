@@ -13,7 +13,8 @@ import os
 from pathlib import Path
 import stat
 
-from . import adapter, audit, intake, producer, public_timing, qualification, supervisor
+from . import (adapter, audit, intake, producer, public_attribution, public_timing,
+               qualification, supervisor)
 
 
 def require(value, code="EVIDENCE_INCOMPLETE"):
@@ -99,7 +100,7 @@ def assemble_files(runs, *, lock, manifest, proof, receipt, job_id):
                 collected / "resources.json", supervisor.RESULT_BYTES)
             resource_digest = intake.digest(resource_data)
             verified = supervisor.verify_output(config, collected, identity,
-                                                resource_digest)
+                                                resource_digest, stage_mode="verify")
             pair = f"{case}-{trial}"
             files[f"resources/{pair}.json"] = resource_data
             resources[pair] = resource_digest
@@ -149,7 +150,14 @@ def seal_runs(runs, *, lock, manifest, proof, receipt, job_id,
 
 
 def assemble_public_timing(runs, destination):
-    """Join only fixed public timing cells from the verified pair collections."""
+    """Copy and verify all public timing, operation, and stage cells.
+
+    Timing elapsed_seconds is the primary client round-trip measurement.
+    Operation rows add per-call seconds, client nanosecond phases, and observed
+    client/server CPU seconds and byte counters. Stage rows contain server
+    nanosecond durations. ``paired`` is the documented timing median/MAD
+    calculation; operation and stage rows retain their measured granularity.
+    """
     expected = {(case, trial) for case in adapter.CASES for trial in range(3)}
     require(type(runs) is dict and set(runs) == expected, "TIMING_INVENTORY")
     destination = Path(destination)
@@ -158,32 +166,86 @@ def assemble_public_timing(runs, destination):
             not destination.is_symlink() and parent.is_dir() and
             not parent.is_symlink() and parent.stat().st_uid == os.geteuid() and
             stat.S_IMODE(parent.stat().st_mode) == 0o700, "TIMING_PARENT")
+    operation_destination = parent / "public-operations"
+    stage_destination = parent / "public-stages"
+    require(all(not path.exists() and not path.is_symlink() for path in
+                (operation_destination, stage_destination)), "TIMING_PARENT")
     destination.mkdir(mode=0o700)
+    operation_destination.mkdir(mode=0o700)
+    stage_destination.mkdir(mode=0o700)
     require(destination.stat().st_uid == os.geteuid() and
             stat.S_IMODE(destination.stat().st_mode) == 0o700, "TIMING_PARENT")
+    def copy_cell(source, output, bound):
+        try:
+            descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor, "rb") as stream:
+                before = os.fstat(stream.fileno())
+                require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and
+                        before.st_uid == os.geteuid() and
+                        stat.S_IMODE(before.st_mode) == 0o600 and
+                        0 < before.st_size <= bound, "PUBLIC_CELL")
+                body = stream.read(bound + 1)
+                after = os.fstat(stream.fileno())
+                require(len(body) == before.st_size and
+                        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) ==
+                        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+                        "PUBLIC_CELL")
+            output_fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                os.O_NOFOLLOW, 0o600)
+            with os.fdopen(output_fd, "wb") as stream:
+                stream.write(body)
+        except OSError as error:
+            raise ValueError("PUBLIC_CELL") from error
+
     for case in adapter.CASES:
         for trial in range(3):
             root = Path(runs[(case, trial)].root)
             require(root.is_absolute() and not root.is_symlink(), "TIMING_INVENTORY")
-            collected = root / "collected" / "public-timing"
+            collected = root / "collected"
             require(collected.is_dir() and not collected.is_symlink(), "TIMING_INVENTORY")
+            source_directories = (collected / "public-timing",
+                                  collected / "public-operations",
+                                  collected / "public-stages")
+            for directory in source_directories:
+                try:
+                    info = directory.lstat()
+                except OSError as error:
+                    raise ValueError("TIMING_INVENTORY") from error
+                require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and
+                        stat.S_IMODE(info.st_mode) == 0o700, "TIMING_INVENTORY")
+            timing_source, operation_source, stage_source = source_directories
+            timing_names = {public_timing.cell_filename(case, trial, mode)
+                            for mode in public_timing.MODES}
+            operation_names = {public_attribution.operation_filename(case, trial, mode)
+                               for mode in public_timing.MODES}
+            stage_name = public_attribution.stage_filename(case, trial)
+            require({path.name for path in timing_source.iterdir()} == timing_names and
+                    {path.name for path in operation_source.iterdir()} == operation_names and
+                    {path.name for path in stage_source.iterdir()} == {stage_name},
+                    "PUBLIC_CELL_INVENTORY")
             for mode in ("on", "off"):
                 name = public_timing.cell_filename(case, trial, mode)
-                source = collected / name
-                descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
-                with os.fdopen(descriptor, "rb") as stream:
-                    info = os.fstat(stream.fileno())
-                    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
-                            info.st_uid == os.geteuid() and
-                            0 < info.st_size <= 8_192, "TIMING_INVENTORY")
-                    body = stream.read(8_193)
-                    require(len(body) == info.st_size, "TIMING_INVENTORY")
-                output = destination / name
-                output_fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                                    os.O_NOFOLLOW, 0o600)
-                with os.fdopen(output_fd, "wb") as stream:
-                    stream.write(body)
+                copy_cell(timing_source / name, destination / name,
+                          public_timing.MAX_CELL_BYTES)
+                operation_name = public_attribution.operation_filename(case, trial, mode)
+                copy_cell(operation_source / operation_name,
+                          operation_destination / operation_name,
+                          public_attribution.MAX_OPERATION_BYTES)
+            copy_cell(stage_source / stage_name, stage_destination / stage_name,
+                      public_attribution.MAX_STAGE_BYTES)
     records = public_timing.load_timing_inventory(destination)
-    return {"schema": "alopex.sql-four-case-measurement/v1",
+    operations = public_attribution.load_operation_inventory(operation_destination)
+    stages = public_attribution.load_stage_inventory(stage_destination)
+    require(len(records) == len(operations) and all(
+        all(timing[key] == operation[key] for key in
+            ("case", "trial", "mode", "sample", "pair_ordinal")) and
+        timing["elapsed_seconds"] == operation["elapsed_seconds"]
+        for timing, operation in zip(records, operations)), "ATTRIBUTION_TIMING_JOIN")
+    return {"schema": "alopex.sql-four-case-measurement/v2",
+            "units": {"elapsed_seconds": "seconds", "client_phase": "nanoseconds",
+                      "server_stage": "nanoseconds", "cpu": "seconds",
+                      "rss": "bytes", "io": "bytes"},
+            "server_resource_aggregation": "sum_of_observed_process_counters",
             "timings": records,
-            "paired": public_timing.summarize_timing_records(records)}
+            "paired": public_timing.summarize_timing_records(records),
+            "operations": operations, "stages": stages}

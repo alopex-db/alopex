@@ -178,6 +178,70 @@ def _configure_base(base, pin):
     base.PRIVATE_STAGE = "initial"
 
 
+def export_public_qualification(base, public, budget=None):
+    """Publish only fixed qualification status; leave diagnostics local."""
+    common = {"schema", "case", "outcome", "error_code"}
+    outcome = public.get("outcome") if type(public) is dict else None
+    if outcome == "passed":
+        expected = common | {"source_commit", "asset_digest", "cases"}
+    elif outcome == "assets_verified_not_qualified":
+        expected = common | {"asset_digest"}
+    else:
+        expected = common
+    _require(type(public) is dict and set(public) == expected and
+             public.get("schema") == "alopex.hosted-test-env-qualification/v1" and
+             public.get("case") == "HOST_QUALIFICATION" and
+             type(outcome) is str and outcome in {"failed", "admitted_not_qualified",
+                         "assets_verified_not_qualified", "passed"} and
+             (type(public.get("error_code")) is str and
+              public["error_code"] in base.ERRORS if outcome == "failed" else
+              public.get("error_code") is None), "PUBLIC_OUTPUT")
+    if "asset_digest" in public:
+        _require(type(public["asset_digest"]) is str and
+                 qualification.HEX64.fullmatch(public["asset_digest"]), "PUBLIC_OUTPUT")
+    if outcome == "passed":
+        _require(type(public["source_commit"]) is str and
+                 qualification.HEX40.fullmatch(public["source_commit"]) and
+                 type(public["cases"]) is list and
+                 len(public["cases"]) == len(qualification.CASES) and
+                 all(type(row) is dict and set(row) == {"id", "status", "error_code"} and
+                     type(row["id"]) is str and row["status"] == "passed" and
+                     row["error_code"] is None for row in public["cases"]) and
+                 {row.get("id") for row in public["cases"] if type(row) is dict} ==
+                 qualification.CASES, "PUBLIC_OUTPUT")
+    body = (json.dumps(public, sort_keys=True, separators=(",", ":"),
+                       ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
+    _require(0 < len(body) <= 4096, "PUBLIC_OUTPUT")
+    if budget is not None:
+        budget.before("collect")
+    if base.EXPECTED_TEMP_SNAPSHOT is not None:
+        base.verify_temp_snapshot(base.EXPECTED_TEMP_SNAPSHOT)
+    export = Path(base.EXPORT)
+    _require(export.is_absolute() and not export.is_symlink(), "PUBLIC_OUTPUT")
+    export.mkdir(mode=0o700, exist_ok=True)
+    info = export.lstat()
+    _require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and
+             stat.S_IMODE(info.st_mode) == 0o700 and
+             {path.name for path in export.iterdir()} <= {"public.json"}, "PUBLIC_OUTPUT")
+    target = export / "public.json"
+    if target.exists() or target.is_symlink():
+        info = target.lstat()
+        _require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
+                 stat.S_IMODE(info.st_mode) == 0o600, "PUBLIC_OUTPUT")
+    pending = export / ".public.pending"
+    fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if budget is not None:
+            budget.check()
+        pending.replace(target)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv not in (["--admission-only"], ["--acquire-assets"], ["--execute"]):
@@ -249,7 +313,7 @@ def main(argv=None):
         return_code = 0
     except BaseException as error:
         code = error.code if base is not None and isinstance(error, base.Failure) else "INTERNAL"
-        public["error_code"] = code
+        public["error_code"] = code if base is not None and code in base.ERRORS else "INTERNAL"
         return_code = 1
         if base is not None and "private" in locals():
             base.atomic_json(private / "failure.private.json", {
@@ -258,8 +322,9 @@ def main(argv=None):
                 "traceback": "".join(traceback.format_exception(error))[:8192]})
     if base is not None and "private" in locals():
         try:
-            base.encrypt_evidence(private, public,
-                                  base.Budget(facts["storage"]) if "facts" in locals() else None)
+            export_public_qualification(
+                base, public,
+                base.Budget(facts["storage"]) if "facts" in locals() else None)
         except BaseException:
             return 1
     print(json.dumps({"case": "HOST_QUALIFICATION", "outcome": public["outcome"],

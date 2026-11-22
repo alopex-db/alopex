@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 import sys
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -18,28 +17,71 @@ from four_case_diagnostic.test_qualification import fixture, JOB
 class FourCaseJobTests(unittest.TestCase):
     @staticmethod
     def timing_fixture(private, job_id):
-        from four_case_diagnostic import adapter, public_timing
-        root = private / "public-timing"
-        root.mkdir(mode=0o700)
+        from four_case_diagnostic import (adapter, log_parser, public_attribution,
+                                          public_timing)
+        from four_case_diagnostic.test_log_parser import pair
+        timing_root = private / "public-timing"
+        operation_root = private / "public-operations"
+        stage_root = private / "public-stages"
+        for root in (timing_root, operation_root, stage_root):
+            root.mkdir(mode=0o700)
         for case in adapter.CASES:
             for trial in range(3):
                 collected = (private / f"{case}-{trial}" / "owned-runs" /
                              f"f712-{job_id}-{case}-{trial}" / "collected")
+                clients, lines = pair(case)
+                collected.mkdir(parents=True, mode=0o700)
+                for directory in (private / f"{case}-{trial}",
+                                  private / f"{case}-{trial}" / "owned-runs",
+                                  collected.parent, collected):
+                    directory.chmod(0o700)
+                log = collected / "server.log"
+                log.write_text("".join(lines))
+                log.chmod(0o600)
                 for mode in ("on", "off"):
                     destination = collected / mode
-                    destination.mkdir(parents=True, mode=0o700)
-                    for directory in (private / f"{case}-{trial}",
-                                      private / f"{case}-{trial}" / "owned-runs",
-                                      collected.parent, collected, destination):
-                        directory.chmod(0o700)
+                    destination.mkdir(mode=0o700)
+                    for client in clients[mode]:
+                        client["trial"] = trial
+                        client["cell_id"] = f"{case}-{trial}-{mode}"
+                        if client["phase"] == "measured":
+                            sample = client["sample"]
+                            client["pair_ordinal"] = 2 * sample + \
+                                adapter.pair_order(trial, sample).index(mode)
+                            client["outer_ns"] = 11_000_000 if mode == "on" else 10_000_000
+                            if mode == "on":
+                                client.update({"bind_ns": 1, "transport_ns": 2,
+                                               "parse_ns": 1, "rows_ns": 1,
+                                               "residual_ns": 1, "total_ns": 6,
+                                               "response_chars": 12, "result_rows": 1})
+                    path = destination / "client.ndjson"
+                    path.write_text("".join(json.dumps(row) + "\n" for row in clients[mode]))
+                    path.chmod(0o600)
                     rows = []
-                    with public_timing.TimingCellWriter(root, case, trial, mode) as writer:
+                    with public_timing.TimingCellWriter(timing_root, case, trial, mode) as writer, \
+                         public_attribution.OperationCellWriter(
+                             operation_root, case, trial, mode) as attribution:
                         for sample in range(21):
                             ordinal = 2 * sample + adapter.pair_order(trial, sample).index(mode)
                             seconds = .011 if mode == "on" else .010
+                            counters = {"user_cpu_seconds": .1, "system_cpu_seconds": .2,
+                                        "rss_before_bytes": 1024, "rss_after_bytes": 2048,
+                                        "read_bytes": 0, "write_bytes": 0,
+                                        "cancelled_write_bytes": 0}
+                            resource = {"schema": "alopex.sql-operation-resources/v1",
+                                        "status": "observed",
+                                        "coverage": "stable_pid_namespace_allocation",
+                                        "manifest_sha256": "a" * 64,
+                                        "client": {"pid": 101, "start_ticks": 301, **counters},
+                                        "server_processes": [{"pid": 201,
+                                                              "start_ticks": 401, **counters}]}
                             writer.append(sample, ordinal, seconds)
+                            attribution.append(sample, ordinal, seconds,
+                                next(row for row in clients[mode]
+                                     if row["phase"] == "measured" and row["sample"] == sample)
+                                if mode == "on" else None, resource)
                             rows.append({"sample": sample, "seconds": seconds,
-                                         "pair_ordinal": ordinal, "resources": {}})
+                                         "pair_ordinal": ordinal, "resources": resource})
                     raw = b"".join((json.dumps(row) + "\n").encode() for row in rows)
                     path = destination / "raw.ndjson"
                     path.write_bytes(raw)
@@ -50,6 +92,10 @@ class FourCaseJobTests(unittest.TestCase):
                     path = destination / "measurement.json"
                     path.write_text(json.dumps(cell))
                     path.chmod(0o600)
+                events = log_parser.parse_server_timing(
+                    log, case, trial, clients["on"], clients["off"])
+                public_attribution.write_stage_cell(
+                    stage_root, case, trial, clients["on"], events)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -67,7 +113,8 @@ class FourCaseJobTests(unittest.TestCase):
                     "package_files": {f"four_case_diagnostic/{name}.py": "b" * 64
                                       for name in ("__init__", "adapter",
                                                    "container_pair_entrypoint", "log_parser",
-                                                   "operation", "oracle", "public_timing", "runner",
+                                                   "operation", "oracle", "public_attribution",
+                                                   "public_timing", "runner",
                                                    "supervisor", "worker")},
                     "docs_files": {"subject_identity.py": "c" * 64,
                                    "sql_resources.py": "d" * 64},
@@ -101,7 +148,7 @@ class FourCaseJobTests(unittest.TestCase):
             job.install_inputs(self.env)
         self.assertFalse((self.root / "alopex-712-lock").exists())
 
-    def test_workflow_routes_only_four_case_lane_and_uploads_only_cms(self):
+    def test_workflow_routes_only_four_case_lane_and_uploads_only_public_json(self):
         source = (REPO / ".github/workflows/alopex-performance.yml").read_text()
         qualification = source.split("  qualification:\n", 1)[1].split(
             "  wal_cost_682:\n", 1)[0]
@@ -110,8 +157,12 @@ class FourCaseJobTests(unittest.TestCase):
                           qualification)
         self.assertIn("scripts/ops/four_case_job.py install", qualification)
         self.assertIn("scripts/ops/four_case_job.py run", qualification)
-        self.assertIn("scripts/ops/four_case_job.py seal", qualification)
+        self.assertIn("scripts/ops/four_case_job.py export", qualification)
         self.assertIn("scripts/ops/four_case_job.py verify-public", qualification)
+        self.assertIn("Publish public four-case qualification", qualification)
+        self.assertIn("path: native-qualification-export/public.json", qualification)
+        self.assertIn("if: always() && !inputs.sql_four_case_mode", qualification)
+        self.assertIn("steps.four_case_qualification.outcome == 'success'", qualification)
         verify_step = qualification.split(
             "      - name: Verify four-case public measurement\n", 1)[1].split(
                 "      - name:", 1)[0]
@@ -119,8 +170,8 @@ class FourCaseJobTests(unittest.TestCase):
                       verify_step)
         self.assertIn("steps.matrix_public.outcome == 'success'", qualification)
         self.assertNotIn("scripts/ops/same_job_four_case.py", qualification)
-        self.assertIn("native-sql-four-case-export/private-evidence.cms",
-                      qualification)
+        self.assertNotIn("native-sql-four-case-export/private-evidence.cms",
+                         qualification)
         self.assertIn("native-sql-four-case-export/public.json", qualification)
         self.assertNotIn("native-sql-four-case-export/\n", qualification)
         self.assertIn("if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}",
@@ -133,76 +184,59 @@ class FourCaseJobTests(unittest.TestCase):
             path = private / f"member-{index}.json"
             path.write_text("{}")
             path.chmod(0o600)
-        cert = self.root / "cert.pem"
-        cert.write_bytes(b"test certificate")
         checks = []
         def capacity(root, extra):
             checks.append(extra)
             return {"stop_bytes": 40_000_000_000}
-        def encrypt(argv, **kwargs):
-            Path(argv[argv.index("-out") + 1]).write_bytes(b"ciphertext")
-            return SimpleNamespace(returncode=0)
         with patch.object(job, "REPO", self.root), \
-             patch.object(job, "CERT", cert), \
-             patch.object(job, "CERT_SHA256", hashlib.sha256(cert.read_bytes()).hexdigest()), \
-             patch.object(job, "_capacity_before_seal", side_effect=capacity), \
-             patch.object(job.subprocess, "run", side_effect=encrypt):
-            public = job.seal_job(self.env)
-        self.assertEqual(public["status"], "sealed")
+             patch.object(job, "_capacity_before_seal", side_effect=capacity):
+            public = job.prepare_public_export(self.env)
+        self.assertEqual(public["status"], "prepared")
         self.assertEqual(public["matrix_status"], "failed")
         self.assertEqual(public["matrix_error_code"], "INCOMPLETE")
-        self.assertEqual(len(checks), 3)
-        self.assertTrue((self.root / "native-sql-four-case-export/private-evidence.cms").is_file())
-        self.assertFalse((private / "evidence.tar.gz").exists())
+        self.assertEqual(len(checks), 1)
+        self.assertEqual({path.name for path in
+                          (self.root / "native-sql-four-case-export").iterdir()},
+                         {"public.json"})
 
-    def test_seal_removes_plaintext_when_archive_creation_fails(self):
+    def test_seal_rejects_unreviewed_export_file(self):
         private = self.root / job.MATRIX_DIR
         private.mkdir(mode=0o700)
         member = private / "receipt.private.json"
         member.write_text("{}")
         member.chmod(0o600)
-        cert = self.root / "cert.pem"
-        cert.write_bytes(b"test certificate")
-
+        export = self.root / "native-sql-four-case-export"
+        export.mkdir(mode=0o700)
+        (export / "private-evidence.cms").write_bytes(b"private")
         with patch.object(job, "REPO", self.root), \
-             patch.object(job, "CERT", cert), \
-             patch.object(job, "CERT_SHA256", hashlib.sha256(cert.read_bytes()).hexdigest()), \
-             patch.object(job, "_capacity_before_seal", return_value={}), \
-             patch.object(job.tarfile.TarFile, "add", side_effect=OSError("archive write failed")), \
-             self.assertRaisesRegex(OSError, "archive write failed"):
-            job.seal_job(self.env)
-        self.assertFalse((private / "evidence.tar.gz").exists())
-        self.assertFalse((self.root / "native-sql-four-case-export/private-evidence.cms").exists())
+             self.assertRaisesRegex(ValueError, "EVIDENCE_STATE"):
+            job.prepare_public_export(self.env)
+        self.assertFalse((export / "public.json").exists())
 
-    def test_passed_matrix_exports_only_strict_verified_cms(self):
-        from four_case_diagnostic import intake
+    def test_passed_matrix_exports_only_verified_public_measurement(self):
         private = self.root / job.MATRIX_DIR
         private.mkdir(mode=0o700)
-        strict = private / "strict-evidence.cms"
-        strict.write_bytes(b"strict cms bytes")
-        strict.chmod(0o600)
         self.env["GITHUB_RUN_ID"] = JOB
         self.timing_fixture(private, JOB)
-        cert = self.root / "cert.pem"
-        cert.write_bytes(b"test certificate")
         with patch.object(job, "REPO", self.root), \
-             patch.object(job, "CERT", cert), \
-             patch.object(job, "CERT_SHA256", hashlib.sha256(cert.read_bytes()).hexdigest()), \
              patch.object(job, "_matrix_outcome", return_value={
                  "matrix_status": "passed", "matrix_error_code": None}), \
-             patch.object(job, "_capacity_before_seal", return_value={}) as capacity, \
-             patch.object(job.tarfile, "open") as archive, \
-             patch.object(job.subprocess, "run") as encrypt:
-            public = job.seal_job(self.env)
-        self.assertEqual(public["evidence_schema"], intake.SCHEMA)
-        self.assertEqual(public["ciphertext_size"], len(strict.read_bytes()))
-        self.assertEqual(public["ciphertext_sha256"], hashlib.sha256(strict.read_bytes()).hexdigest())
+             patch.object(job, "_capacity_before_seal", return_value={}) as capacity:
+            public = job.prepare_public_export(self.env)
+        self.assertNotIn("ciphertext_sha256", public)
         self.assertEqual(public["matrix_status"], "passed")
         self.assertEqual(len(public["measurement"]["timings"]), 504)
+        self.assertEqual(len(public["measurement"]["operations"]), 504)
+        self.assertEqual(len(public["measurement"]["stages"]), 1764)
+        self.assertLessEqual((self.root / "native-sql-four-case-export/public.json").stat().st_size,
+                             job.MAX_PUBLIC_BYTES)
         self.assertEqual(set(public["measurement"]["paired"]),
                          set(job.controller.adapter.CASES))
-        self.assertEqual((self.root / "native-sql-four-case-export/private-evidence.cms").read_bytes(),
-                         strict.read_bytes())
+        self.assertNotIn('"trace_id"', json.dumps(public))
+        self.assertNotIn('"pid"', json.dumps(public))
+        self.assertEqual({path.name for path in
+                          (self.root / "native-sql-four-case-export").iterdir()},
+                         {"public.json"})
         with patch.object(job, "REPO", self.root), \
              patch.object(job, "_matrix_outcome", return_value={
                  "matrix_status": "passed", "matrix_error_code": None}):
@@ -215,6 +249,7 @@ class FourCaseJobTests(unittest.TestCase):
                 job.verify_public_export(self.env)
             public_path.write_text(json.dumps(public, sort_keys=True) + "\n")
             timing_path = private / "public-timing" / "aggregate-trial-0-on.jsonl"
+            original_timing = timing_path.read_bytes()
             lines = timing_path.read_text().splitlines()
             altered = json.loads(lines[0])
             altered["elapsed_seconds"] = .012
@@ -222,26 +257,57 @@ class FourCaseJobTests(unittest.TestCase):
             timing_path.write_text("\n".join(lines) + "\n")
             with self.assertRaisesRegex(ValueError, "PUBLIC_OUTPUT"):
                 job.verify_public_export(self.env)
+            timing_path.write_bytes(original_timing)
+            operation_path = private / "public-operations" / "aggregate-trial-0-on.jsonl"
+            original_operation = operation_path.read_bytes()
+            lines = operation_path.read_text().splitlines()
+            altered = json.loads(lines[0])
+            altered["client_user_cpu_seconds"] += .01
+            lines[0] = json.dumps(altered, separators=(",", ":"))
+            operation_path.write_text("\n".join(lines) + "\n")
+            with self.assertRaisesRegex(ValueError, "PUBLIC_OUTPUT"):
+                job.verify_public_export(self.env)
+            operation_path.write_bytes(original_operation)
+            client_path = (private / "aggregate-0" / "owned-runs" /
+                           f"f712-{JOB}-aggregate-0" / "collected" / "on" /
+                           "client.ndjson")
+            original_client = client_path.read_bytes()
+            lines = client_path.read_text().splitlines()
+            changed = False
+            for index, line in enumerate(lines):
+                row = json.loads(line)
+                if row["phase"] == "measured" and row["sample"] == 0:
+                    row["outer_ns"] += 1
+                    lines[index] = json.dumps(row)
+                    changed = True
+                    break
+            self.assertTrue(changed)
+            client_path.write_text("\n".join(lines) + "\n")
+            with self.assertRaisesRegex(ValueError, "PUBLIC_OUTPUT"):
+                job.verify_public_export(self.env)
+            client_path.write_bytes(original_client)
+            stage_path = private / "public-stages" / "aggregate-trial-0-stages.jsonl"
+            lines = stage_path.read_text().splitlines()
+            altered = json.loads(lines[0])
+            altered["duration_ns"] += 1
+            lines[0] = json.dumps(altered, separators=(",", ":"))
+            stage_path.write_text("\n".join(lines) + "\n")
+            with self.assertRaisesRegex(ValueError, "PUBLIC_OUTPUT"):
+                job.verify_public_export(self.env)
         self.assertEqual(capacity.call_count, 1)
-        archive.assert_not_called()
-        encrypt.assert_not_called()
 
-    def test_passed_matrix_without_strict_evidence_fails_closed(self):
+    def test_passed_matrix_without_public_inventory_fails_closed(self):
         private = self.root / job.MATRIX_DIR
         private.mkdir(mode=0o700)
         receipt = private / "receipt.public.json"
         receipt.write_text("{}")
         receipt.chmod(0o600)
-        cert = self.root / "cert.pem"
-        cert.write_bytes(b"test certificate")
         with patch.object(job, "REPO", self.root), \
-             patch.object(job, "CERT", cert), \
-             patch.object(job, "CERT_SHA256", hashlib.sha256(cert.read_bytes()).hexdigest()), \
              patch.object(job, "_matrix_outcome", return_value={
                  "matrix_status": "passed", "matrix_error_code": None}), \
-             self.assertRaisesRegex(ValueError, "EVIDENCE_BOUND"):
-            job.seal_job(self.env)
-        self.assertFalse((self.root / "native-sql-four-case-export/private-evidence.cms").exists())
+             self.assertRaises(ValueError):
+            job.prepare_public_export(self.env)
+        self.assertFalse((self.root / "native-sql-four-case-export/public.json").exists())
 
     def test_run_attests_once_then_stages_docs_once_for_twelve_pairs(self):
         from four_case_diagnostic import docs_stage, evidence_assembly
@@ -268,14 +334,10 @@ class FourCaseJobTests(unittest.TestCase):
             order.append("pair")
             return Run(output)
 
-        cert = self.root / "cert.pem"
-        cert.write_bytes(b"test certificate")
-        with patch.object(job, "CERT", cert), \
-             patch.object(job, "CERT_SHA256", hashlib.sha256(cert.read_bytes()).hexdigest()), \
-             patch.object(job, "_capacity_before_seal", return_value={}), \
+        with patch.object(job, "_capacity_before_seal", return_value={}), \
              patch.object(evidence_assembly, "assemble_public_timing",
                           side_effect=lambda *a, **kw: order.append("public")), \
-             patch.object(evidence_assembly, "seal_runs",
+             patch.object(evidence_assembly, "assemble_files",
                           side_effect=lambda *a, **kw: order.append("assemble")) as assembled, \
              patch.object(job.entrypoint, "attest_current_job", side_effect=attest) as attested, \
              patch.object(job.entrypoint, "controller_operations", return_value={}), \
@@ -320,6 +382,18 @@ class FourCaseJobTests(unittest.TestCase):
             path.write_text(json.dumps(value))
             path.chmod(0o600)
 
+        def save_failure(code, count):
+            private_receipt = {"schema": job.controller.SCHEMA,
+                               "status": "failed", "error_code": code,
+                               "pair_count": count,
+                               "performance_qualification": False}
+            raw = json.dumps(private_receipt, sort_keys=True).encode()
+            inner = private / "receipt.private.json"
+            inner.write_bytes(raw)
+            inner.chmod(0o600)
+            save({**private_receipt, "run_attempt": "3",
+                  "private_receipt_sha256": hashlib.sha256(raw).hexdigest()})
+
         save({"schema": job.controller.SCHEMA, "status": "passed",
               "performance_qualification": False, "job_id": JOB,
               "run_attempt": "2", "qualification_binding_sha256": "a" * 64})
@@ -328,6 +402,7 @@ class FourCaseJobTests(unittest.TestCase):
                 "assets_digest": pin["assets_digest"]}) as verified:
             self.assertEqual(job._matrix_outcome(private, self.env), {
                 "matrix_status": "passed", "matrix_error_code": None,
+                "completed_pairs": 12,
                 **{key: pin[key] for key in
                    ("source_commit", "source_tree", "artifact_id", "artifact_sha256",
                     "server_sha256", "wheel_sha256", "assets_digest")}})
@@ -336,20 +411,28 @@ class FourCaseJobTests(unittest.TestCase):
                 "source_commit": pin["source_commit"],
                 "assets_digest": "b" * 64}):
             self.assertEqual(job._matrix_outcome(private, self.env), {
-                "matrix_status": "failed", "matrix_error_code": "INCOMPLETE"})
+                "matrix_status": "failed", "matrix_error_code": "INCOMPLETE",
+                "completed_pairs": None})
         self.env["GITHUB_RUN_ATTEMPT"] = "3"
         self.assertEqual(job._matrix_outcome(private, self.env), {
-            "matrix_status": "failed", "matrix_error_code": "INCOMPLETE"})
-        save({"schema": job.controller.SCHEMA, "status": "failed",
-              "performance_qualification": False, "run_attempt": "3",
-              "error_code": "PAIR_FAILED"})
+            "matrix_status": "failed", "matrix_error_code": "INCOMPLETE",
+            "completed_pairs": None})
+        save_failure("PAIR_FAILED", 7)
         self.assertEqual(job._matrix_outcome(private, self.env), {
-            "matrix_status": "failed", "matrix_error_code": "PAIR_FAILED"})
+            "matrix_status": "failed", "matrix_error_code": "PAIR_FAILED",
+            "completed_pairs": 7})
+        tampered = json.loads(path.read_text())
+        tampered["pair_count"] = 8
+        save(tampered)
+        self.assertEqual(job._matrix_outcome(private, self.env), {
+            "matrix_status": "failed", "matrix_error_code": "INCOMPLETE",
+            "completed_pairs": None})
         save({"schema": job.controller.SCHEMA, "status": "failed",
               "performance_qualification": False, "run_attempt": "3",
               "error_code": "private detail"})
         self.assertEqual(job._matrix_outcome(private, self.env), {
-            "matrix_status": "failed", "matrix_error_code": "INCOMPLETE"})
+            "matrix_status": "failed", "matrix_error_code": "INCOMPLETE",
+            "completed_pairs": None})
 
 
 if __name__ == "__main__":

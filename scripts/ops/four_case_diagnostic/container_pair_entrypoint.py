@@ -196,7 +196,7 @@ def main():
         supervisor.require(not supervisor._clear_group(child.pid), "WORKER_ORPHAN")
         supervisor.verify_output(config, output,
             {"pid": server_identity["pid"], "start_ticks": server_identity["start_ticks"]},
-            digest(output / "resources.json"))
+            digest(output / "resources.json"), stage_mode="create")
     finally:
         if child is not None and child.poll() is None:
             supervisor._terminate_worker(child)

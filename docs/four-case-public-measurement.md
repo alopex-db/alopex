@@ -11,16 +11,18 @@ the fixed paired formula. It does not qualify product performance.
 | Use case | Actor and trigger | Inputs | Output and exposure | Failure behavior | Acceptance check |
 | --- | --- | --- | --- | --- | --- |
 | Public timing | Release operator starts the fixed four-case job | Exact source and subject identities; fixed case, trial, mode and pair order | Every timed call immediately creates one typed public timing row with case, trial, mode, sample, pair ordinal and elapsed seconds | Missing, duplicate, nonfinite or misordered rows prevent a passing public result | The 24 fixed cells contain 504 valid timing rows and match the measured operations |
-| Public review | Reader opens the completed artifact | The 504 timing rows and fixed paired formula | Case-level `D_ms`, `MAD_ms`, `U_ms`, `bound_ms`, three `delta_ms` and `trial_U_ms`, and `small_overhead` | Failure is reported with a fixed code and without a complete-measurement claim | The reader can recompute the comparisons from the published rows |
-| Private integrity audit | CI verifier checks the run before upload | Detailed client, server and resource records plus public timing rows | Owner-only audit of source, operation and timing consistency | Mismatch stops upload | Every public row agrees with the corresponding verified private measurement |
+| Public operation attribution | Release operator starts the fixed four-case job | Measured client callbacks, per-operation resource observer and joined server stages | 504 operation rows with client/server CPU, RSS and I/O; on-mode client phases; 1,764 server-stage rows | Missing, duplicate or nonnumeric attribution prevents a passing public result | Every operation row joins the timing row; all 252 on-mode measured calls have seven route-appropriate stages |
+| Public review | Reader opens the completed artifact | Timing, operation and stage rows plus the paired formula | Case-level `D_ms`, `MAD_ms`, `U_ms`, `bound_ms`, three `delta_ms` and `trial_U_ms`, `small_overhead`, and numeric phase/resource attribution | Failure is reported with a fixed code and without a complete-measurement claim | The reader can recompute comparisons and phase/resource summaries from the published rows |
+| Private integrity audit | CI verifier checks the run before upload | Detailed client, server and resource records plus public rows | Owner-only audit of source, operation, stage and timing consistency | Mismatch stops upload | Every public value agrees with the corresponding verified private observation at final export |
 | Local diagnosis | Developer explicitly uses a local debug path | Same workload and owner-only diagnostic destination | Detailed traces stay local | Retain failure context for investigation | Debug records and arbitrary local text are rejected by the public upload boundary |
 
 The pair runner selects `public` or `debug` before connecting to the server.
 The hosted worker explicitly selects `public`; this mode requires the fixed
-public timing root and writes a typed row at every timed call. A developer may
+public timing and operation roots and writes typed rows at every timed call.
+Fixed server-stage rows are projected after the private trace join. A developer may
 select `debug` only outside GitHub Actions, with two raw paths under an
 owner-only local debug root. Debug mode writes detailed raw rows and produces
-no public timing files. Unknown modes, a mixed public/debug destination, or a
+no public measurement files. Unknown modes, a mixed public/debug destination, or a
 debug request in CI fail before the workload starts. The public uploader
 accepts neither a debug root nor raw records.
 
@@ -31,19 +33,40 @@ The timing writer emits canonical JSONL with exactly `schema`, `case`,
 are fixed enums. Trial, sample and ordinal are bounded integers, and elapsed
 seconds is finite and nonnegative. The writer creates distinct, exclusive
 files for each case/trial/mode and records a value immediately after its
-timed operation. Resource observations and private raw output have a separate
-writer.
+timed operation. The operation writer accepts only fixed numeric client
+callback and resource counters. Both modes contain per-call client/server user
+and system CPU seconds, RSS before/after bytes, and read/write/cancelled-write
+bytes. On-mode rows also contain `bind_ns`, `transport_ns`, `parse_ns`,
+`rows_ns`, `residual_ns`, `total_ns`, `response_chars` and `result_rows`.
+Server counters sum the observed process tree; summed RSS is not unique
+physical memory. The seven server stages are nanosecond durations per on-mode
+measured call. Insert/rollback uses session setup/completion; the other cases
+use transaction setup and completion/commit. Stages may not sum to client
+round-trip time. No public row accepts a trace ID, PID, machine path, hostname,
+raw log or arbitrary exception text.
 
-The successful `public.json` contains the complete timing inventory, the
-computed paired comparison, fixed source and subject digests, and outcome fields. The uploader
-rebuilds the expected public object from the typed timing inventory and
+The successful `public.json` contains complete timing, operation and stage
+inventories, declared units and server aggregation semantics, the computed
+paired comparison, fixed source and subject digests, and outcome fields. The uploader
+rebuilds the expected public object from the typed inventories and
 requires exact canonical bytes. It rejects extra fields, files and text.
-The private audit checks each public elapsed value and ordinal against the
-same operation's raw record before publication and again at the final export
-boundary. The fixed subject digests are checked against the independently
-pinned lock. The public timing writer belongs to both the pinned operator
-inventory and the staged package inventory. `performance_qualification`
+On failure, `measurement` is null, the error code is fixed, and
+`completed_pairs` records the verified pair count when a valid controller
+receipt exists. A missing or invalid receipt yields null rather than an
+invented count.
+The private audit checks public timing, phases, resource counters and server
+stages against the same operation's collected observations before publication
+and again at final export. The fixed subject digests are checked against the
+independently pinned lock. The public writers belong to both the pinned
+operator inventory and staged package inventory. `performance_qualification`
 remains `false` until the separate product-performance acceptance gate passes.
+The hosted public job runs the independent full-cell audit locally and uploads
+only `public.json`. Its owner-only raw records and server logs are outside the
+publication artifact. The public job has no recipient certificate or private
+decryption-key requirement.
+The prerequisite #804 qualification for this mode likewise publishes only
+fixed status and case outcomes as public JSON; its detailed diagnostics stay
+local. Other qualification modes have separate evidence contracts.
 
 ## Remaining acceptance work
 

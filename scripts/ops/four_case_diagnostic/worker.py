@@ -180,10 +180,16 @@ def run_pair(config, *, subject, observer, parity, connect, remote_type, txn_mod
     require(not timing_root.exists() and not timing_root.is_symlink(), "TIMING_ROOT")
     timing_root.mkdir(mode=0o700)
     timing_root.chmod(0o700)
+    operation_root = output.resolve() / "public-operations"
+    require(not operation_root.exists() and not operation_root.is_symlink(),
+            "OPERATION_ROOT")
+    operation_root.mkdir(mode=0o700)
+    operation_root.chmod(0o700)
     summaries, clients = runner.measure_pair(parity, config["case"], config["trial"],
         {mode: paths[mode]["raw"] for mode in ("on", "off")}, connect=connect,
         remote_type=remote_type, url=server["url"], txn_mode=txn_mode,
-        observer=observer, timing_root=timing_root, evidence_mode="public")
+        observer=observer, timing_root=timing_root, operation_root=operation_root,
+        evidence_mode="public")
     require(type(summaries) is dict and set(summaries) == {"on", "off"} and
             type(clients) is dict and set(clients) == {"on", "off"}, "PAIR_RESULT")
     identity = (server["pid"], server["start_ticks"])

@@ -13,7 +13,7 @@ import stat
 import statistics
 import time
 
-from . import adapter, operation, oracle, public_timing
+from . import adapter, operation, oracle, public_attribution, public_timing
 
 PAIR_LIMIT_SECONDS = 420
 
@@ -40,7 +40,7 @@ def _open_private_raw(path):
 
 
 def measure_pair(module, case, trial, raw_paths, *, connect, remote_type, url,
-                 txn_mode=None, observer=None, timing_root=None,
+                 txn_mode=None, observer=None, timing_root=None, operation_root=None,
                  pair_limit_seconds=PAIR_LIMIT_SECONDS, evidence_mode="public",
                  debug_root=None):
     """Return per-mode summaries and callback records; write 21 raw rows each.
@@ -62,10 +62,10 @@ def measure_pair(module, case, trial, raw_paths, *, connect, remote_type, url,
     if case == "insert-rollback" and txn_mode is None:
         raise ValueError("TXN_MODE")
     if evidence_mode == "public":
-        if timing_root is None or debug_root is not None:
+        if timing_root is None or operation_root is None or debug_root is not None:
             raise ValueError("TIMING_ROOT")
     elif evidence_mode == "debug":
-        if timing_root is not None or debug_root is None or \
+        if timing_root is not None or operation_root is not None or debug_root is None or \
                 os.environ.get("GITHUB_ACTIONS") == "true" or \
                 os.environ.get("CI") == "true":
             raise ValueError("DEBUG_MODE")
@@ -117,6 +117,9 @@ def measure_pair(module, case, trial, raw_paths, *, connect, remote_type, url,
             timing = ({mode: opened.enter_context(public_timing.TimingCellWriter(
                 timing_root, case, trial, mode)) for mode in clients}
                       if evidence_mode == "public" else {})
+            attribution = ({mode: opened.enter_context(
+                public_attribution.OperationCellWriter(operation_root, case, trial, mode))
+                for mode in clients} if evidence_mode == "public" else {})
             for index in range(21):
                 for position, mode in enumerate(adapter.pair_order(trial, index)):
                     deadline()
@@ -137,6 +140,10 @@ def measure_pair(module, case, trial, raw_paths, *, connect, remote_type, url,
                         streams[mode].write(json.dumps(row, allow_nan=False) + "\n")
                         streams[mode].flush()
                         raise
+                    if evidence_mode == "public":
+                        attribution[mode].append(index, ordinal, elapsed,
+                            cells[mode].calls[-1] if mode == "on" else None,
+                            row["resources"])
                     streams[mode].write(json.dumps(row, allow_nan=False) + "\n")
                     streams[mode].flush()
                     cells[mode].finalize_result(value)

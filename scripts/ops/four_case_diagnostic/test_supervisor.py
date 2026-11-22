@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from . import adapter, oracle, public_timing, supervisor
+from . import adapter, oracle, public_attribution, public_timing, supervisor
 from .test_log_parser import pair
 
 
@@ -60,11 +60,14 @@ class SupervisorTests(unittest.TestCase):
         (self.package / "worker.py").chmod(0o600)
         (self.package / "public_timing.py").write_text("# staged by trusted caller\n")
         (self.package / "public_timing.py").chmod(0o600)
+        (self.package / "public_attribution.py").write_text("# staged by trusted caller\n")
+        (self.package / "public_attribution.py").chmod(0o600)
         (self.package / "__init__.py").write_text("")
         (self.package / "__init__.py").chmod(0o600)
         self.package_files = {f"four_case_diagnostic/{name}":
                               supervisor.digest((self.package / name).read_bytes())
-                              for name in ("__init__.py", "worker.py", "public_timing.py")}
+                              for name in ("__init__.py", "worker.py", "public_timing.py",
+                                           "public_attribution.py")}
         self.subject = self.root / "subject.json"
         private_json(self.subject, {"source": SOURCE, "server": dict(IDENTITY, url=ENDPOINT)})
         self.resource = self.root / "resources.json"
@@ -87,12 +90,18 @@ class SupervisorTests(unittest.TestCase):
         clients, lines = pair(case)
         timing_root = self.output / "public-timing"
         timing_root.mkdir(mode=0o700, exist_ok=True)
+        operation_root = self.output / "public-operations"
+        operation_root.mkdir(mode=0o700, exist_ok=True)
         for mode in ("on", "off"):
             for row in clients[mode]:
                 if row["phase"] == "measured":
                     index = row["sample"]
                     row["outer_ns"] = round(0.001 * (index + 1) * 1_000_000_000)
                     row["pair_ordinal"] = 2 * index + adapter.pair_order(0, index).index(mode)
+                    if mode == "on":
+                        row.update({"bind_ns": 1, "transport_ns": 2, "parse_ns": 1,
+                                    "rows_ns": 1, "residual_ns": 1, "total_ns": 6,
+                                    "response_chars": 12, "result_rows": 1})
         if not omit_log:
             path = self.output / "server.log"
             path.write_text("".join(lines))
@@ -110,7 +119,9 @@ class SupervisorTests(unittest.TestCase):
                     stream.write(json.dumps(row) + "\n")
             (root / "client.ndjson").chmod(0o600)
             seconds, ordinals = [], []
-            with (root / "raw.ndjson").open("w") as stream:
+            with (root / "raw.ndjson").open("w") as stream, \
+                    public_attribution.OperationCellWriter(
+                        operation_root, case, 0, mode) as attribution:
                 for index in range(21):
                     ordinal = 2 * index + adapter.pair_order(0, index).index(mode)
                     seconds.append(0.001 * (index + 1))
@@ -124,11 +135,16 @@ class SupervisorTests(unittest.TestCase):
                                          "status": "observed",
                                          "coverage": "stable_pid_namespace_allocation",
                                          "manifest_sha256": resource_digest,
-                                         "client": ({"pid": 101, "start_ticks":
+                                         "client": {"pid": 101, "start_ticks":
                                                      999 if changed_client and mode == "off" and
-                                                     index == 7 else 401, **COUNTERS}
-                                                    if not missing_client else None),
+                                                     index == 7 else 401, **COUNTERS},
                                          "server_processes": [dict(identity, **COUNTERS)]}}
+                    attribution.append(index, ordinal, seconds[-1],
+                        next(item for item in clients[mode]
+                             if item["phase"] == "measured" and item["sample"] == index)
+                        if mode == "on" else None, row["resources"])
+                    if missing_client and mode == "off" and index == 7:
+                        row["resources"]["client"] = None
                     if malformed_resource and mode == "off" and index == 7:
                         if malformed_resource == "schema":
                             row["resources"]["schema"] = "wrong"
@@ -174,7 +190,37 @@ class SupervisorTests(unittest.TestCase):
                 for path in self.output.rglob("*"):
                     if path.is_file():
                         path.unlink()
+                (self.output / "public-stages").rmdir()
                 self.server = Server()
+
+    def test_public_operation_and_stage_mutations_fail_private_join(self):
+        self.emit("aggregate")
+        config = self.config("aggregate")
+        resource_digest = supervisor.digest(self.resource.read_bytes())
+        supervisor.verify_output(config, self.output, IDENTITY, resource_digest,
+                                 stage_mode="create")
+        supervisor.verify_output(config, self.output, IDENTITY, resource_digest,
+                                 stage_mode="verify")
+        operations = self.output / "public-operations" / \
+            public_attribution.operation_filename("aggregate", 0, "on")
+        original = operations.read_bytes()
+        rows = [json.loads(line) for line in original.splitlines()]
+        rows[0]["client_user_cpu_seconds"] += 0.01
+        operations.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n"
+                                      for row in rows))
+        with self.assertRaisesRegex(ValueError, "ATTRIBUTION_RAW_JOIN"):
+            supervisor.verify_output(config, self.output, IDENTITY, resource_digest,
+                                     stage_mode="verify")
+        operations.write_bytes(original)
+        stages = self.output / "public-stages" / \
+            public_attribution.stage_filename("aggregate", 0)
+        rows = [json.loads(line) for line in stages.read_bytes().splitlines()]
+        rows[0]["duration_ns"] += 1
+        stages.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n"
+                                  for row in rows))
+        with self.assertRaisesRegex(ValueError, "ATTRIBUTION_STAGE_JOIN"):
+            supervisor.verify_output(config, self.output, IDENTITY, resource_digest,
+                                     stage_mode="verify")
 
     def test_timeout_and_stop_error_retained_separately(self):
         self.server = Server(stop_error=True)

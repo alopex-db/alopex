@@ -9,7 +9,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from . import adapter, operation, public_timing, runner
+from . import adapter, operation, public_attribution, public_timing, runner
 
 
 class Remote:
@@ -66,7 +66,15 @@ class Observer:
                           for path in self.timing_root.iterdir())
             assert written == self.events.count("end") + 1
         self.events.append("end")
-        return {"status": "observed"}
+        counters = {"user_cpu_seconds": 0.1, "system_cpu_seconds": 0.2,
+                    "rss_before_bytes": 1024, "rss_after_bytes": 2048,
+                    "read_bytes": 0, "write_bytes": 0,
+                    "cancelled_write_bytes": 0}
+        return {"schema": "alopex.sql-operation-resources/v1",
+                "status": "observed", "coverage": "stable_pid_namespace_allocation",
+                "manifest_sha256": "a" * 64,
+                "client": {"pid": 101, "start_ticks": 301, **counters},
+                "server_processes": [{"pid": 201, "start_ticks": 401, **counters}]}
 
 
 class RunnerTests(unittest.TestCase):
@@ -96,10 +104,12 @@ class RunnerTests(unittest.TestCase):
                 paths = {mode: Path(directory) / f"{mode}.ndjson" for mode in ("on", "off")}
                 timing_root = Path(directory).resolve() / "public-timing"
                 timing_root.mkdir(mode=0o700)
+                operation_root = Path(directory).resolve() / "public-operations"
+                operation_root.mkdir(mode=0o700)
                 observer.timing_root = timing_root
             else:
                 paths = {}
-                timing_root = None
+                timing_root = operation_root = None
                 for mode in ("on", "off"):
                     parent = debug_root / mode
                     parent.mkdir(mode=0o700)
@@ -107,12 +117,16 @@ class RunnerTests(unittest.TestCase):
             summary, clients = runner.measure_pair(module, case, 0, paths,
                 connect=connect, remote_type=Remote, url="same-qualified-server",
                 txn_mode="read_write", observer=observer, timing_root=timing_root,
+                operation_root=operation_root,
                 evidence_mode=evidence_mode, debug_root=debug_root)
             raw = {mode: [json.loads(line) for line in paths[mode].read_text().splitlines()]
                    for mode in paths}
             timed = ({mode: public_timing._read_cell(
                 timing_root / public_timing.cell_filename(case, 0, mode), case, 0, mode)
                 for mode in paths} if timing_root is not None else None)
+            attributed = ({mode: public_attribution._read_operation_cell(
+                operation_root / public_attribution.operation_filename(case, 0, mode),
+                case, 0, mode) for mode in paths} if operation_root is not None else None)
             if debug_root is not None:
                 self.assertFalse((debug_root / "public-timing").exists())
             self.assertEqual({stat.S_IMODE(path.stat().st_mode) for path in paths.values()},
@@ -124,6 +138,7 @@ class RunnerTests(unittest.TestCase):
             if timed is not None:
                 self.assertEqual([row["elapsed_seconds"] for row in timed[mode]],
                                  [row["seconds"] for row in raw[mode]])
+                self.assertEqual(len(attributed[mode]), 21)
             self.assertEqual(len(clients[mode]), adapter.expected_client_records(case, mode))
             self.assertEqual((summary[mode]["warmups"], summary[mode]["samples"]), (3, 21))
             self.assertEqual([row["pair_ordinal"] for row in raw[mode]],
@@ -252,10 +267,13 @@ class RunnerTests(unittest.TestCase):
             paths = {mode: Path(directory) / f"{mode}.ndjson" for mode in ("on", "off")}
             timing_root = Path(directory).resolve() / "public-timing"
             timing_root.mkdir(mode=0o700)
+            operation_root = Path(directory).resolve() / "public-operations"
+            operation_root.mkdir(mode=0o700)
             with self.assertRaises(BaseExceptionGroup) as caught:
                 runner.measure_pair(module, "aggregate", 0, paths, connect=connect,
                                     remote_type=Remote, url="same-qualified-server",
-                                    observer=Observer(), timing_root=timing_root)
+                                    observer=Observer(), timing_root=timing_root,
+                                    operation_root=operation_root)
         self.assertTrue(any("setup callback count mismatch" in str(error)
                             for error in caught.exception.exceptions))
         self.assertEqual(sum("close failed" in str(error)
