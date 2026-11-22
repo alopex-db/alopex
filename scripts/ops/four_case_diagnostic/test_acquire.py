@@ -41,12 +41,13 @@ class AcquisitionProducerTests(unittest.TestCase):
         harness_file = zipped([("harness.txt", b"fixture")])
         receipt = json.dumps({"source_commit": source, "platform": "linux/amd64",
                               "source": {"commit": source, "tree": tree, "profile": "release"},
-                              "artifacts": {"server": digest(server),
-                                            "wheel.whl": digest(wheel),
-                                            "library.so": digest(library)}}).encode()
-        inventory = [("server", "server", server), ("wheel", "wheel.whl", wheel),
-                     ("library", "library.so", library),
-                     ("receipt", "build.json", receipt),
+                              "artifacts": {"bin/alopex-server": digest(server),
+                                            "wheels/alopex-0.8.17-cp38-abi3-linux_x86_64.whl": digest(wheel),
+                                            "lib/libalopex_sql_parser.so": digest(library)}}).encode()
+        inventory = [("server", "bin/alopex-server", server),
+                     ("wheel", "wheels/alopex-0.8.17-cp38-abi3-linux_x86_64.whl", wheel),
+                     ("library", "lib/libalopex_sql_parser.so", library),
+                     ("receipt", "receipts/build.json", receipt),
                      ("harness", "harness.tar", harness_file)]
         manifest = {"schema": "alopex.test-env-assets/v1", "platform": "linux/amd64",
                     "source_commit": source, "harness_commit": harness,
@@ -59,7 +60,6 @@ class AcquisitionProducerTests(unittest.TestCase):
                   "assets_digest": digest(manifest_bytes),
                   "performance_qualification": False}
         self.files = [("result.json", json.dumps(result).encode()),
-                      ("private-evidence.cms", b"evidence"),
                       ("assets/assets.json", manifest_bytes)]
         self.files += [("assets/" + path, data) for _, path, data in inventory]
         self.zip = zipped(self.files)
@@ -148,7 +148,8 @@ class AcquisitionProducerTests(unittest.TestCase):
 
     def test_rejects_unsafe_archive_and_cleans_partial_files(self):
         for files in (self.files + [("../escape", b"x")],
-                      self.files + [("assets/server", b"duplicate")]):
+                      self.files + [("private-evidence.cms", b"private")],
+                      self.files + [("assets/extra", b"unexpected")]):
             with self.subTest(member=files[-1][0]):
                 self.zip = zipped(files)
                 self.pin["zip_sha256"] = self.pin["artifact_sha256"] = digest(self.zip)
