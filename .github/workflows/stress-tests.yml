@@ -21,8 +21,41 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - &monitored_checkout
+        name: Monitored exact-source checkout
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          exec 3>&1 4>&2
+          private_log="$(mktemp "${RUNNER_TEMP}/stress-bootstrap-log.XXXXXX" 2>/dev/null)" || { printf 'STRESS_MONITORED_CHECKOUT_REJECTED\n' >&4; exit 1; }
+          if ! exec 5>"${private_log}" 2>/dev/null; then printf 'STRESS_MONITORED_CHECKOUT_REJECTED\n' >&4; exit 1; fi
+          exec 1>&5 2>&5
+          trap 'status=$?; if [ "$status" -ne 0 ]; then printf "STRESS_MONITORED_CHECKOUT_REJECTED\n" >&4; fi' EXIT
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          import re
+          from urllib.parse import urlparse
+          from urllib.request import urlopen
+
+          source = os.environ["GITHUB_SHA"]
+          assert re.fullmatch(r"[0-9a-f]{40}", source)
+          url = f"https://raw.githubusercontent.com/alopex-db/alopex/{source}/scripts/ci/stress_monitored_checkout.py"
+          with urlopen(url, timeout=60) as response:
+              resolved = urlparse(response.geturl())
+              assert resolved.scheme == "https" and resolved.hostname == "raw.githubusercontent.com"
+              body = response.read(100_001)
+          assert 0 < len(body) <= 100_000
+          assert hashlib.sha256(body).hexdigest() == "be96a2e4a82edf48daadce01d0f1124601fa3f01e72e3c617f64e201092e78b5"
+          destination = Path(os.environ["RUNNER_TEMP"]) / "stress-monitored-checkout.py"
+          with destination.open("xb") as stream:
+              stream.write(body)
+          PY
+          python3 "${RUNNER_TEMP}/stress-monitored-checkout.py"
+          printf 'STRESS_MONITORED_CHECKOUT_OK\n' >&3
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
@@ -68,8 +101,7 @@ jobs:
           - os: ubuntu-latest
             sanitizer: msan
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - *monitored_checkout
 
       - name: Set up Rust (nightly)
         uses: actions-rs/toolchain@v1
@@ -125,8 +157,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2880
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - *monitored_checkout
 
       - name: Set up Rust (nightly)
         uses: actions-rs/toolchain@v1
@@ -176,8 +207,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - *monitored_checkout
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
