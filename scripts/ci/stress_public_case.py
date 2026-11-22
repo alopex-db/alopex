@@ -24,7 +24,7 @@ FUZZ_CASES = frozenset({"sql_parser", "dataframe_conversion"})
 SANITIZER_CASES = frozenset({"asan", "tsan", "lsan", "msan"})
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,79}\Z")
-STAMP = re.compile(r"[0-9]{8}T[0-9]{6}Z\Z")
+STAMP = re.compile(r"([0-9]{8}T[0-9]{6}Z)-([0-9]{4})\Z")
 MAX_FILE_BYTES = 1_000_000
 MAX_CASE_BYTES = 20_000_000
 MAX_RUNS = 1_000
@@ -323,7 +323,12 @@ def assemble(*, workspace: Path, case_id: str, source: str, outcome: str) -> dic
                 or case_id != "perf" and perf
                 or case_id == "perf" and check["success"] and not perf):
             raise ValueError("EVIDENCE")
-        runs.append({"started_at_utc": stamp, "run": run, "metrics": metrics, "check": check,
+        stamp_match = STAMP.fullmatch(stamp)
+        if stamp_match is None:
+            raise ValueError("EVIDENCE")
+        runs.append({"started_at_utc": stamp_match.group(1),
+                     "run_index": int(stamp_match.group(2)),
+                     "run": run, "metrics": metrics, "check": check,
                      "performance": perf})
     if (outcome == "passed" and case_id in {"stress", "perf"}
             and not any(item["check"]["success"] for item in runs)
@@ -333,6 +338,18 @@ def assemble(*, workspace: Path, case_id: str, source: str, outcome: str) -> dic
                     value["passed"] for value in item["performance"].values()))
                 for item in runs)):
         raise ValueError("EVIDENCE")
+    if outcome == "passed" and case_id == "perf":
+        expected = {"perf_mixed_point_latency",
+                    "perf_sequential_throughput_and_amplification"}
+        if (len(runs) != len(expected)
+                or {item["run"]["test_name"] for item in runs} != expected
+                or any(item["run"]["lane"] != "perf"
+                       or not item["check"]["success"]
+                       or set(item["performance"]) != {
+                           "checks/" + item["run"]["test_name"] + ".json"}
+                       or not next(iter(item["performance"].values()))["passed"]
+                       for item in runs)):
+            raise ValueError("EVIDENCE")
     return {"schema": "alopex.stress-public-case/v1", "case_id": case_id,
             "source_commit": source, "outcome": outcome,
             "error_code": None if outcome == "passed" else FAILURE_CODES[case_id],

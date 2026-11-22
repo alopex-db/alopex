@@ -153,17 +153,14 @@ pub fn prepare_artifacts(
         return None;
     }
     let stamp = started_at.format("%Y%m%dT%H%M%SZ").to_string();
-    let base = root
-        .join(lane.as_str())
-        .join(sanitize(test_name))
-        .join(stamp);
+    let parent = root.join(lane.as_str()).join(sanitize(test_name));
+    let base = reserve_run_directory(&parent, &stamp)?;
 
     let mode = EvidenceMode::from_environment().expect("valid stress evidence mode");
     let logs_dir = base.join("logs");
     let checks_dir = base.join("checks");
 
     if mode == EvidenceMode::Debug {
-        std::fs::create_dir_all(&base).expect("create local debug artifact directory");
         #[cfg(target_family = "unix")]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -184,6 +181,19 @@ pub fn prepare_artifacts(
         checks_dir,
         mode,
     })
+}
+
+fn reserve_run_directory(parent: &Path, stamp: &str) -> Option<PathBuf> {
+    std::fs::create_dir_all(parent).ok()?;
+    for attempt in 0..10_000 {
+        let base = parent.join(format!("{stamp}-{attempt:04}"));
+        match std::fs::create_dir(&base) {
+            Ok(()) => return Some(base),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 pub fn write_run_json(paths: &ArtifactPaths, metadata: &RunMetadata) {
@@ -484,7 +494,17 @@ fn disk_total_bytes(_path: &Path) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EvidenceMode, PublicRunMetadata};
+    use super::{reserve_run_directory, EvidenceMode, PublicRunMetadata};
+
+    #[test]
+    fn repeated_invocations_reserve_distinct_run_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("ci").join("repeated_case");
+        let first = reserve_run_directory(&parent, "20261122T010000Z").unwrap();
+        let second = reserve_run_directory(&parent, "20261122T010000Z").unwrap();
+        assert_ne!(first, second);
+        assert!(first.is_dir() && second.is_dir());
+    }
 
     #[test]
     fn evidence_mode_defaults_public_and_rejects_debug_in_ci() {

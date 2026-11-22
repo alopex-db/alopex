@@ -6,7 +6,9 @@ when `CI` is set. `STRESS_ARTIFACTS_DIR` selects the root (default `artifacts/`)
 an empty value disables harness artifacts. Stage 2 jobs set a dedicated public
 root and reject missing records.
 
-Each run lives at `<root>/<lane>/<test-name>/<YYYYMMDDTHHMMSSZ>/`.
+Each run lives at `<root>/<lane>/<test-name>/<YYYYMMDDTHHMMSSZ>-<index>/`.
+The index is reserved atomically, so repeated invocations in the same second
+cannot overwrite an earlier measurement.
 
 ## Public mode
 

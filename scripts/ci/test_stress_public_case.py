@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 
@@ -19,7 +20,7 @@ def write(path: Path, value: dict) -> None:
 def fixture(root: Path, case_id: str = "stress") -> tuple[Path, Path]:
     workspace = root / "checkout"
     case = workspace / "target/stress-public-artifacts" / case_id
-    run = case / "ci" / "linearizability_register" / "20261122T010000Z"
+    run = case / "ci" / "linearizability_register" / "20261122T010000Z-0000"
     write(case / "execution.json", {
         "schema": "alopex.stress-execution/v1", "case_id": case_id,
         "source_commit": SOURCE, "outcome": "passed", "duration_ms": 100,
@@ -49,10 +50,12 @@ def fixture(root: Path, case_id: str = "stress") -> tuple[Path, Path]:
 class PublicCaseTests(unittest.TestCase):
     def test_assembles_numeric_measurement_and_source(self):
         with tempfile.TemporaryDirectory() as directory:
-            workspace, _ = fixture(Path(directory))
+            workspace, run = fixture(Path(directory))
+            shutil.copytree(run, run.with_name("20261122T010000Z-0001"))
             result = public_case.assemble(workspace=workspace, case_id="stress",
                                           source=SOURCE, outcome="passed")
             self.assertEqual(result["runs"][0]["metrics"]["successes"], 12)
+            self.assertEqual([item["run_index"] for item in result["runs"]], [0, 1])
             self.assertEqual(result["source_commit"], SOURCE)
 
     def test_rejects_local_strings_extra_files_nonfinite_and_missing_metrics(self):
@@ -104,6 +107,29 @@ class PublicCaseTests(unittest.TestCase):
         report["comparisons"]["p99_latency_ns"]["baseline"] = "/private/path"
         with self.assertRaises(ValueError):
             public_case.perf_record(report, name)
+
+    def test_passed_perf_requires_both_named_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace, run = fixture(Path(directory), case_id="perf")
+            renamed = (run.parent.parent.parent / "perf" /
+                       "perf_mixed_point_latency" / run.name)
+            renamed.parent.mkdir(parents=True)
+            run.rename(renamed)
+            metadata = json.loads((renamed / "run.json").read_bytes())
+            metadata["test_name"] = "perf_mixed_point_latency"
+            metadata["lane"] = "perf"
+            write(renamed / "run.json", metadata)
+            name = "perf_mixed_point_latency.json"
+            metrics = {key: 2.0 for key in public_case.PERF_METRICS[name]}
+            write(renamed / "checks" / name, {
+                "schema_version": 1, "metrics": metrics,
+                "comparisons": {key: {"current": 2.0, "baseline": 1.0,
+                                      "passed": True} for key in metrics},
+                "baseline_present": True, "passed": True,
+            })
+            with self.assertRaises(ValueError):
+                public_case.assemble(workspace=workspace, case_id="perf",
+                                     source=SOURCE, outcome="passed")
 
 
 if __name__ == "__main__":
