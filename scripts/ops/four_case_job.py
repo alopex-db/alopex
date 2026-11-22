@@ -198,8 +198,20 @@ def _matrix_outcome(private, environment):
                     re.fullmatch(r"[0-9a-f]{40}", accepted["source_commit"]) and
                     type(accepted.get("assets_digest")) is str and
                     HEX64.fullmatch(accepted["assets_digest"]), "RECEIPT_IDENTITY")
+            lock = entrypoint.load_reviewed_lock(
+                private.parent / LOCK_DIR / "lock.json",
+                environment["ALOPEX_FOUR_CASE_LOCK_SHA256"])
+            pin = lock["pin"]
+            require(accepted["source_commit"] == pin["source_commit"] and
+                    accepted["assets_digest"] == pin["assets_digest"],
+                    "RECEIPT_IDENTITY")
             return {"matrix_status": "passed", "matrix_error_code": None,
                     "source_commit": accepted["source_commit"],
+                    "source_tree": pin["source_tree"],
+                    "artifact_id": pin["artifact_id"],
+                    "artifact_sha256": pin["artifact_sha256"],
+                    "server_sha256": pin["server_sha256"],
+                    "wheel_sha256": pin["wheel_sha256"],
                     "assets_digest": accepted["assets_digest"]}
         allowed = {"MISSING_PIN", "PRIVATE_MANIFEST", "SAME_JOB", "QUALIFICATION",
                    "QUALIFICATION_BINDING", "POLICY", "CLEANUP", "IDENTITY",
@@ -210,6 +222,49 @@ def _matrix_outcome(private, environment):
     except (OSError, ValueError, UnicodeError, KeyError, TypeError):
         pass
     return fallback
+
+
+def _verify_timing_raw_join(private, records, environment):
+    """Rejoin public rows to the collected measurements at upload time."""
+    from four_case_diagnostic import adapter, supervisor
+
+    job_id = environment.get("GITHUB_RUN_ID")
+    require(type(job_id) is str and job_id.isdecimal(), "PUBLIC_OUTPUT")
+    cells = {(case, trial, mode): [] for case in adapter.CASES
+             for trial in range(3) for mode in ("on", "off")}
+    for row in records:
+        cells[(row["case"], row["trial"], row["mode"])].append(row)
+    for case in adapter.CASES:
+        for trial in range(3):
+            collected = (private / f"{case}-{trial}" / "owned-runs" /
+                         f"f712-{job_id}-{case}-{trial}" / "collected")
+            directories = (private / f"{case}-{trial}",
+                           private / f"{case}-{trial}" / "owned-runs",
+                           collected.parent, collected, collected / "on",
+                           collected / "off")
+            for directory in directories:
+                try:
+                    info = directory.lstat()
+                except OSError as error:
+                    raise ValueError("PUBLIC_OUTPUT") from error
+                require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and
+                        stat.S_IMODE(info.st_mode) == 0o700, "PUBLIC_OUTPUT")
+            for mode in ("on", "off"):
+                raw, raw_bytes = supervisor._ndjson(
+                    collected / mode / "raw.ndjson", supervisor.RAW_BYTES, 21)
+                cell = supervisor._json_file(collected / mode / "measurement.json",
+                                             supervisor.RESULT_BYTES)
+                timing = cells[(case, trial, mode)]
+                require(len(timing) == len(raw) == 21 and
+                        cell.get("raw_sha256") == _digest(raw_bytes) and
+                        cell.get("raw_seconds") == [row.get("seconds") for row in raw] and
+                        cell.get("raw_ordinals") ==
+                        [row.get("pair_ordinal") for row in raw] and
+                        all((item["sample"], item["pair_ordinal"],
+                             item["elapsed_seconds"]) ==
+                            (index, raw[index].get("pair_ordinal"),
+                             raw[index].get("seconds"))
+                            for index, item in enumerate(timing)), "PUBLIC_OUTPUT")
 
 
 def seal_job(environment):
@@ -332,6 +387,7 @@ def verify_public_export(environment):
         strict = supervisor._private_file(private / "strict-evidence.cms", intake.MAX_CMS)
         require(ciphertext == strict, "PUBLIC_OUTPUT")
         records = public_timing.load_timing_inventory(private / "public-timing")
+        _verify_timing_raw_join(private, records, environment)
         expected = {"schema": "alopex.sql-four-case-export/v2", "status": "sealed",
                     "evidence_schema": intake.SCHEMA,
                     "performance_qualification": False,

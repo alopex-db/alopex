@@ -17,17 +17,39 @@ from four_case_diagnostic.test_qualification import fixture, JOB
 
 class FourCaseJobTests(unittest.TestCase):
     @staticmethod
-    def timing_fixture(private):
+    def timing_fixture(private, job_id):
         from four_case_diagnostic import adapter, public_timing
         root = private / "public-timing"
         root.mkdir(mode=0o700)
         for case in adapter.CASES:
             for trial in range(3):
+                collected = (private / f"{case}-{trial}" / "owned-runs" /
+                             f"f712-{job_id}-{case}-{trial}" / "collected")
                 for mode in ("on", "off"):
+                    destination = collected / mode
+                    destination.mkdir(parents=True, mode=0o700)
+                    for directory in (private / f"{case}-{trial}",
+                                      private / f"{case}-{trial}" / "owned-runs",
+                                      collected.parent, collected, destination):
+                        directory.chmod(0o700)
+                    rows = []
                     with public_timing.TimingCellWriter(root, case, trial, mode) as writer:
                         for sample in range(21):
                             ordinal = 2 * sample + adapter.pair_order(trial, sample).index(mode)
-                            writer.append(sample, ordinal, .011 if mode == "on" else .010)
+                            seconds = .011 if mode == "on" else .010
+                            writer.append(sample, ordinal, seconds)
+                            rows.append({"sample": sample, "seconds": seconds,
+                                         "pair_ordinal": ordinal, "resources": {}})
+                    raw = b"".join((json.dumps(row) + "\n").encode() for row in rows)
+                    path = destination / "raw.ndjson"
+                    path.write_bytes(raw)
+                    path.chmod(0o600)
+                    cell = {"raw_sha256": hashlib.sha256(raw).hexdigest(),
+                            "raw_seconds": [row["seconds"] for row in rows],
+                            "raw_ordinals": [row["pair_ordinal"] for row in rows]}
+                    path = destination / "measurement.json"
+                    path.write_text(json.dumps(cell))
+                    path.chmod(0o600)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -154,7 +176,8 @@ class FourCaseJobTests(unittest.TestCase):
         strict = private / "strict-evidence.cms"
         strict.write_bytes(b"strict cms bytes")
         strict.chmod(0o600)
-        self.timing_fixture(private)
+        self.env["GITHUB_RUN_ID"] = JOB
+        self.timing_fixture(private, JOB)
         cert = self.root / "cert.pem"
         cert.write_bytes(b"test certificate")
         with patch.object(job, "REPO", self.root), \
@@ -183,6 +206,15 @@ class FourCaseJobTests(unittest.TestCase):
             altered = json.loads(public_path.read_text())
             altered["local_path"] = "/private/sensitive"
             public_path.write_text(json.dumps(altered, sort_keys=True) + "\n")
+            with self.assertRaisesRegex(ValueError, "PUBLIC_OUTPUT"):
+                job.verify_public_export(self.env)
+            public_path.write_text(json.dumps(public, sort_keys=True) + "\n")
+            timing_path = private / "public-timing" / "aggregate-trial-0-on.jsonl"
+            lines = timing_path.read_text().splitlines()
+            altered = json.loads(lines[0])
+            altered["elapsed_seconds"] = .012
+            lines[0] = json.dumps(altered, separators=(",", ":"))
+            timing_path.write_text("\n".join(lines) + "\n")
             with self.assertRaisesRegex(ValueError, "PUBLIC_OUTPUT"):
                 job.verify_public_export(self.env)
         self.assertEqual(capacity.call_count, 1)
@@ -275,6 +307,8 @@ class FourCaseJobTests(unittest.TestCase):
         private = self.root / job.MATRIX_DIR
         private.mkdir(mode=0o700)
         self.env.update({"GITHUB_RUN_ID": JOB, "GITHUB_RUN_ATTEMPT": "2"})
+        job.install_inputs(self.env)
+        pin = fixture()[0]["pin"]
         path = private / "receipt.public.json"
 
         def save(value):
@@ -285,11 +319,19 @@ class FourCaseJobTests(unittest.TestCase):
               "performance_qualification": False, "job_id": JOB,
               "run_attempt": "2", "qualification_binding_sha256": "a" * 64})
         with patch.object(job.controller, "verify_public_receipt", return_value={
-                "source_commit": "a" * 40, "assets_digest": "b" * 64}) as verified:
+                "source_commit": pin["source_commit"],
+                "assets_digest": pin["assets_digest"]}) as verified:
             self.assertEqual(job._matrix_outcome(private, self.env), {
                 "matrix_status": "passed", "matrix_error_code": None,
-                "source_commit": "a" * 40, "assets_digest": "b" * 64})
+                **{key: pin[key] for key in
+                   ("source_commit", "source_tree", "artifact_id", "artifact_sha256",
+                    "server_sha256", "wheel_sha256", "assets_digest")}})
         self.assertEqual(verified.call_count, 1)
+        with patch.object(job.controller, "verify_public_receipt", return_value={
+                "source_commit": pin["source_commit"],
+                "assets_digest": "b" * 64}):
+            self.assertEqual(job._matrix_outcome(private, self.env), {
+                "matrix_status": "failed", "matrix_error_code": "INCOMPLETE"})
         self.env["GITHUB_RUN_ATTEMPT"] = "3"
         self.assertEqual(job._matrix_outcome(private, self.env), {
             "matrix_status": "failed", "matrix_error_code": "INCOMPLETE"})

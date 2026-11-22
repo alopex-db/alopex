@@ -26,18 +26,18 @@ timed operation. Resource observations and private raw output have a separate
 writer.
 
 The successful `public.json` contains the complete timing inventory, the
-computed paired comparison and fixed source and outcome fields. The uploader
+computed paired comparison, fixed source and subject digests, and outcome fields. The uploader
 rebuilds the expected public object from the typed timing inventory and
 requires exact canonical bytes. It rejects extra fields, files and text.
 The private audit checks each public elapsed value and ordinal against the
-same operation's raw record before publication. `performance_qualification`
+same operation's raw record before publication and again at the final export
+boundary. The fixed subject digests are checked against the independently
+pinned lock. `performance_qualification`
 remains `false` until the separate product-performance acceptance gate passes.
 
 ## Remaining acceptance work
 
-- At the final export boundary, recheck public timing rows against the sealed
-  private raw measurements so a post-seal edit cannot change the public result.
-- Include the exact measured subject identities in the public result, using
-  fixed digest fields rather than local paths or machine details.
 - Expose and verify an explicit local debug selection separately from public
   measurement. Detailed local traces must never enter the public uploader.
+- Verify the full hosted run and public artifact against the exact source and
+  qualification pins before treating these local checks as acceptance evidence.
