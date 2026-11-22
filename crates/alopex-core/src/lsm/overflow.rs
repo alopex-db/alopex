@@ -6,9 +6,7 @@
 mod gc;
 
 use super::*;
-use crate::storage::format::{
-    AlopexFileReader, FileHeader, FileReader, FileSource, FileVersion, HEADER_SIZE,
-};
+use crate::storage::format::{AlopexFileReader, FileHeader, FileReader, FileVersion, HEADER_SIZE};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use wal::operations::{OperationDecoder, OperationLimits, OperationStream};
@@ -325,7 +323,7 @@ fn fence_container(path: &Path, data: &Path, last_lsn: u64, budget: u64) -> Resu
         }
         container::write_container(path, &data.join(container::SIDECAR_SST_DIR), &[], 0)?;
     }
-    let reader = AlopexFileReader::open(FileSource::Path(path.to_path_buf()))?;
+    let reader = AlopexFileReader::open_lsm_container(path)?;
     let mut header = *reader.header();
     drop(reader);
     // A published Windows fence still needs a full copy and write-through

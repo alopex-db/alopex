@@ -121,9 +121,27 @@ fn newer_version_is_rejected() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn overflow_fenced_version_is_rejected_by_generic_reader() {
+    let (_dir, path) = generate_v0_1_test_file();
+    let fenced = mutate_version(&path, FileVersion::WAL_OVERFLOW);
+    let err = match AlopexFileReader::open(FileSource::Path(fenced)) {
+        Ok(_) => panic!("generic reader must reject overflow fence"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        err,
+        FormatError::IncompatibleVersion {
+            file: FileVersion::WAL_OVERFLOW,
+            reader: FileVersion::CURRENT,
+        }
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
-fn version_0_3_is_rejected_above_max_supported() {
+fn version_0_3_is_rejected_by_generic_reader() {
     let (_dir, path) = generate_v0_1_test_file();
     let bumped = mutate_version(&path, FileVersion::new(0, 3, 0));
     let err = match AlopexFileReader::open(FileSource::Path(bumped)) {
@@ -134,7 +152,7 @@ fn version_0_3_is_rejected_above_max_supported() {
         err,
         FormatError::IncompatibleVersion {
             file: FileVersion::new(0, 3, 0),
-            reader: FileVersion::MAX_SUPPORTED,
+            reader: FileVersion::CURRENT,
         }
     );
 }
@@ -200,7 +218,42 @@ mod wasm {
     }
 
     #[wasm_bindgen_test]
-    fn version_0_3_is_rejected_above_max_supported() {
+    fn overflow_fenced_version_is_rejected_by_generic_reader() {
+        let fenced = mutate_version_bytes(generate_v0_1_test_bytes(), FileVersion::WAL_OVERFLOW);
+        let err = match AlopexFileReader::open(FileSource::Buffer(fenced)) {
+            Ok(_) => panic!("generic reader must reject overflow fence"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            err,
+            FormatError::IncompatibleVersion {
+                file: FileVersion::WAL_OVERFLOW,
+                reader: FileVersion::CURRENT,
+            }
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn overflow_fenced_version_is_rejected_with_wasm_config() {
+        let fenced = mutate_version_bytes(generate_v0_1_test_bytes(), FileVersion::WAL_OVERFLOW);
+        let err = match AlopexFileReader::open_with_config(
+            FileSource::Buffer(fenced),
+            alopex_core::storage::format::WasmReaderConfig::default(),
+        ) {
+            Ok(_) => panic!("configured generic reader must reject overflow fence"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            err,
+            FormatError::IncompatibleVersion {
+                file: FileVersion::WAL_OVERFLOW,
+                reader: FileVersion::CURRENT,
+            }
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn version_0_3_is_rejected_by_generic_reader() {
         let bumped = mutate_version_bytes(generate_v0_1_test_bytes(), FileVersion::new(0, 3, 0));
         let err = match AlopexFileReader::open(FileSource::Buffer(bumped)) {
             Ok(_) => panic!("0.3.0 must be rejected"),
@@ -210,7 +263,7 @@ mod wasm {
             err,
             FormatError::IncompatibleVersion {
                 file: FileVersion::new(0, 3, 0),
-                reader: FileVersion::MAX_SUPPORTED,
+                reader: FileVersion::CURRENT,
             }
         );
     }

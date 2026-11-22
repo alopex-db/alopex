@@ -130,6 +130,24 @@ pub struct AlopexFileReader {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl AlopexFileReader {
+    /// Open a fenced container only from the budget-aware LSM path.
+    pub(crate) fn open_lsm_container(path: &Path) -> Result<Self, FormatError> {
+        Self::open_with_max_version(path, FileVersion::WAL_OVERFLOW)
+    }
+
+    fn open_with_max_version(path: &Path, max_version: FileVersion) -> Result<Self, FormatError> {
+        let mmap = Self::map_file(path)?;
+        let footer = Self::read_footer(&mmap)?;
+        let section_index = Self::read_section_index(&mmap, &footer)?;
+        let header = Self::read_header(&mmap, max_version)?;
+        Ok(Self {
+            mmap,
+            header,
+            footer,
+            section_index,
+        })
+    }
+
     fn map_file(path: &Path) -> Result<Mmap, FormatError> {
         let file = File::open(path).map_err(|_| FormatError::IncompleteWrite)?;
         unsafe { Mmap::map(&file).map_err(|_| FormatError::IncompleteWrite) }
@@ -145,14 +163,14 @@ impl AlopexFileReader {
         FileFooter::from_bytes(&buf)
     }
 
-    fn read_header(mmap: &Mmap) -> Result<FileHeader, FormatError> {
+    fn read_header(mmap: &Mmap, max_version: FileVersion) -> Result<FileHeader, FormatError> {
         if mmap.len() < HEADER_SIZE {
             return Err(FormatError::IncompleteWrite);
         }
         let mut buf = [0u8; HEADER_SIZE];
         buf.copy_from_slice(&mmap[..HEADER_SIZE]);
         let header = FileHeader::from_bytes(&buf)?;
-        header.check_compatibility(&FileVersion::MAX_SUPPORTED)?;
+        header.check_compatibility(&max_version)?;
         Ok(header)
     }
 
@@ -188,16 +206,7 @@ impl AlopexFileReader {
 impl FileReader for AlopexFileReader {
     fn open(source: FileSource) -> Result<Self, FormatError> {
         let FileSource::Path(path) = source;
-        let mmap = Self::map_file(&path)?;
-        let footer = Self::read_footer(&mmap)?;
-        let section_index = Self::read_section_index(&mmap, &footer)?;
-        let header = Self::read_header(&mmap)?;
-        Ok(Self {
-            mmap,
-            header,
-            footer,
-            section_index,
-        })
+        Self::open_with_max_version(&path, FileVersion::CURRENT)
     }
 
     fn header(&self) -> &FileHeader {
@@ -401,7 +410,7 @@ impl AlopexFileReader {
             .try_into()
             .map_err(|_| FormatError::IncompleteWrite)?;
         let header = FileHeader::from_bytes(&header_array)?;
-        header.check_compatibility(&FileVersion::MAX_SUPPORTED)?;
+        header.check_compatibility(&FileVersion::CURRENT)?;
 
         Ok(Self {
             buffer: None,
@@ -431,7 +440,7 @@ impl AlopexFileReader {
         let mut buf = [0u8; HEADER_SIZE];
         buf.copy_from_slice(&buffer[..HEADER_SIZE]);
         let header = FileHeader::from_bytes(&buf)?;
-        header.check_compatibility(&FileVersion::MAX_SUPPORTED)?;
+        header.check_compatibility(&FileVersion::CURRENT)?;
         Ok(header)
     }
 
