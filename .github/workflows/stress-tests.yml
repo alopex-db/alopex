@@ -70,31 +70,26 @@ jobs:
       - name: Run stress tests (short)
         id: stress_case
         env:
+          STRESS_EVIDENCE_MODE: public
+          STRESS_ARTIFACTS_DIR: target/stress-public-artifacts/stress
           RUST_BACKTRACE: 1
           STRESS_TEST_TIMEOUT: 120
           STRESS_REPORT_DIR: target/stress-reports
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: python3 scripts/ci/stress_guarded_command.py --case stress --phase test -- cargo test --features test-hooks,lane_ci --test 'stress_*' -- --test-threads=1
 
-      - name: Finalize stress evidence privately
+      - name: Assemble stress public evidence
+        id: stress_evidence
         if: ${{ always() && steps.bootstrap.outcome == 'success' }}
         env:
           STRESS_OUTCOME: ${{ steps.stress_case.outcome == 'success' && 'passed' || 'failed' }}
-        run: python3 scripts/ci/stress_guarded_command.py --case stress --phase seal -- python3 scripts/ci/stress_finalize_case.py --case stress --outcome "${STRESS_OUTCOME}"
+        run: python3 scripts/ci/stress_guarded_command.py --case stress --phase seal -- python3 scripts/ci/stress_public_case.py --case stress --outcome "${STRESS_OUTCOME}"
 
-      - name: Upload stress public status
-        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+      - name: Upload stress public evidence
+        if: ${{ always() && steps.stress_evidence.outcome == 'success' }}
         uses: ./.github/actions/stress-upload
         with:
           case_id: stress
-          kind: public
-
-      - name: Upload stress encrypted evidence
-        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
-        uses: ./.github/actions/stress-upload
-        with:
-          case_id: stress
-          kind: private
 
   sanitizer-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -144,32 +139,26 @@ jobs:
         id: sanitizer_case
         env:
           STRESS_CASE_ID: ${{ matrix.sanitizer }}
+          STRESS_EVIDENCE_MODE: public
           RUST_BACKTRACE: 1
           STRESS_REPORT_DIR: target/stress-reports/${{ matrix.sanitizer }}
-          STRESS_ARTIFACTS_DIR: target/stress-artifacts/${{ matrix.sanitizer }}
+          STRESS_ARTIFACTS_DIR: target/stress-public-artifacts/${{ matrix.sanitizer }}
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: python3 scripts/ci/stress_guarded_command.py --case "${STRESS_CASE_ID}" --phase test -- ./scripts/run-sanitizer-lane.sh "${STRESS_CASE_ID}"
 
-      - name: Finalize sanitizer evidence privately
+      - name: Assemble sanitizer public evidence
+        id: sanitizer_evidence
         if: ${{ always() && steps.bootstrap.outcome == 'success' }}
         env:
           STRESS_CASE_ID: ${{ matrix.sanitizer }}
           STRESS_OUTCOME: ${{ steps.sanitizer_case.outcome == 'success' && 'passed' || 'failed' }}
-        run: python3 scripts/ci/stress_guarded_command.py --case "${STRESS_CASE_ID}" --phase seal -- python3 scripts/ci/stress_finalize_case.py --case "${STRESS_CASE_ID}" --outcome "${STRESS_OUTCOME}"
+        run: python3 scripts/ci/stress_guarded_command.py --case "${STRESS_CASE_ID}" --phase seal -- python3 scripts/ci/stress_public_case.py --case "${STRESS_CASE_ID}" --outcome "${STRESS_OUTCOME}"
 
-      - name: Upload sanitizer public status
-        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+      - name: Upload sanitizer public evidence
+        if: ${{ always() && steps.sanitizer_evidence.outcome == 'success' }}
         uses: ./.github/actions/stress-upload
         with:
           case_id: ${{ matrix.sanitizer }}
-          kind: public
-
-      - name: Upload sanitizer encrypted evidence
-        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
-        uses: ./.github/actions/stress-upload
-        with:
-          case_id: ${{ matrix.sanitizer }}
-          kind: private
 
   fuzz-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -192,68 +181,56 @@ jobs:
       - name: Run SQL fuzz target
         id: sql_fuzz
         env:
+          STRESS_EVIDENCE_MODE: public
           STRESS_REPORT_DIR: target/stress-reports/fuzz/sql_parser
-          STRESS_ARTIFACTS_DIR: target/stress-artifacts/fuzz/sql_parser
+          FUZZ_CRASH_DIR: target/stress-artifacts/fuzz/sql_parser
           FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.fuzz_seconds || '600' }}
           ASAN_OPTIONS: detect_odr_violation=0:detect_leaks=0
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
           python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase test -- \
-            bash -c 'mkdir -p "${GITHUB_WORKSPACE}/${STRESS_ARTIFACTS_DIR}" && cd crates/alopex-sql/fuzz && cargo fuzz run sql_parser -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}" -artifact_prefix="${GITHUB_WORKSPACE}/${STRESS_ARTIFACTS_DIR}/"'
+            bash -c 'mkdir -p "${GITHUB_WORKSPACE}/${FUZZ_CRASH_DIR}" && cd crates/alopex-sql/fuzz && cargo fuzz run sql_parser -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}" -artifact_prefix="${GITHUB_WORKSPACE}/${FUZZ_CRASH_DIR}/"'
 
-      - name: Finalize SQL fuzz evidence privately
+      - name: Assemble SQL fuzz public evidence
+        id: sql_fuzz_evidence
         if: ${{ always() && steps.bootstrap.outcome == 'success' }}
         env:
           STRESS_OUTCOME: ${{ steps.sql_fuzz.outcome == 'success' && 'passed' || 'failed' }}
-        run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase seal -- python3 scripts/ci/stress_finalize_case.py --case sql_parser --outcome "${STRESS_OUTCOME}"
+        run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase seal -- python3 scripts/ci/stress_public_case.py --case sql_parser --outcome "${STRESS_OUTCOME}"
 
       - name: Run DataFrame fuzz target
         id: dataframe_fuzz
         env:
+          STRESS_EVIDENCE_MODE: public
           STRESS_REPORT_DIR: target/stress-reports/fuzz/dataframe_conversion
-          STRESS_ARTIFACTS_DIR: target/stress-artifacts/fuzz/dataframe_conversion
+          FUZZ_CRASH_DIR: target/stress-artifacts/fuzz/dataframe_conversion
           FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.fuzz_seconds || '600' }}
           ASAN_OPTIONS: detect_odr_violation=0:detect_leaks=0
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: |
           export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
           python3 scripts/ci/stress_guarded_command.py --case dataframe_conversion --phase test -- \
-            bash -c 'mkdir -p "${GITHUB_WORKSPACE}/${STRESS_ARTIFACTS_DIR}" && cd crates/alopex-dataframe/fuzz && cargo fuzz run dataframe_conversion -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}" -artifact_prefix="${GITHUB_WORKSPACE}/${STRESS_ARTIFACTS_DIR}/"'
+            bash -c 'mkdir -p "${GITHUB_WORKSPACE}/${FUZZ_CRASH_DIR}" && cd crates/alopex-dataframe/fuzz && cargo fuzz run dataframe_conversion -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}" -artifact_prefix="${GITHUB_WORKSPACE}/${FUZZ_CRASH_DIR}/"'
 
-      - name: Finalize DataFrame fuzz evidence privately
+      - name: Assemble DataFrame fuzz public evidence
+        id: dataframe_fuzz_evidence
         if: ${{ always() && steps.bootstrap.outcome == 'success' }}
         env:
           STRESS_OUTCOME: ${{ steps.dataframe_fuzz.outcome == 'success' && 'passed' || 'failed' }}
-        run: python3 scripts/ci/stress_guarded_command.py --case dataframe_conversion --phase seal -- python3 scripts/ci/stress_finalize_case.py --case dataframe_conversion --outcome "${STRESS_OUTCOME}"
+        run: python3 scripts/ci/stress_guarded_command.py --case dataframe_conversion --phase seal -- python3 scripts/ci/stress_public_case.py --case dataframe_conversion --outcome "${STRESS_OUTCOME}"
 
-      - name: Upload SQL fuzz public status
-        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+      - name: Upload SQL fuzz public evidence
+        if: ${{ always() && steps.sql_fuzz_evidence.outcome == 'success' }}
         uses: ./.github/actions/stress-upload
         with:
           case_id: sql_parser
-          kind: public
 
-      - name: Upload SQL fuzz encrypted evidence
-        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
-        uses: ./.github/actions/stress-upload
-        with:
-          case_id: sql_parser
-          kind: private
-
-      - name: Upload DataFrame fuzz public status
-        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+      - name: Upload DataFrame fuzz public evidence
+        if: ${{ always() && steps.dataframe_fuzz_evidence.outcome == 'success' }}
         uses: ./.github/actions/stress-upload
         with:
           case_id: dataframe_conversion
-          kind: public
-
-      - name: Upload DataFrame fuzz encrypted evidence
-        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
-        uses: ./.github/actions/stress-upload
-        with:
-          case_id: dataframe_conversion
-          kind: private
 
   perf-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
@@ -282,31 +259,25 @@ jobs:
       - name: Run perf baseline checks
         id: perf_case
         env:
+          STRESS_EVIDENCE_MODE: public
           RUST_BACKTRACE: 1
           STRESS_BASELINE_REQUIRED: "true"
           STRESS_BASELINE_UPDATE: "false"
           STRESS_BASELINE_DIR: ${{ github.workspace }}/target/stress-baselines
           STRESS_REPORT_DIR: ${{ github.workspace }}/target/stress-reports/perf
-          STRESS_ARTIFACTS_DIR: ${{ github.workspace }}/target/stress-artifacts/perf
+          STRESS_ARTIFACTS_DIR: ${{ github.workspace }}/target/stress-public-artifacts/perf
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
         run: python3 scripts/ci/stress_guarded_command.py --case perf --phase test -- cargo test -p alopex-core --features lane_perf --test stress_perf_baseline -- --test-threads=1
 
-      - name: Finalize perf evidence privately
+      - name: Assemble perf public evidence
+        id: perf_evidence
         if: ${{ always() && steps.bootstrap.outcome == 'success' }}
         env:
           STRESS_OUTCOME: ${{ steps.perf_case.outcome == 'success' && 'passed' || 'failed' }}
-        run: python3 scripts/ci/stress_guarded_command.py --case perf --phase seal -- python3 scripts/ci/stress_finalize_case.py --case perf --outcome "${STRESS_OUTCOME}"
+        run: python3 scripts/ci/stress_guarded_command.py --case perf --phase seal -- python3 scripts/ci/stress_public_case.py --case perf --outcome "${STRESS_OUTCOME}"
 
-      - name: Upload perf public status
-        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+      - name: Upload perf public evidence
+        if: ${{ always() && steps.perf_evidence.outcome == 'success' }}
         uses: ./.github/actions/stress-upload
         with:
           case_id: perf
-          kind: public
-
-      - name: Upload perf encrypted evidence
-        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
-        uses: ./.github/actions/stress-upload
-        with:
-          case_id: perf
-          kind: private
