@@ -17,11 +17,6 @@ on:
         required: false
         type: boolean
         default: false
-      reference_staging_mode:
-        description: Stage the three preserved original #712 reference ZIPs through an isolated one-job runner
-        required: false
-        type: boolean
-        default: false
       wal_cost_mode:
         description: Continue same-job #804 qualification into pinned #682 WAL cost
         required: false
@@ -77,87 +72,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  stage_original_references:
-    if: ${{ inputs.reference_staging_mode && inputs.issue_number == '712' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
-    runs-on: [self-hosted, alopex-712-originals-one-use]
-    timeout-minutes: 30
-    steps:
-      - name: Admit exact reference staging source before checkout
-        env:
-          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: |
-          python3 - <<'PY'
-          import os, re, sys
-          e = os.environ
-          ok = (e.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and
-                e.get('GITHUB_REPOSITORY') == 'alopex-db/alopex' and
-                e.get('GITHUB_REPOSITORY_ID') == '1100234936' and
-                e.get('GITHUB_RUN_ATTEMPT') == '1' and
-                e.get('GITHUB_WORKFLOW_REF', '').startswith(
-                    'alopex-db/alopex/.github/workflows/alopex-performance.yml@refs/heads/') and
-                e.get('RUNNER_ENVIRONMENT') == 'self-hosted' and
-                re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_CONTROLLER_SHA', '')) and
-                e.get('GITHUB_SHA') == e.get('EXPECTED_CONTROLLER_SHA'))
-          if not ok:
-              print('REFERENCE_STAGING_SOURCE_REJECTED')
-              sys.exit(1)
-          PY
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Wait for independently verified host handoff and check original bytes
-        env:
-          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
-        run: |
-          python3 -B -m scripts.ops.final_sql_runtime.reference_staging \
-            --directory "$GITHUB_WORKSPACE/reference-originals" \
-            --gate-file "$GITHUB_WORKSPACE/reference-originals.ready" \
-            --gate-wait-seconds 600 \
-            --expected-head-sha "$EXPECTED_CONTROLLER_SHA" \
-            --expected-repository-id 1100234936 \
-            --expected-workflow-id 326071379 \
-            --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --event "$GITHUB_EVENT_NAME" \
-            --head-sha "$GITHUB_SHA" \
-            --repository-id "$GITHUB_REPOSITORY_ID" \
-            --workflow-id 326071379
-      - name: Upload original before reference
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: alopex-712-before-original
-          path: reference-originals/before-13585234163.zip
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-      - name: Upload original published reference
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: alopex-712-published-original
-          path: reference-originals/published-13585845849.zip
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-      - name: Upload original PostgreSQL reference
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: alopex-712-postgresql-original
-          path: reference-originals/reference-image-13645341209.zip
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-      - name: Remove transfer copies from isolated runner
-        if: always()
-        run: |
-          rm -f -- reference-originals/before-13585234163.zip \
-            reference-originals/published-13585845849.zip \
-            reference-originals/reference-image-13645341209.zip \
-            reference-originals.ready
-          rmdir -- reference-originals 2>/dev/null || true
   s04_socket_inventory:
-    if: ${{ inputs.s04_socket_inventory_mode && inputs.issue_number == '684' && !inputs.reference_staging_mode && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
+    if: ${{ inputs.s04_socket_inventory_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -333,7 +249,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   inventory:
-    if: ${{ !inputs.reference_staging_mode && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
+    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -354,7 +270,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   qualification:
-    if: ${{ !inputs.reference_staging_mode && inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode)) }}
+    if: ${{ inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -677,7 +593,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   wal_cost_682:
-    if: ${{ !inputs.reference_staging_mode && inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
+    if: ${{ inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
@@ -883,7 +799,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   s04_inspect:
-    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.reference_staging_mode && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
+    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
