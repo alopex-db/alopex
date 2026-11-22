@@ -81,6 +81,8 @@ class SubjectBindingTests(unittest.TestCase):
                                                 if row["role"] != "harness"]}
 
     def bind(self, **changes):
+        qualified_assets_digest = changes.pop(
+            "qualified_assets_digest", self.reviewed["candidate"]["assets_digest"])
         arguments = {"manifests": self.manifests, "reviewed_pins": self.reviewed,
                      "qualification_args": {"lock_path": self.root / "lock.json",
                          "expected": {}, "repo": self.root, "runner_temp": self.root,
@@ -93,6 +95,10 @@ class SubjectBindingTests(unittest.TestCase):
         arguments.update(changes)
         with patch.object(binding.same_job, "attest_live", return_value={
                 "image_digest": "d" * 64, "job_id": "123", "run_attempt": "1",
+                "controller_digest": "a" * 64,
+                "assets_digest": qualified_assets_digest,
+                "source_commit": self.reviewed["candidate"]["source"]["commit"],
+                "source_tree": self.reviewed["candidate"]["source"]["tree"],
                 "qualification_cases": sorted(binding.same_job.qualification.CASES)}) as live:
             result = binding.assemble(**arguments)
             live.assert_called_once()
@@ -122,6 +128,10 @@ class SubjectBindingTests(unittest.TestCase):
             self.bind(selected_image_digest="not-an-image")
         with self.assertRaisesRegex(ValueError, "SUBJECT_BINDING"):
             self.bind(selected_image_digest="e" * 64)
+        with self.assertRaisesRegex(ValueError, "SUBJECT_BINDING"):
+            self.bind(controller_digest="b" * 64)
+        with self.assertRaisesRegex(ValueError, "SUBJECT_BINDING"):
+            self.bind(qualified_assets_digest="1" * 64)
         (self.manifests["published"].parent / "bin/alopex-server").write_bytes(b"changed")
         with self.assertRaisesRegex(ValueError, "SUBJECT_BINDING"):
             self.bind()

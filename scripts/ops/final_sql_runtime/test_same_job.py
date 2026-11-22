@@ -60,6 +60,7 @@ class SameJobTests(unittest.TestCase):
     def test_fresh_complete_job(self):
         result = checked(fixture_live())
         self.assertEqual((result["job_id"], result["run_attempt"]), (JOB, "2"))
+        self.assertEqual(result["controller_digest"], fixture_live()[0]["pin"]["controller_digest"])
         self.assertEqual(len(result["qualification_cases"]), 14)
 
     def test_stale_job_attempt_and_source(self):

@@ -117,6 +117,27 @@ class PublicUploadTests(unittest.TestCase):
                                  independent_evidence=self.evidence)
         self.assertFalse((self.directory / "public.json").exists())
 
+    def test_unexpected_reattest_failure_removes_public_file(self):
+        result = self.result()
+        calls = [0]
+        def fail_after_write(operation):
+            calls[0] += 1
+            if calls[0] == 2:
+                raise RuntimeError("private callback detail")
+            return self.evidence(operation)
+        with self.assertRaisesRegex(ValueError, "PUBLIC_OUTPUT"):
+            public_upload.prepare_success(result, self.pins, self.directory,
+                                          fail_after_write)
+        self.assertEqual(calls[0], 2)
+        self.assertFalse(list(self.directory.iterdir()))
+        public_upload.prepare_success(result, self.pins, self.directory, self.evidence)
+        with self.assertRaisesRegex(ValueError, "PUBLIC_OUTPUT"):
+            public_upload.verify(self.directory, pins=self.pins,
+                                 private_result=result,
+                                 independent_evidence=lambda _operation:
+                                     (_ for _ in ()).throw(RuntimeError("private")))
+        self.assertFalse(list(self.directory.iterdir()))
+
     def test_fixed_failure_log_excludes_private_cause_and_artifact(self):
         failure = controller.ControllerFailure("PUBLIC_INCOMPLETE", 52,
                                                RuntimeError("/private/secret"))

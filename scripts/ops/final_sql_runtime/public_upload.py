@@ -126,7 +126,7 @@ def _write(report, directory, pins, private_result, independent_evidence):
             os.fsync(stream.fileno())
         require(verify(directory, pins=pins, private_result=private_result,
                        independent_evidence=independent_evidence) == report)
-    except (OSError, KeyError, TypeError, ValueError, OverflowError):
+    except Exception:
         if created:
             try:
                 path.unlink()
@@ -141,7 +141,7 @@ def prepare_success(controller_result, pins, directory, independent_evidence):
         report = _fresh_report(controller_result, pins, independent_evidence)
         _write(report, directory, pins, controller_result, independent_evidence)
         return report
-    except (OSError, KeyError, TypeError, ValueError, OverflowError):
+    except Exception:
         raise ValueError("PUBLIC_OUTPUT") from None
 
 
@@ -185,7 +185,7 @@ def verify(directory, *, pins, private_result, independent_evidence):
         _success(report, pins)
         require(report == _fresh_report(private_result, pins, independent_evidence))
         return report
-    except (OSError, KeyError, TypeError, ValueError, OverflowError):
+    except Exception:
         if owned:
             try:
                 (directory / "public.json").unlink(missing_ok=True)

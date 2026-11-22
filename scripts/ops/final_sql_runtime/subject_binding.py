@@ -116,6 +116,8 @@ def assemble(*, manifests, reviewed_pins, qualification_args, selected_image_dig
     try:
         require(type(manifests) is dict and set(manifests) == set(PRODUCTS) and
                 type(reviewed_pins) is dict and set(reviewed_pins) == set(PRODUCTS) and
+                type(reviewed_pins["candidate"]) is dict and
+                type(reviewed_pins["candidate"].get("source")) is dict and
                 type(qualification_args) is dict and
                 set(qualification_args) == {"lock_path", "expected", "repo",
                                             "runner_temp", "environment"} and
@@ -128,7 +130,14 @@ def assemble(*, manifests, reviewed_pins, qualification_args, selected_image_dig
                 qualification.get("job_id") == environment.get("GITHUB_RUN_ID") and
                 qualification.get("run_attempt") == environment.get("GITHUB_RUN_ATTEMPT") and
                 qualification.get("qualification_cases") == sorted(same_job.qualification.CASES) and
-                qualification.get("image_digest") == selected_image_digest)
+                qualification.get("image_digest") == selected_image_digest and
+                qualification.get("controller_digest") == controller_digest and
+                qualification.get("assets_digest") ==
+                    reviewed_pins["candidate"].get("assets_digest") and
+                qualification.get("source_commit") ==
+                    reviewed_pins["candidate"].get("source", {}).get("commit") and
+                qualification.get("source_tree") ==
+                    reviewed_pins["candidate"].get("source", {}).get("tree"))
         subjects = {name: _product(name, manifests[name], reviewed_pins[name])
                     for name in PRODUCTS}
         published = subjects["published"]

@@ -110,7 +110,8 @@ def verify(lock, proof, receipt, observations, *, expected, environment):
                 "evidence": {"first": observations["primary"]["collection_sha256"],
                              "repeat": observations["repeat"]["collection_sha256"]}},
             "R01")
-    return {**qualified, "run_attempt": environment["GITHUB_RUN_ATTEMPT"],
+    return {**qualified, "controller_digest": lock["pin"]["controller_digest"],
+            "run_attempt": environment["GITHUB_RUN_ATTEMPT"],
             "qualification_cases": sorted(qualification.CASES)}
 
 
