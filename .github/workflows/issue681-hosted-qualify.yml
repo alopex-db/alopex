@@ -2,7 +2,7 @@ name: HNSW public hosted qualification
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened]
     branches: [integration/v0.8.17-candidate]
 
 permissions: {}

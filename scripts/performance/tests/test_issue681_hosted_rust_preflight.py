@@ -16,6 +16,9 @@ class RustPreflightTest(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[3] / ".github/workflows/"
                     "issue681-hosted-qualify.yml").read_text()
         self.assertIn("permissions: {}", workflow)
+        self.assertIn("types: [opened]", workflow)
+        self.assertNotIn("synchronize", workflow)
+        self.assertNotIn("reopened", workflow)
         self.assertIn("head.ref == 'prep/v0817-681-hosted-build'", workflow)
         self.assertLess(workflow.index("Check exact PR event"),
                         workflow.index("Fetch exact public PR head"))
