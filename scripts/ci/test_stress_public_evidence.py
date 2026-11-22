@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -92,6 +93,19 @@ class PublicEvidenceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     evidence.write_status(path, status)
             self.assertEqual(existing.read_text(), "keep")
+
+    def test_rejects_fifo_and_hardlinked_ciphertext(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fifo = root / "pipe.cms"
+            os.mkfifo(fifo)
+            with self.assertRaises(ValueError):
+                evidence.ciphertext_identity(fifo)
+            cms = make_cms(root, "private.cms", b"secret")
+            linked = root / "linked.cms"
+            os.link(cms, linked)
+            with self.assertRaises(ValueError):
+                evidence.ciphertext_identity(cms)
 
     def test_write_api_rejects_extra_raw_fields(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -14,10 +14,11 @@ import json
 import math
 import os
 from pathlib import Path
+import stat
 import subprocess
 import tarfile
 
-from stress_public_evidence import ciphertext_identity, SHA256, SHA40
+from stress_public_evidence import ciphertext_identity, MAX_CMS_BYTES, SHA256, SHA40
 
 
 BASELINES = frozenset({
@@ -27,6 +28,26 @@ BASELINES = frozenset({
 MAX_PLAINTEXT_BYTES = 90_000_000
 MAX_ARCHIVE_BYTES = 90_000_000
 MAX_BASELINE_BYTES = 1_000_000
+
+
+def _read_verified_ciphertext(path: Path, expected_sha256: str) -> bytes:
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("ARTIFACT")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb", buffering=0) as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= MAX_CMS_BYTES:
+                raise ValueError("ARTIFACT")
+            body = stream.read(MAX_CMS_BYTES + 1)
+            after = os.fstat(stream.fileno())
+            if (len(body) != before.st_size or after.st_size != before.st_size
+                    or after.st_mtime_ns != before.st_mtime_ns
+                    or hashlib.sha256(body).hexdigest() != expected_sha256):
+                raise ValueError("ARTIFACT")
+            return body
+    except OSError:
+        raise ValueError("ARTIFACT") from None
 
 
 def _valid_baseline(body: bytes) -> bool:
@@ -56,12 +77,14 @@ def recover(*, ciphertext: Path, expected_ciphertext_sha256: str,
         raise ValueError("STATE")
     if ciphertext_identity(ciphertext)[0] != expected_ciphertext_sha256:
         raise ValueError("ARTIFACT")
+    ciphertext_bytes = _read_verified_ciphertext(
+        ciphertext, expected_ciphertext_sha256)
     try:
         decrypted = subprocess.run(
             ["openssl", "cms", "-decrypt", "-binary", "-inform", "DER",
-             "-in", str(ciphertext), "-recip", str(certificate),
+             "-recip", str(certificate),
              "-inkey", str(private_key)],
-            capture_output=True, timeout=120, check=False,
+            input=ciphertext_bytes, capture_output=True, timeout=120, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         raise ValueError("DECRYPT") from None

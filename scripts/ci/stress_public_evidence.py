@@ -39,11 +39,12 @@ def ciphertext_identity(path: Path) -> tuple[str, int]:
         raise ValueError("EVIDENCE")
     try:
         before = path.lstat()
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         # Unbuffered so OpenSSL inherits the same descriptor at offset zero.
         with os.fdopen(descriptor, "rb", buffering=0) as stream:
             info = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(info.st_mode) or (before.st_dev, before.st_ino)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or (before.st_dev, before.st_ino)
                     != (info.st_dev, info.st_ino) or not 0 < info.st_size <= MAX_CMS_BYTES):
                 raise ValueError("EVIDENCE")
             size = info.st_size

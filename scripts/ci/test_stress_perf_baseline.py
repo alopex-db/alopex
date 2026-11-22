@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import stress_perf_baseline as baseline
 import stress_private_evidence as private_evidence
@@ -74,6 +75,17 @@ class PerfBaselineTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     baseline.recover(**{**args, **replacement})
                 self.assertEqual(list(args["destination"].iterdir()), [])
+
+    def test_rejects_ciphertext_swap_after_identity_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args, _ = fixture(Path(directory))
+            def swap(_path):
+                args["ciphertext"].write_bytes(b"replacement")
+                return args["expected_ciphertext_sha256"], 11
+            with patch.object(baseline, "ciphertext_identity", side_effect=swap):
+                with self.assertRaises(ValueError):
+                    baseline.recover(**args)
+            self.assertEqual(list(args["destination"].iterdir()), [])
 
     def test_rejects_missing_or_nonfinite_baseline(self):
         for variant in ({"omit_second": True}, {"invalid_first": True}):
