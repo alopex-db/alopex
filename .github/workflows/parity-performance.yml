@@ -11,12 +11,17 @@ on:
         type: choice
         options: [curated, full]
         default: curated
+      hosted_capability:
+        description: 'Read-only hosted capability check for #712; no benchmark or peer'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: parity-performance-${{ github.sha }}
+  group: parity-performance-${{ github.sha }}-${{ inputs.hosted_capability && 'capability' || 'measurement' }}
   cancel-in-progress: true
 
 env:
@@ -28,7 +33,21 @@ env:
   ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
 
 jobs:
+  hosted-capability:
+    if: ${{ inputs.hosted_capability }}
+    name: Inspect hosted parity capabilities
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check current-job kernel, counters and local container runtime
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          PARITY_ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: python3 -B scripts/performance/parity_hosted_capability.py
+
   performance:
+    if: ${{ !inputs.hosted_capability }}
     name: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }} parity performance
     runs-on: [self-hosted, Linux, X64, alopex-performance]
     timeout-minutes: 360
@@ -274,7 +293,7 @@ jobs:
   retain-run-outcome:
     name: retain immutable performance run outcome
     needs: performance
-    if: ${{ always() }}
+    if: ${{ always() && !inputs.hosted_capability }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
