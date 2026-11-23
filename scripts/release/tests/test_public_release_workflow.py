@@ -251,6 +251,21 @@ class PublicReleaseWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("maturin", benchmark)
         self.assertNotIn("pip install", benchmark)
 
+    def test_existing_docs_pair_is_compared_after_selected_run_authentication(self) -> None:
+        benchmark = self.text.split("  publish-vector-benchmark:\n", 1)[1]
+        authenticate = benchmark.index("gh api \"repos/${REPOSITORY}/actions/runs/${PARITY_RUN_ID}\"")
+        download = benchmark.index("gh run download")
+        validate = benchmark.index("- name: Validate the canonical benchmark pair")
+        compare = benchmark.index("- name: Compare an existing docs report with the selected run")
+        self.assertLess(authenticate, download)
+        self.assertLess(download, validate)
+        self.assertLess(validate, compare)
+        self.assertIn('run.get("id") != int(os.environ["PARITY_RUN_ID"])', benchmark)
+        self.assertIn('run.get("conclusion") != "success"', benchmark)
+        self.assertIn('--run-id "${PARITY_RUN_ID}" --run-attempt "${{ steps.benchmark_evidence.outputs.run_attempt }}" --public-pair', benchmark)
+        self.assertIn('cmp -s "${published}/hnsw-diagnostic.json" "${REPORT_ROOT}/hnsw-diagnostic.json"', benchmark)
+        self.assertIn('cmp -s "${published}/hnsw-diagnostic.md" "${REPORT_ROOT}/hnsw-diagnostic.md"', benchmark)
+
 
 if __name__ == "__main__":
     unittest.main()
