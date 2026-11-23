@@ -306,7 +306,7 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertIn("name: Change scope", ci)
         self.assertIn("needs: [scope]", ci)
         self.assertIn("needs.scope.outputs.production == 'true'", ci)
-        self.assertIn("Release-process-only change", ci)
+        self.assertIn("Scoped non-product verification passed", ci)
         self.assertIn("paths-ignore:", compatibility)
         self.assertIn("python -m unittest discover -s scripts/release/tests", process)
         self.assertNotIn("cargo test", process)
@@ -317,6 +317,27 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertGreaterEqual(parity.count("scripts/parity/**"), 2)
         self.assertIn("scripts.parity.test_compat_fixture_contract", parity)
         self.assertNotIn("cargo test", parity)
+
+    def test_hnsw_harness_contract_is_scoped_and_joined_without_raw_logs(self) -> None:
+        workflow = self.workflow("ci.yml")
+        scope = (REPOSITORY_ROOT / "scripts/ci/classify-change-scope.sh").read_text()
+        job = workflow.split("  hnsw-contract:", maxsplit=1)[1].split(
+            "\n  fmt:", maxsplit=1
+        )[0]
+        join = workflow.split("  ci-success:", maxsplit=1)[1]
+
+        self.assertIn("hnsw_contract: ${{ steps.classify.outputs.hnsw_contract }}", workflow)
+        self.assertIn("scripts/performance/issue681_*", scope)
+        self.assertIn("scripts/performance/tests/test_issue681_*", scope)
+        self.assertIn("scripts/performance/phase_rss.py", scope)
+        self.assertIn("if: needs.scope.outputs.hnsw_contract == 'true'", job)
+        self.assertIn("timeout-minutes: 5", job)
+        self.assertIn("-p 'test_issue681_*.py'", job)
+        self.assertIn("-p 'test_phase_rss.py'", job)
+        self.assertIn('>"${private_log}" 2>&1', job)
+        self.assertNotIn("upload-artifact", job)
+        self.assertIn("needs['hnsw-contract'].result", join)
+        self.assertIn("expected_hnsw=success", join)
 
     def test_workflows_do_not_clone_an_unpinned_chirps_checkout(self) -> None:
         for workflow_path in WORKFLOW_DIR.glob("*.yml"):
