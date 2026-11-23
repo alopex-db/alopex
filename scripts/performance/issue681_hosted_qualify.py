@@ -68,7 +68,7 @@ def platform_security():
             key, value = line.split(":", 1)
             status[key] = value.strip()
     require(status.get("CapEff") == "0000000000000000" and
-            status.get("Seccomp") in ("0", "2") and
+            status.get("Seccomp") == "2" and
             status.get("NoNewPrivs") in ("0", "1"))
     mounts = [line.split() for line in
               Path("/proc/self/mountinfo").read_text().splitlines()

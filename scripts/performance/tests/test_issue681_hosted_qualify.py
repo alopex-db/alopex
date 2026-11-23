@@ -148,6 +148,31 @@ class HostedQualificationTest(unittest.TestCase):
             allocation.assert_called_once_with((0, 1, 2, 3))
             counter.assert_called_once_with()
 
+    def test_platform_rejects_disabled_seccomp_before_admission(self):
+        proc_status = ("CapEff:\t0000000000000000\nSeccomp:\t0\n"
+                       "NoNewPrivs:\t1\n")
+
+        with mock.patch.object(qualify.sys, "platform", "linux"), \
+             mock.patch.object(qualify.platform, "machine",
+                               return_value="x86_64"), \
+             mock.patch.object(qualify.os, "geteuid", return_value=501), \
+             mock.patch.object(qualify.Path, "read_text",
+                               return_value=proc_status), \
+             mock.patch.object(qualify.admission,
+                               "current_allocation") as allocation, \
+             mock.patch.object(qualify.admission,
+                               "child_counter_probe") as counter, \
+             mock.patch.object(qualify, "context"), \
+             mock.patch.object(qualify, "storage") as storage:
+            result, status = qualify.run({})
+
+        self.assertEqual(status, 1)
+        self.assertEqual(result, {"case": qualify.CASE, "outcome": "failed",
+                                  "error_code": "PLATFORM"})
+        allocation.assert_not_called()
+        counter.assert_not_called()
+        storage.assert_not_called()
+
     def test_full_orchestration_passes_and_rejects_counter_or_storage_gap(self):
         with mock.patch.object(qualify, "context"), \
              mock.patch.object(qualify, "platform_security"), \
