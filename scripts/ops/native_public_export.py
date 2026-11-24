@@ -17,7 +17,7 @@ ROLES = {
     "receipt": "receipts/build.json",
     "harness": "harness.tar",
 }
-WHEEL = re.compile(r"wheels/alopex-0\.8\.17-cp38-abi3-linux_x86_64\.whl\Z")
+SUPPORTED_VERSIONS = {"0.8.16", "0.8.17"}
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -131,8 +131,9 @@ def verify(export, *, asset_verifier=None):
             role, name = item["role"], item["path"]
             require(type(role) is str and role not in roles and
                     type(name) is str and
-                    (name == ROLES.get(role) or
-                     role == "wheel" and WHEEL.fullmatch(name)) and
+                    (name == ROLES.get(role) or role == "wheel" and
+                     name in {f"wheels/alopex-{version}-cp38-abi3-linux_x86_64.whl"
+                              for version in SUPPORTED_VERSIONS}) and
                     type(item["size"]) is int and 0 < item["size"] <= 268_435_456 and
                     type(item["sha256"]) is str and HEX64.fullmatch(item["sha256"]))
             roles[role] = name
@@ -142,6 +143,20 @@ def verify(export, *, asset_verifier=None):
             expected_files.add("assets/" + name)
             total += item["size"]
         require(set(roles) == set(ROLES) | {"wheel"} and total <= 268_435_456)
+        receipt = read_canonical(export / "assets" / roles["receipt"], 16384)
+        require(receipt.get("schema") == "alopex.performance-build/v1" and
+                type(receipt.get("version")) is str and
+                receipt["version"] in SUPPORTED_VERSIONS and
+                receipt.get("source") == result["source"] and
+                manifest["source_commit"] == receipt["source"]["commit"] and
+                roles["wheel"] ==
+                f"wheels/alopex-{receipt['version']}-cp38-abi3-linux_x86_64.whl" and
+                receipt.get("server_sha256") == next(item["sha256"] for item in manifest["files"]
+                                                     if item["role"] == "server") and
+                receipt.get("python_wheel_sha256") == next(item["sha256"] for item in manifest["files"]
+                                                           if item["role"] == "wheel") and
+                receipt.get("parser_sha256") == next(item["sha256"] for item in manifest["files"]
+                                                     if item["role"] == "library"))
         expected_dirs = {"assets", "assets/bin", "assets/lib", "assets/wheels",
                          "assets/receipts"}
         if asset_verifier is None:

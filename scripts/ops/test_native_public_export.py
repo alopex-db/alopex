@@ -3,6 +3,7 @@ import io
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -39,7 +40,10 @@ class PublicExportTests(unittest.TestCase):
         return self.write(name, (json.dumps(
             value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode())
 
-    def success(self):
+    def success(self, version="0.8.17"):
+        if (self.export / "assets").exists():
+            shutil.rmtree(self.export / "assets")
+        self.files["wheel"] = f"wheels/alopex-{version}-cp38-abi3-linux_x86_64.whl"
         rows = []
         for role, name in self.files.items():
             if role == "wheel":
@@ -47,12 +51,25 @@ class PublicExportTests(unittest.TestCase):
                 with zipfile.ZipFile(stream, "w") as package:
                     package.writestr("alopex/module.so", b"fixture")
                 data = stream.getvalue()
+            elif role == "receipt":
+                data = b"pending"
             else:
                 data = role.encode()
             path = self.write("assets/" + name, data,
                               0o700 if role == "server" else 0o600)
             rows.append({"role": role, "path": name, "size": len(data),
                          "sha256": public.digest(path)})
+        by_role = {row["role"]: row for row in rows}
+        receipt = {
+            "schema": "alopex.performance-build/v1", "version": version,
+            "source": {"commit": "a" * 40, "tree": "c" * 40, "profile": "release"},
+            "server_sha256": by_role["server"]["sha256"],
+            "python_wheel_sha256": by_role["wheel"]["sha256"],
+            "parser_sha256": by_role["library"]["sha256"],
+        }
+        receipt_path = self.json("assets/" + self.files["receipt"], receipt)
+        by_role["receipt"].update(size=receipt_path.stat().st_size,
+                                  sha256=public.digest(receipt_path))
         manifest = {
             "schema": "alopex.test-env-assets/v1", "platform": "linux/amd64",
             "source_commit": "a" * 40, "harness_commit": "b" * 40,
@@ -77,6 +94,73 @@ class PublicExportTests(unittest.TestCase):
         result = json.loads((self.export / "result.json").read_bytes())
         result["assets_digest"] = public.digest(manifest_path)
         self.json("result.json", result)
+
+    def replace_receipt(self, change):
+        receipt = json.loads((self.export / "assets/receipts/build.json").read_bytes())
+        change(receipt)
+        data = (json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
+        self.replace_asset("receipt", data)
+
+    def assert_rejected(self):
+        with self.assertRaisesRegex(ValueError, "PUBLIC_OUTPUT"):
+            public.verify(self.export, asset_verifier=lambda *_: None)
+
+    def test_supported_versions_bind_receipt_and_exact_wheel(self):
+        for version in ("0.8.16", "0.8.17"):
+            with self.subTest(version=version):
+                self.success(version)
+                self.assertEqual(public.verify(self.export, asset_verifier=lambda *_: None),
+                                 "passed")
+
+    def test_receipt_version_and_source_mismatches_are_rejected(self):
+        changes = (
+            lambda receipt: receipt.update(version="0.8.18"),
+            lambda receipt: receipt.update(version="0.8.16"),
+            lambda receipt: receipt.pop("version"),
+            lambda receipt: receipt["source"].update(commit="d" * 40),
+            lambda receipt: receipt["source"].update(tree="d" * 40),
+            lambda receipt: receipt.pop("source"),
+            lambda receipt: receipt.update(server_sha256="d" * 64),
+        )
+        for change in changes:
+            with self.subTest(change=repr(change)):
+                self.success()
+                self.replace_receipt(change)
+                self.assert_rejected()
+
+    def test_noncanonical_or_extra_receipt_and_wheel_are_rejected(self):
+        self.success()
+        receipt = self.export / "assets/receipts/build.json"
+        self.replace_asset("receipt", receipt.read_bytes() + b" ")
+        self.assert_rejected()
+        self.success()
+        receipt = self.export / "assets/receipts/build.json"
+        duplicated = receipt.read_text().replace('"version": "0.8.17"',
+                                                  '"version": "0.8.17", "version": "0.8.17"')
+        self.replace_asset("receipt", duplicated.encode())
+        self.assert_rejected()
+        self.success()
+        self.write("assets/receipts/extra.json", b"{}")
+        self.assert_rejected()
+        self.success()
+        self.write("assets/wheels/alopex-0.8.16-cp38-abi3-linux_x86_64.whl", b"extra")
+        self.assert_rejected()
+
+    def test_wheel_filename_must_match_receipt_version(self):
+        for version in ("0.8.16", "0.8.18"):
+            with self.subTest(version=version):
+                self.success()
+                original = self.export / "assets" / self.files["wheel"]
+                renamed = self.export / f"assets/wheels/alopex-{version}-cp38-abi3-linux_x86_64.whl"
+                original.rename(renamed)
+                manifest = json.loads((self.export / "assets/assets.json").read_bytes())
+                next(row for row in manifest["files"] if row["role"] == "wheel")["path"] = \
+                    "wheels/" + renamed.name
+                manifest_path = self.json("assets/assets.json", manifest)
+                result = json.loads((self.export / "result.json").read_bytes())
+                result["assets_digest"] = public.digest(manifest_path)
+                self.json("result.json", result)
+                self.assert_rejected()
 
     def test_success_requires_only_fixed_public_assets(self):
         self.success()
