@@ -53,8 +53,8 @@ def _public_snapshot(path):
         return raw
 
 
-def execute(env, workspace: Path, task_parent: Path, home_parent: Path,
-            profile: dict, finish: str):
+def _execute(env, workspace: Path, task_parent: Path, home_parent: Path,
+             profile: dict, finish: str, qualify_job):
     """Return a private, audited public-file handle; never print host data."""
     owned = []
     try:
@@ -71,7 +71,7 @@ def execute(env, workspace: Path, task_parent: Path, home_parent: Path,
                 Path.home() in home_parent.parents)
         _empty_private(task_parent)
         _empty_private(home_parent)
-        outcome, status = qualify.run(env)
+        outcome, status = qualify_job(env)
         require(status == 0 and outcome ==
                 {"case": qualify.CASE, "outcome": "passed"})
         outcome, status = rust.run()
@@ -113,3 +113,10 @@ def execute(env, workspace: Path, task_parent: Path, home_parent: Path,
             except BaseException:
                 pass
         raise ValueError(ERROR) from None
+
+
+def execute(env, workspace: Path, task_parent: Path, home_parent: Path,
+            profile: dict, finish: str):
+    """Retain the Draft-PR qualification route for its original use case."""
+    return _execute(env, workspace, task_parent, home_parent, profile, finish,
+                    qualify.run)
