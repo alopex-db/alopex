@@ -19,7 +19,7 @@ class RotationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
-        cls.root = Path(cls.temp.name)
+        cls.root = Path(cls.temp.name).resolve()
         for name in ('old', 'new'):
             result = subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
                                      '-keyout', str(cls.root/(name+'.key')),
@@ -44,7 +44,8 @@ class RotationTests(unittest.TestCase):
                     archived_cms=self.root/'old.cms', old_certificate_sha256=subject.digest(self.root/'old.pem'),
                     new_certificate_sha256=subject.digest(self.root/'new.pem'),
                     ciphertext_sha256=subject.digest(self.root/'old.cms'),
-                    plaintext_sha256=hashlib.sha256(self.receipt).hexdigest())
+                    plaintext_sha256=hashlib.sha256(self.receipt).hexdigest(),
+                    private_temp_root_path=self.root)
 
     def test_full_rotation_and_old_archive(self):
         result = subject.verify(**self.inputs())
@@ -88,14 +89,36 @@ class RotationTests(unittest.TestCase):
             key.chmod(0o600)
 
     def test_private_temporary_receipts_removed_on_success_and_failure(self):
-        with tempfile.TemporaryDirectory() as tmp, patch('tempfile.tempdir', tmp):
-            subject.verify(**self.inputs())
-            self.assertEqual(list(Path(tmp).iterdir()), [])
+        with tempfile.TemporaryDirectory(dir=self.root) as tmp:
             values = self.inputs()
+            values['private_temp_root_path'] = Path(tmp)
+            subject.verify(**values)
+            self.assertEqual(list(Path(tmp).iterdir()), [])
             values['plaintext_sha256'] = '0'*64
             with self.assertRaises(ValueError):
                 subject.verify(**values)
             self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_unsafe_temporary_root_rejected_before_decryption(self):
+        with tempfile.TemporaryDirectory(dir=self.root) as tmp:
+            root = Path(tmp)
+            cases = [Path('/tmp'), Path('relative'), self.root/'missing']
+            link = self.root/'temp-link'
+            link.symlink_to(root, target_is_directory=True)
+            cases.append(link)
+            root.chmod(0o755)
+            cases.append(root)
+            try:
+                with patch.object(subject.tempfile, 'TemporaryDirectory',
+                                  side_effect=AssertionError('decryption temp created')):
+                    for case in cases:
+                        values = self.inputs()
+                        values['private_temp_root_path'] = case
+                        with self.subTest(case=case), self.assertRaisesRegex(ValueError, 'TEMP_ROOT_INVALID'):
+                            subject.verify(**values)
+            finally:
+                root.chmod(0o700)
+                link.unlink()
 
     def test_cli_failure_is_allowlisted_and_no_private_path(self):
         values = self.inputs()

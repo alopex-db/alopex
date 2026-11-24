@@ -256,7 +256,11 @@ Input private key files must be regular files owned by the invoking user with
 mode 0600. For an encrypted key vault, the custodian materializes a temporary
 unencrypted PEM on the approved encrypted local filesystem and removes it after
 verification; no passphrase is accepted via command line, environment or log.
-The containing directory and TMPDIR must be owner-only on that filesystem.
+Pass `--private-temp-root-path` explicitly. It must be an existing, canonical,
+owner-owned 0700 directory on the same filesystem as both key files. The
+custodian must confirm that filesystem is the approved encrypted local one;
+the verifier rejects the process-default temporary location. The key
+containing directory must also be owner-only on that filesystem.
 Temporary decrypted bytes are removed on success and handled failure; removal
 is not a secure-erasure guarantee and abrupt power loss requires custodian
 cleanup. Never run this verifier with production keys on a hosted CI runner.
@@ -272,6 +276,7 @@ python3 -B scripts/ops/verify_evidence_rotation.py \
   --old-certificate /private/old/cert.pem --old-key /private/old/key.pem \
   --new-certificate /private/new/cert.pem --new-key /private/new/key.pem \
   --archived-cms /private/archive/evidence.cms \
+  --private-temp-root-path /private/approved-encrypted/temp \
   --old-certificate-sha256 OLD_REVIEWED_PEM_SHA256 \
   --new-certificate-sha256 NEW_REVIEWED_PEM_SHA256 \
   --ciphertext-sha256 ORIGINAL_CIPHERTEXT_SHA256 \

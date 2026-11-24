@@ -57,9 +57,24 @@ def public_key(certificate, key):
     return cert_public
 
 
+def private_temp_root(path, old_key, new_key):
+    root = Path(path)
+    try:
+        canonical = root.resolve(strict=True)
+        info = root.lstat()
+    except OSError as error:
+        raise ValueError('TEMP_ROOT_INVALID') from error
+    require(root.is_absolute() and canonical == root, 'TEMP_ROOT_INVALID')
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+            and stat.S_IMODE(info.st_mode) == 0o700
+            and info.st_dev == Path(old_key).stat().st_dev
+            and info.st_dev == Path(new_key).stat().st_dev, 'TEMP_ROOT_INVALID')
+    return root
+
+
 def verify(*, old_certificate, old_key, new_certificate, new_key, archived_cms,
            old_certificate_sha256, new_certificate_sha256, ciphertext_sha256,
-           plaintext_sha256):
+           plaintext_sha256, private_temp_root_path):
     for value in (old_certificate_sha256, new_certificate_sha256, ciphertext_sha256, plaintext_sha256):
         require(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value), 'DIGEST_INVALID')
     for path, expected in ((old_certificate, old_certificate_sha256),
@@ -73,9 +88,10 @@ def verify(*, old_certificate, old_key, new_certificate, new_key, archived_cms,
     require(old_public != new_public, 'KEY_REUSE_REJECTED')
     regular(archived_cms, LIMIT)
     require(digest(archived_cms) == ciphertext_sha256, 'ARCHIVE_HASH_MISMATCH')
+    temporary_parent = private_temp_root(private_temp_root_path, old_key, new_key)
     previous = os.umask(0o077)
     try:
-        with tempfile.TemporaryDirectory(prefix='alopex-rotation-') as temporary:
+        with tempfile.TemporaryDirectory(prefix='alopex-rotation-', dir=temporary_parent) as temporary:
             root = Path(temporary)
             recovered = root / 'old-receipt'
             with recovered.open('xb') as output:
@@ -107,7 +123,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('old-certificate', 'old-key', 'new-certificate', 'new-key', 'archived-cms',
                  'old-certificate-sha256', 'new-certificate-sha256', 'ciphertext-sha256',
-                 'plaintext-sha256'):
+                 'plaintext-sha256', 'private-temp-root-path'):
         parser.add_argument('--'+name, required=True)
     try:
         result = verify(**vars(parser.parse_args()))
@@ -116,7 +132,7 @@ def main():
                  'DIGEST_INVALID', 'CERT_MISMATCH', 'KEY_REUSE_REJECTED', 'ARCHIVE_HASH_MISMATCH',
                  'ARCHIVE_PLAINTEXT_MISMATCH', 'OLD_ARCHIVE_ACCEPTED_NEW_KEY',
                  'NEW_ROUNDTRIP_MISMATCH', 'CERT_INVALID', 'CERT_NOT_YET_VALID',
-                 'CERT_EXPIRED', 'CERT_EXPIRING'}
+                 'CERT_EXPIRED', 'CERT_EXPIRING', 'TEMP_ROOT_INVALID'}
         code = str(error) if isinstance(error, ValueError) and str(error) in codes else 'ROTATION_CHECK_FAILED'
         print(json.dumps({'outcome': 'failed', 'error_code': code}))
         return 1
