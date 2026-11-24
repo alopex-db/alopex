@@ -54,12 +54,13 @@ stop the rotation and retain the existing source and ciphertext.
 The candidate-facing PEM in this source has SHA-256
 `e8a39adb8f76185a87f805f6d083bdbe2bd7ea5d3bc05607f1a7a2e0deb8b775`
 and expires on 2027-02-20 07:20:43 UTC. Its matching private key and the
-retained old key are held outside Git; their custody and local synthetic
-checks are recorded privately. The frozen WAL comparator at `490f002d` still
-uses the older recipient. Its separate workflow expiry check must stop new
-collection when that recipient has less than 24 hours remaining. This source
-status does not establish selected-runner CMS smoke, frozen-controller cutover,
-private artifact retention, or notification delivery.
+retained old key are held outside Git; their custody and local checks are
+recorded privately. The original frozen WAL comparator at `490f002d` remains
+immutable with its older recipient. This source selects successor `fd34ca34`,
+whose only change from that comparator is the new public PEM, and pins its
+certificate hash in the workflow and fixed config. Local preparation does not
+establish publication of the successor, selected-runner CMS smoke, private
+artifact retention, or notification delivery.
 
 ## 2026-11-20 source audit and approval boundary (Issue #690)
 
@@ -205,7 +206,7 @@ rotation tests; it neither generates nor installs a production recipient.
 | Existing old production CMS | Original digest, old-key decryption, receipt/schema/source and acceptance checks pass | Pending private custodian smoke |
 | New production CMS | New-key equality, source/capacity/cleanup and acceptance checks pass | Pending approved issuance and smoke |
 | Altered ciphertext | Reject against independently retained original hash before decryption | Private smoke; CMS CBC is not an author signature |
-| Frozen comparator after current PEM rotation | Its own old-recipient expiry is still rejected | Workflow checks frozen PEM independently; ref migration pending approval |
+| Frozen successor after current PEM rotation | Exact new recipient matches the workflow/config pin; old fixture fails the new pin | Local source check only; selected-runner smoke and ref publication pending |
 
 Run locally without production secrets:
 

@@ -17,7 +17,7 @@ import time
 
 REQUIRED_CASES = {*(f'E{i:02}' for i in range(1, 8)),
                   *(f'S{i:02}' for i in range(1, 4)), 'F01', 'F02', 'P01', 'R01'}
-FROZEN_COMMIT = '490f002dfb2c7f509a2444891808d9704fe6b001'
+FROZEN_COMMIT = 'fd34ca342617c247a9c711bcf597da8bbef3118f'
 STOP_BYTES = 40_000_000_000
 MAX_BYTES = 50_000_000_000
 COMPARATOR_PEAK = 1_000_000_000

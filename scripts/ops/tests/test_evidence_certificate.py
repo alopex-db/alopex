@@ -82,7 +82,10 @@ class CertificateTests(unittest.TestCase):
             self.assertLess(job.index('check_evidence_certificate.py'), job.index(work))
             self.assertIn('--minimum-seconds 86400', job)
         self.assertIn('--certificate frozen-wal-controller/.github/ops/native-evidence-cert.pem', source)
-        self.assertEqual(source.count('--expected-sha256 '+self.pin), 1)
+        self.assertIn('ref: fd34ca342617c247a9c711bcf597da8bbef3118f', source)
+        current_pin = reviewed_pin(OPS/'s04_inspect_seal.py')
+        self.assertEqual(source.count('--expected-sha256 '+current_pin), 1)
+        self.assertNotEqual(current_pin, self.pin)
 
     def test_synthetic_rotation_and_archived_decryption(self):
         with tempfile.TemporaryDirectory() as tmp:

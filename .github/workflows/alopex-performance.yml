@@ -740,11 +740,11 @@ jobs:
       - name: Stage frozen #682 comparator in measured workspace
         uses: actions/checkout@v4
         with:
-          ref: 490f002dfb2c7f509a2444891808d9704fe6b001
+          ref: fd34ca342617c247a9c711bcf597da8bbef3118f
           fetch-depth: 1
           path: frozen-wal-controller
       - name: Check evidence recipient validity before work
-        run: python3 -B qualification-controller/scripts/ops/check_evidence_certificate.py --certificate frozen-wal-controller/.github/ops/native-evidence-cert.pem --expected-sha256 d33a612dab2f76986e0dc6ba0ba45be15265ceccd2d56b07c14f9f696259f6b2 --minimum-seconds 86400
+        run: python3 -B qualification-controller/scripts/ops/check_evidence_certificate.py --certificate frozen-wal-controller/.github/ops/native-evidence-cert.pem --expected-sha256 e8a39adb8f76185a87f805f6d083bdbe2bd7ea5d3bc05607f1a7a2e0deb8b775 --minimum-seconds 86400
       - name: Qualify, capture signed indexes, measure WAL, and check candidate closure
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
@@ -757,7 +757,7 @@ jobs:
             --qualification-checkout "$GITHUB_WORKSPACE/qualification-controller" \
             --frozen-checkout "$GITHUB_WORKSPACE/frozen-wal-controller" \
             --config "$GITHUB_WORKSPACE/qualification-controller/scripts/ops/wal_cost_next/exact-a415-wal-cost-input.private.json" \
-            --config-sha256 6cfd541fee14812b6ecda2a51c839e1048116ea023b7124be84e4292d5b34d66
+            --config-sha256 2d9222eaec0ea9bbc22874f8dcea17f8b09525fa6c8ba54b7d990ac9436f5c55
       - name: Seal signed Ubuntu indexes
         if: always() && !cancelled()
         run: |

@@ -52,7 +52,9 @@ class WorkflowContract(unittest.TestCase):
         self.assertEqual([cost_job.index(value) for value in order],
                          sorted(cost_job.index(value) for value in order))
         self.assertIn('timeout-minutes: 300', workflow)
-        self.assertIn('ref: 490f002dfb2c7f509a2444891808d9704fe6b001', workflow)
+        self.assertIn('ref: fd34ca342617c247a9c711bcf597da8bbef3118f', workflow)
+        self.assertIn('--config-sha256 2d9222eaec0ea9bbc22874f8dcea17f8b09525fa6c8ba54b7d990ac9436f5c55', workflow)
+        self.assertIn('--expected-sha256 e8a39adb8f76185a87f805f6d083bdbe2bd7ea5d3bc05607f1a7a2e0deb8b775', workflow)
         self.assertIn('path: qualification-controller', workflow)
         self.assertIn('path: frozen-wal-controller', workflow)
         self.assertIn('if-no-files-found: error', workflow)

@@ -46,6 +46,7 @@
     "container_fence_bytes": 32768
   },
   "sources": {
+    ".github/ops/native-evidence-cert.pem": "e8a39adb8f76185a87f805f6d083bdbe2bd7ea5d3bc05607f1a7a2e0deb8b775",
     "scripts/ops/hosted_dataframe_comparison.py": "a474c1edffca836de047cad47f4b03136febdc019ecb4d21c78c348fe6e0c4a1",
     "scripts/ops/dataframe_phase_observer.py": "3a453435616175720464ef2b34d2e6fd9e833e96046fbdaef825963ff05d1001",
     "scripts/ops/dataframe_phase_contract.py": "90013f37bbdddc1c3db571de9013b98a376f73105fccd0f202dcf9e298fd261e",
