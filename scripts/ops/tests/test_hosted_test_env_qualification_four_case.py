@@ -1,6 +1,8 @@
 """Source binding and fail-closed four-case qualification tests; no Docker."""
 import hashlib
 import importlib.util
+import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -107,6 +109,64 @@ class FourCaseQualification(unittest.TestCase):
             (root / "assets/assets.json").write_text("{}")
             with self.assertRaisesRegex(ValueError, "IDENTITY"):
                 subject.verified_inputs(Mock(), {"assets_digest": "0" * 64}, root)
+
+    def test_public_qualification_writes_only_typed_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Mock(EXPORT=Path(directory) / "export",
+                        EXPECTED_TEMP_SNAPSHOT=None,
+                        ERRORS={"INCOMPLETE": 1, "INTERNAL": 1})
+            failed = {"schema": "alopex.hosted-test-env-qualification/v1",
+                      "case": "HOST_QUALIFICATION", "outcome": "failed",
+                      "error_code": "INCOMPLETE"}
+            subject.export_public_qualification(base, failed)
+            output = base.EXPORT / "public.json"
+            self.assertEqual(json.loads(output.read_bytes()), failed)
+            self.assertEqual({path.name for path in base.EXPORT.iterdir()}, {"public.json"})
+            self.assertEqual(os.stat(output).st_mode & 0o777, 0o600)
+            passed = {**failed, "outcome": "passed", "error_code": None,
+                      "source_commit": "a" * 40, "asset_digest": "b" * 64,
+                      "cases": [{"id": case, "status": "passed", "error_code": None}
+                                for case in sorted(subject.qualification.CASES)]}
+            subject.export_public_qualification(base, passed)
+            self.assertEqual(json.loads(output.read_bytes()), passed)
+            self.assertEqual({path.name for path in base.EXPORT.iterdir()}, {"public.json"})
+
+    def test_failed_final_budget_check_cannot_replace_public_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Mock(EXPORT=Path(directory) / "export",
+                        EXPECTED_TEMP_SNAPSHOT=None,
+                        ERRORS={"INCOMPLETE": 1})
+            public = {"schema": "alopex.hosted-test-env-qualification/v1",
+                      "case": "HOST_QUALIFICATION", "outcome": "failed",
+                      "error_code": "INCOMPLETE"}
+            subject.export_public_qualification(base, public)
+            original = (base.EXPORT / "public.json").read_bytes()
+            passed = {**public, "outcome": "passed", "error_code": None,
+                      "source_commit": "a" * 40, "asset_digest": "b" * 64,
+                      "cases": [{"id": case, "status": "passed", "error_code": None}
+                                for case in sorted(subject.qualification.CASES)]}
+            budget = Mock()
+            budget.check.side_effect = ValueError("CAPACITY")
+            with self.assertRaisesRegex(ValueError, "CAPACITY"):
+                subject.export_public_qualification(base, passed, budget)
+            self.assertEqual((base.EXPORT / "public.json").read_bytes(), original)
+            self.assertEqual({path.name for path in base.EXPORT.iterdir()}, {"public.json"})
+
+    def test_public_qualification_rejects_local_fields_and_extra_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Mock(EXPORT=Path(directory) / "export",
+                        EXPECTED_TEMP_SNAPSHOT=None,
+                        ERRORS={"INCOMPLETE": 1})
+            public = {"schema": "alopex.hosted-test-env-qualification/v1",
+                      "case": "HOST_QUALIFICATION", "outcome": "failed",
+                      "error_code": "INCOMPLETE"}
+            with self.assertRaisesRegex(ValueError, "PUBLIC_OUTPUT"):
+                subject.export_public_qualification(base,
+                                                    {**public, "local_path": "private"})
+            subject.export_public_qualification(base, public)
+            (base.EXPORT / "private-evidence.cms").write_bytes(b"private")
+            with self.assertRaisesRegex(ValueError, "PUBLIC_OUTPUT"):
+                subject.export_public_qualification(base, public)
 
 
 if __name__ == "__main__":

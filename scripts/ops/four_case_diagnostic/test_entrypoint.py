@@ -1,9 +1,11 @@
 """Offline checks for the reviewed-lock and live-attestor handoff boundaries."""
 import hashlib
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from . import entrypoint
@@ -73,6 +75,17 @@ class EntrypointTests(unittest.TestCase):
                                               "--lock-sha256", digest]), 0)
             acquire.assert_not_called()
             attest.assert_not_called()
+
+    def test_cli_failure_does_not_print_exception_text(self):
+        local_detail = str(self.path)
+        output = io.StringIO()
+        with patch.object(entrypoint, "load_reviewed_lock",
+                          side_effect=ValueError(local_detail)), redirect_stdout(output):
+            self.assertEqual(entrypoint.main(["--lock", local_detail,
+                                              "--lock-sha256", "0" * 64]), 1)
+        self.assertEqual(json.loads(output.getvalue()),
+                         {"status": "failed", "error_code": "PREREQUISITE"})
+        self.assertNotIn(local_detail, output.getvalue())
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 
-from . import adapter, log_parser, oracle, worker as pair_worker
+from . import adapter, log_parser, oracle, public_attribution, public_timing, worker as pair_worker
 
 WORKER_SECONDS = 300
 PAIR_SECONDS = 420
@@ -81,7 +81,9 @@ def verify_package(package_root, package_files):
     package = root / "four_case_diagnostic"
     require(type(package_files) is dict and package_files and
             {"four_case_diagnostic/__init__.py",
-             "four_case_diagnostic/worker.py"} <= set(package_files) and
+             "four_case_diagnostic/worker.py",
+             "four_case_diagnostic/public_timing.py",
+             "four_case_diagnostic/public_attribution.py"} <= set(package_files) and
             all(type(name) is str and name.startswith("four_case_diagnostic/") and
                 name.endswith(".py") and ".." not in Path(name).parts and
                 _hex(value, 64) for name, value in package_files.items()) and
@@ -240,9 +242,24 @@ def _verify_subject(env, config, identity, endpoint):
     return digest(_private_file(env["ALOPEX_PERF_SQL_RESOURCE_MANIFEST"], RESULT_BYTES))
 
 
-def verify_output(config, output, identity, resource_digest):
+def verify_output(config, output, identity, resource_digest, *, stage_mode):
     """Verify both cells and join the complete client inventory to the server log."""
+    require(stage_mode in ("create", "verify"), "ATTRIBUTION_STAGE_MODE")
     output = Path(output)
+    timing_root = output / "public-timing"
+    operation_root = output / "public-operations"
+    require(timing_root.is_dir() and not timing_root.is_symlink() and
+            timing_root.stat().st_uid == os.geteuid() and
+            stat.S_IMODE(timing_root.stat().st_mode) == 0o700 and
+            {path.name for path in timing_root.iterdir()} == {
+                public_timing.cell_filename(config["case"], config["trial"], mode)
+                for mode in ("on", "off")}, "TIMING_INVENTORY")
+    require(operation_root.is_dir() and not operation_root.is_symlink() and
+            operation_root.stat().st_uid == os.geteuid() and
+            stat.S_IMODE(operation_root.stat().st_mode) == 0o700 and
+            {path.name for path in operation_root.iterdir()} == {
+                public_attribution.operation_filename(config["case"], config["trial"], mode)
+                for mode in ("on", "off")}, "ATTRIBUTION_INVENTORY")
     clients = {}
     cells = {}
     tree = None
@@ -268,6 +285,13 @@ def verify_output(config, output, identity, resource_digest):
                 cell["pair_order"] == [list(adapter.pair_order(config["trial"], i))
                                        for i in range(21)], "CELL_IDENTITY")
         raw, raw_bytes = _ndjson(root / "raw.ndjson", RAW_BYTES, 21)
+        timed = public_timing._read_cell(
+            timing_root / public_timing.cell_filename(config["case"], config["trial"], mode),
+            config["case"], config["trial"], mode)
+        require([row["elapsed_seconds"] for row in timed] ==
+                [row.get("seconds") for row in raw] and
+                [row["pair_ordinal"] for row in timed] ==
+                [row.get("pair_ordinal") for row in raw], "TIMING_RAW_JOIN")
         require(cell.get("raw_sha256") == digest(raw_bytes) and
                 cell.get("raw_seconds") == [row.get("seconds") for row in raw] and
                 cell.get("raw_ordinals") == [row.get("pair_ordinal") for row in raw],
@@ -293,12 +317,39 @@ def verify_output(config, output, identity, resource_digest):
                     (identity["pid"], identity["start_ticks"]), client_identity, tree)
             except (ValueError, KeyError, TypeError) as error:
                 raise ValueError("RESOURCE_IDENTITY") from error
+        projected = public_attribution._read_operation_cell(
+            operation_root / public_attribution.operation_filename(
+                config["case"], config["trial"], mode),
+            config["case"], config["trial"], mode)
+        require(projected == [public_attribution.operation_record(
+            config["case"], config["trial"], mode, index, row["pair_ordinal"],
+            row["seconds"], measured[index] if mode == "on" else None,
+            row["resources"]) for index, row in enumerate(raw)],
+            "ATTRIBUTION_RAW_JOIN")
         cells[mode] = cell
     require(cells["on"]["result_sha256"] == cells["off"]["result_sha256"] and
             cells["on"]["rollback_sha256"] == cells["off"]["rollback_sha256"],
             "PAIR_IDENTITY")
     events = log_parser.parse_server_timing(output / "server.log", config["case"],
                                             config["trial"], clients["on"], clients["off"])
+    stage_root = output / "public-stages"
+    expected_stages = public_attribution.stage_records(
+        config["case"], config["trial"], clients["on"], events)
+    if stage_mode == "create":
+        require(not stage_root.exists() and not stage_root.is_symlink(),
+                "ATTRIBUTION_STAGE_ROOT")
+        stage_root.mkdir(mode=0o700)
+        public_attribution.write_stage_cell(
+            stage_root, config["case"], config["trial"], clients["on"], events)
+    require(stage_root.is_dir() and not stage_root.is_symlink() and
+            stage_root.stat().st_uid == os.geteuid() and
+            stat.S_IMODE(stage_root.stat().st_mode) == 0o700 and
+            {path.name for path in stage_root.iterdir()} == {
+                public_attribution.stage_filename(config["case"], config["trial"])} and
+            public_attribution._read(stage_root / public_attribution.stage_filename(
+                config["case"], config["trial"]), 147,
+                public_attribution.MAX_STAGE_BYTES) == expected_stages,
+            "ATTRIBUTION_STAGE_JOIN")
     return {"cells": cells, "clients": clients, "server_timing": events,
             "server": identity, "client_identity": client_identity}
 
@@ -399,7 +450,8 @@ def run_owned_pair(config, output, *, source, assets_digest, job_id, start,
                 verify_package(package_root, package_files)
                 require(_verify_subject(subject_environment, config, identity, endpoint) ==
                         resource_digest, "SUBJECT_BINDING")
-                report["measurement"] = verify_output(config, output, identity, resource_digest)
+                report["measurement"] = verify_output(
+                    config, output, identity, resource_digest, stage_mode="create")
             except BaseException:
                 report["primary_error"] = "EVIDENCE_INCOMPLETE"
         if report["primary_error"] is None and report["worker_cleanup_error"] is None and \
@@ -468,7 +520,7 @@ def run_collected_pair(config, run, proof, receipt):
                      "ALOPEX_PERF_SERVER_URL": server["url"]},
                     config, identity, server["url"])
     verified = verify_output(config, collected, identity,
-                             report["resource_manifest_sha256"])
+                             report["resource_manifest_sha256"], stage_mode="verify")
     require(verified["client_identity"] ==
             (client["pid"], client["start_ticks"]), "CLIENT_IDENTITY")
     return {"status": "passed", "server": identity,

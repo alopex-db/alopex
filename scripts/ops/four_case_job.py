@@ -1,4 +1,4 @@
-"""Private workflow handoff for the #712 four-case same-job diagnostic.
+"""Public workflow handoff for the #712 four-case same-job diagnostic.
 
 Inputs are two independently reviewed SHA-256/base64 pairs. No final pins are
 embedded here, and no phase dispatches or claims performance qualification.
@@ -9,13 +9,12 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import stat
-import subprocess
 import sys
-import tarfile
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -24,13 +23,12 @@ from four_case_diagnostic import controller, entrypoint, stage_pair  # noqa: E40
 
 LOCK_DIR = "alopex-712-lock"
 MATRIX_DIR = "alopex-712-matrix"
-CERT = REPO / ".github/ops/native-evidence-cert.pem"
-CERT_SHA256 = "d33a612dab2f76986e0dc6ba0ba45be15265ceccd2d56b07c14f9f696259f6b2"
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 MAX_FILES_PER_PAIR = 64
 MAX_RECEIPT_FILES = 16
 MAX_PRIVATE_FILES = 12 * MAX_FILES_PER_PAIR + MAX_RECEIPT_FILES
 MAX_PRIVATE_BYTES = 200_000_000
+MAX_PUBLIC_BYTES = 3_000_000  # 24 bounded operation cells, 12 stage cells, timings and metadata.
 
 
 def require(value, code):
@@ -114,7 +112,7 @@ def run_job(environment):
     require(manifest["lock_sha256"] == environment["ALOPEX_FOUR_CASE_LOCK_SHA256"],
             "MISSING_PIN")
     operations = entrypoint.controller_operations(REPO, lock)
-    from four_case_diagnostic import docs_stage, intake
+    from four_case_diagnostic import docs_stage
     launch = stage_pair.make_stage_pair(manifest, REPO, root, operations)
     docs_ready = False
 
@@ -128,14 +126,12 @@ def run_job(environment):
 
     def complete(runs, reviewed_lock, reviewed_manifest, proof, receipt, job_id):
         from four_case_diagnostic import evidence_assembly
-        require(CERT.is_file() and _digest(CERT.read_bytes()) == CERT_SHA256,
-                "EVIDENCE_BOUND")
-        _capacity_before_seal(root, intake.MAX_CMS + 10_000_000)
-        evidence_assembly.seal_runs(
+        _capacity_before_seal(root, MAX_PUBLIC_BYTES + 10_000_000)
+        evidence_assembly.assemble_public_timing(
+            runs, root / MATRIX_DIR / "public-timing")
+        evidence_assembly.assemble_files(
             runs, lock=reviewed_lock, manifest=reviewed_manifest,
-            proof=proof, receipt=receipt, job_id=job_id,
-            recipient_certificate=CERT,
-            output_path=root / MATRIX_DIR / "strict-evidence.cms")
+            proof=proof, receipt=receipt, job_id=job_id)
 
     return controller.run_current_job(
         manifest_path, environment["ALOPEX_FOUR_CASE_MANIFEST_SHA256"],
@@ -162,7 +158,8 @@ def _capacity_before_seal(root, additional_bytes):
 
 def _matrix_outcome(private, environment):
     """Reduce the controller receipt to fixed public status for this attempt."""
-    fallback = {"matrix_status": "failed", "matrix_error_code": "INCOMPLETE"}
+    fallback = {"matrix_status": "failed", "matrix_error_code": "INCOMPLETE",
+                "completed_pairs": None}
     path = private / "receipt.public.json"
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -187,35 +184,150 @@ def _matrix_outcome(private, environment):
                     type(receipt.get("qualification_binding_sha256")) is str and
                     HEX64.fullmatch(receipt["qualification_binding_sha256"]),
                     "RECEIPT_IDENTITY")
-            controller.verify_public_receipt(
+            accepted = controller.verify_public_receipt(
                 private, job_id=environment["GITHUB_RUN_ID"],
                 run_attempt=environment["GITHUB_RUN_ATTEMPT"],
                 binding_sha256=receipt["qualification_binding_sha256"])
-            return {"matrix_status": "passed", "matrix_error_code": None}
+            require(type(accepted.get("source_commit")) is str and
+                    re.fullmatch(r"[0-9a-f]{40}", accepted["source_commit"]) and
+                    type(accepted.get("assets_digest")) is str and
+                    HEX64.fullmatch(accepted["assets_digest"]), "RECEIPT_IDENTITY")
+            lock = entrypoint.load_reviewed_lock(
+                private.parent / LOCK_DIR / "lock.json",
+                environment["ALOPEX_FOUR_CASE_LOCK_SHA256"])
+            pin = lock["pin"]
+            require(accepted["source_commit"] == pin["source_commit"] and
+                    accepted["assets_digest"] == pin["assets_digest"],
+                    "RECEIPT_IDENTITY")
+            return {"matrix_status": "passed", "matrix_error_code": None,
+                    "completed_pairs": 12,
+                    "source_commit": accepted["source_commit"],
+                    "source_tree": pin["source_tree"],
+                    "artifact_id": pin["artifact_id"],
+                    "artifact_sha256": pin["artifact_sha256"],
+                    "server_sha256": pin["server_sha256"],
+                    "wheel_sha256": pin["wheel_sha256"],
+                    "assets_digest": accepted["assets_digest"]}
         allowed = {"MISSING_PIN", "PRIVATE_MANIFEST", "SAME_JOB", "QUALIFICATION",
                    "QUALIFICATION_BINDING", "POLICY", "CLEANUP", "IDENTITY",
                    "OPERATOR_IDENTITY", "OUTPUT_STATE", "PAIR_STAGE", "PAIR_FAILED"}
         if receipt.get("status") == "failed" and receipt.get("error_code") in allowed:
+            verified = controller.verify_failed_receipt(
+                private, run_attempt=environment["GITHUB_RUN_ATTEMPT"])
             return {"matrix_status": "failed",
-                    "matrix_error_code": receipt["error_code"]}
+                    "matrix_error_code": verified["error_code"],
+                    "completed_pairs": verified["pair_count"]}
     except (OSError, ValueError, UnicodeError, KeyError, TypeError):
         pass
     return fallback
 
 
-def seal_job(environment):
-    """Encrypt bounded private output; export only CMS and a fixed public status."""
+def _verify_timing_raw_join(private, measurement, environment):
+    """Rejoin every public row to collected observations at upload time."""
+    from four_case_diagnostic import adapter, log_parser, public_attribution, supervisor
+
+    job_id = environment.get("GITHUB_RUN_ID")
+    require(type(job_id) is str and job_id.isdecimal(), "PUBLIC_OUTPUT")
+    cells = {(case, trial, mode): [] for case in adapter.CASES
+             for trial in range(3) for mode in ("on", "off")}
+    for row in measurement["timings"]:
+        cells[(row["case"], row["trial"], row["mode"])].append(row)
+    operations = {(case, trial, mode): [] for case in adapter.CASES
+                  for trial in range(3) for mode in ("on", "off")}
+    stages = {(case, trial): [] for case in adapter.CASES for trial in range(3)}
+    for row in measurement["operations"]:
+        operations[(row["case"], row["trial"], row["mode"])].append(row)
+    for row in measurement["stages"]:
+        stages[(row["case"], row["trial"])].append(row)
+    for case in adapter.CASES:
+        for trial in range(3):
+            collected = (private / f"{case}-{trial}" / "owned-runs" /
+                         f"f712-{job_id}-{case}-{trial}" / "collected")
+            directories = (private / f"{case}-{trial}",
+                           private / f"{case}-{trial}" / "owned-runs",
+                           collected.parent, collected, collected / "on",
+                           collected / "off")
+            for directory in directories:
+                try:
+                    info = directory.lstat()
+                except OSError as error:
+                    raise ValueError("PUBLIC_OUTPUT") from error
+                require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and
+                        stat.S_IMODE(info.st_mode) == 0o700, "PUBLIC_OUTPUT")
+            clients = {}
+            for mode in ("on", "off"):
+                raw, raw_bytes = supervisor._ndjson(
+                    collected / mode / "raw.ndjson", supervisor.RAW_BYTES, 21)
+                require(all(type(row) is dict and
+                            type(row.get("seconds")) in (int, float) and
+                            math.isfinite(row["seconds"]) and row["seconds"] > 0
+                            for row in raw), "PUBLIC_OUTPUT")
+                clients[mode], _ = supervisor._ndjson(
+                    collected / mode / "client.ndjson", supervisor.CLIENT_BYTES,
+                    adapter.expected_client_records(case, mode))
+                measured = {row.get("sample"): row for row in clients[mode]
+                            if type(row) is dict and row.get("phase") == "measured"}
+                require(set(measured) == set(range(21)), "PUBLIC_OUTPUT")
+                cell = supervisor._json_file(collected / mode / "measurement.json",
+                                             supervisor.RESULT_BYTES)
+                timing = cells[(case, trial, mode)]
+                require(len(timing) == len(raw) == 21 and
+                        all(measured[index].get("pair_ordinal") ==
+                            raw[index].get("pair_ordinal") and
+                            type(measured[index].get("outer_ns")) is int and
+                            measured[index]["outer_ns"] == round(
+                                raw[index].get("seconds") * 1_000_000_000)
+                            for index in range(21)) and
+                        cell.get("raw_sha256") == _digest(raw_bytes) and
+                        cell.get("raw_seconds") == [row.get("seconds") for row in raw] and
+                        cell.get("raw_ordinals") ==
+                        [row.get("pair_ordinal") for row in raw] and
+                        all((item["sample"], item["pair_ordinal"],
+                             item["elapsed_seconds"]) ==
+                            (index, raw[index].get("pair_ordinal"),
+                             raw[index].get("seconds"))
+                            for index, item in enumerate(timing)), "PUBLIC_OUTPUT")
+                require(operations[(case, trial, mode)] == [
+                    public_attribution.operation_record(
+                        case, trial, mode, index, row["pair_ordinal"], row["seconds"],
+                        measured[index] if mode == "on" else None, row["resources"])
+                    for index, row in enumerate(raw)], "PUBLIC_OUTPUT")
+            events = log_parser.parse_server_timing(
+                collected / "server.log", case, trial, clients["on"], clients["off"])
+            require(stages[(case, trial)] == public_attribution.stage_records(
+                case, trial, clients["on"], events), "PUBLIC_OUTPUT")
+
+
+def _public_measurement(private):
+    """Load only the three fixed public inventories with their declared units."""
+    from four_case_diagnostic import public_attribution, public_timing
+
+    timings = public_timing.load_timing_inventory(private / "public-timing")
+    return {"schema": "alopex.sql-four-case-measurement/v2",
+            "units": {"elapsed_seconds": "seconds", "client_phase": "nanoseconds",
+                      "server_stage": "nanoseconds", "cpu": "seconds",
+                      "rss": "bytes", "io": "bytes"},
+            "server_resource_aggregation": "sum_of_observed_process_counters",
+            "timings": timings,
+            "paired": public_timing.summarize_timing_records(timings),
+            "operations": public_attribution.load_operation_inventory(
+                private / "public-operations"),
+            "stages": public_attribution.load_stage_inventory(private / "public-stages")}
+
+
+def prepare_public_export(environment):
+    """Export only a bounded, canonical public measurement or fixed failure."""
     root = _runner_temp(environment)
     private = root / MATRIX_DIR
     export = REPO / "native-sql-four-case-export"
-    export.mkdir(mode=0o700)
-    require(export.stat().st_uid == os.geteuid() and
+    export.mkdir(mode=0o700, exist_ok=True)
+    require(not export.is_symlink() and export.stat().st_uid == os.geteuid() and
             stat.S_IMODE(export.stat().st_mode) == 0o700 and
             private.is_dir() and not private.is_symlink() and
             private.stat().st_uid == os.geteuid() and
-            stat.S_IMODE(private.stat().st_mode) == 0o700 and
-            CERT.is_file() and _digest(CERT.read_bytes()) == CERT_SHA256,
+            stat.S_IMODE(private.stat().st_mode) == 0o700,
             "EVIDENCE_BOUND")
+    require(not list(export.iterdir()), "EVIDENCE_STATE")
     members = sorted(path for path in private.rglob("*") if path.is_file())
     require(members and len(members) <= MAX_PRIVATE_FILES and
             all(not path.is_symlink() and path.stat().st_uid == os.geteuid() and
@@ -225,77 +337,83 @@ def seal_job(environment):
             "EVIDENCE_BOUND")
     for path in private.rglob("*"):
         require(not path.is_symlink(), "EVIDENCE_BOUND")
-    archive = private / "evidence.tar.gz"
-    pending = export / ".private-evidence.pending.cms"
-    ciphertext = export / "private-evidence.cms"
-    require(not archive.exists() and not pending.exists() and
-            not ciphertext.exists(), "EVIDENCE_STATE")
     matrix = _matrix_outcome(private, environment)
     if matrix["matrix_status"] == "passed":
-        from four_case_diagnostic import intake, supervisor
-        strict = private / "strict-evidence.cms"
-        encrypted = supervisor._private_file(strict, intake.MAX_CMS)
-        require(encrypted, "EVIDENCE_BOUND")
-        _capacity_before_seal(root, len(encrypted) + 10_000_000)
-        try:
-            _write_private(pending, encrypted)
-            pending.replace(ciphertext)
-        finally:
-            pending.unlink(missing_ok=True)
-        public = {"schema": "alopex.sql-four-case-export/v1", "status": "sealed",
-                  "evidence_schema": intake.SCHEMA,
+        measurement = _public_measurement(private)
+        public = {"schema": "alopex.sql-four-case-export/v4", "status": "prepared",
                   "performance_qualification": False,
-                  "ciphertext_sha256": _digest(encrypted),
-                  "ciphertext_size": len(encrypted), **matrix}
-        _write_private(export / "public.json",
-                       (json.dumps(public, sort_keys=True) + "\n").encode())
-        return public
-    source_bytes = sum(path.stat().st_size for path in members)
-    storage = _capacity_before_seal(root, 2 * source_bytes + 10_000_000)
-    try:
-        with tarfile.open(archive, "w:gz") as bundle:
-            for path in members:
-                bundle.add(path, arcname=str(path.relative_to(private)), recursive=False)
-        require(0 < archive.stat().st_size <= MAX_PRIVATE_BYTES, "EVIDENCE_BOUND")
-        require(_capacity_before_seal(root, archive.stat().st_size +
-                                      source_bytes + 10_000_000) == storage,
-                "CAPACITY")
-        result = subprocess.run(
-            ["openssl", "cms", "-encrypt", "-binary", "-aes256", "-outform",
-             "DER", "-in", str(archive), "-out", str(pending), str(CERT)],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, timeout=60, check=False)
-        require(result.returncode == 0 and pending.is_file() and
-                0 < pending.stat().st_size <= 205_000_000, "SEAL_FAILED")
-        require(_capacity_before_seal(root, 10_000_000) == storage, "CAPACITY")
-        pending.replace(ciphertext)
-    finally:
-        archive.unlink(missing_ok=True)
-        pending.unlink(missing_ok=True)
-    public = {"schema": "alopex.sql-four-case-export/v1", "status": "sealed",
-              "performance_qualification": False,
-              "ciphertext_sha256": _digest(ciphertext.read_bytes())}
-    public.update(matrix)
-    _write_private(export / "public.json",
-                   (json.dumps(public, sort_keys=True) + "\n").encode())
+                  "measurement": measurement, **matrix}
+    else:
+        public = {"schema": "alopex.sql-four-case-export/v4", "status": "prepared",
+                  "performance_qualification": False,
+                  "measurement": None, **matrix}
+    body = (json.dumps(public, sort_keys=True, allow_nan=False) + "\n").encode()
+    require(0 < len(body) <= MAX_PUBLIC_BYTES, "PUBLIC_OUTPUT")
+    _capacity_before_seal(root, len(body) + 1_000_000)
+    _write_private(export / "public.json", body)
     return public
+
+
+def verify_public_export(environment):
+    """Rebuild the public allowlist before any workflow artifact upload."""
+    root = _runner_temp(environment)
+    private = root / MATRIX_DIR
+    export = REPO / "native-sql-four-case-export"
+    require(export.is_dir() and not export.is_symlink() and
+            export.stat().st_uid == os.geteuid() and
+            stat.S_IMODE(export.stat().st_mode) == 0o700 and
+            {path.name for path in export.iterdir()} == {"public.json"},
+            "PUBLIC_OUTPUT")
+    path = export / "public.json"
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+                info.st_uid == os.geteuid() and
+                stat.S_IMODE(info.st_mode) == 0o600 and
+                0 < info.st_size <= MAX_PUBLIC_BYTES, "PUBLIC_OUTPUT")
+        body = stream.read(MAX_PUBLIC_BYTES + 1)
+        require(len(body) == info.st_size, "PUBLIC_OUTPUT")
+    try:
+        public = json.loads(body,
+                            object_pairs_hook=entrypoint.acquire.acquisition._unique_pairs)
+    except (ValueError, UnicodeError) as error:
+        raise ValueError("PUBLIC_OUTPUT") from error
+    require(type(public) is dict and
+            body == (json.dumps(public, sort_keys=True, allow_nan=False) + "\n").encode(),
+            "PUBLIC_OUTPUT")
+    matrix = _matrix_outcome(private, environment)
+    if matrix["matrix_status"] == "passed":
+        measurement = _public_measurement(private)
+        _verify_timing_raw_join(private, measurement, environment)
+        expected = {"schema": "alopex.sql-four-case-export/v4", "status": "prepared",
+                    "performance_qualification": False,
+                    "measurement": measurement,
+                    **matrix}
+    else:
+        expected = {"schema": "alopex.sql-four-case-export/v4", "status": "prepared",
+                    "performance_qualification": False,
+                    "measurement": None, **matrix}
+    require(public == expected, "PUBLIC_OUTPUT")
+    return True
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("install", "run", "seal"))
+    parser.add_argument("phase", choices=("install", "run", "export", "verify-public"))
     args = parser.parse_args(argv)
     try:
-        result = {"install": install_inputs, "run": run_job,
-                  "seal": seal_job}[args.phase](dict(os.environ))
-        print(json.dumps({"status": "passed" if args.phase != "seal" else "sealed",
+        {"install": install_inputs, "run": run_job,
+         "export": prepare_public_export,
+         "verify-public": verify_public_export}[args.phase](dict(os.environ))
+        print(json.dumps({"status": "prepared" if args.phase == "export" else "passed",
                           "performance_qualification": False}, sort_keys=True))
         return 0
     except BaseException as error:
         code = error.args[0] if type(error) is ValueError and error.args else "INTERNAL"
         print(json.dumps({"status": "failed", "error_code": code if code in {
             "MISSING_PIN", "PRIVATE_MANIFEST", "PREREQUISITE", "EVIDENCE_BOUND",
-            "EVIDENCE_STATE", "SEAL_FAILED"} else "INTERNAL",
+            "EVIDENCE_STATE", "PUBLIC_OUTPUT", "CAPACITY"} else "INTERNAL",
                           "performance_qualification": False}, sort_keys=True))
         return 1
 

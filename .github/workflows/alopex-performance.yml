@@ -17,6 +17,11 @@ on:
         required: false
         type: boolean
         default: false
+      sql_final_mode:
+        description: Run the reviewed public 52-run #712 final SQL comparison
+        required: false
+        type: boolean
+        default: false
       wal_cost_mode:
         description: Continue same-job #804 qualification into pinned #682 WAL cost
         required: false
@@ -62,6 +67,14 @@ on:
         description: Base64 of the exact #712 static manifest bytes
         required: false
         type: string
+      final_sql_lock_sha256:
+        description: Independently reviewed SHA-256 of the public final SQL lock
+        required: false
+        type: string
+      final_sql_lock_base64:
+        description: Base64 of exact public final SQL lock bytes
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -73,7 +86,7 @@ concurrency:
 
 jobs:
   s04_socket_inventory:
-    if: ${{ inputs.s04_socket_inventory_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
+    if: ${{ inputs.s04_socket_inventory_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -249,7 +262,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   inventory:
-    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
+    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -270,7 +283,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   qualification:
-    if: inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode))
+    if: ${{ inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_final_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -422,22 +435,29 @@ jobs:
         with:
           fetch-depth: 1
       - name: Install independently pinned four-case inputs
-        if: inputs.sql_four_case_mode
+        if: inputs.sql_four_case_mode || inputs.sql_final_mode
         env:
           ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
           ALOPEX_FOUR_CASE_LOCK_B64: ${{ inputs.four_case_lock_base64 }}
           ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
           ALOPEX_FOUR_CASE_MANIFEST_B64: ${{ inputs.four_case_manifest_base64 }}
         run: python3 -B scripts/ops/four_case_job.py install
+      - name: Install independently pinned final SQL lock
+        if: inputs.sql_final_mode
+        env:
+          ALOPEX_FINAL_SQL_LOCK_SHA256: ${{ inputs.final_sql_lock_sha256 }}
+          ALOPEX_FINAL_SQL_LOCK_B64: ${{ inputs.final_sql_lock_base64 }}
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+        run: python3 -B scripts/ops/final_sql_job.py install
       - name: Admit this runner before candidate acquisition
-        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}
+        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode }}
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --admission-only
       - name: Retrieve exact candidate assets
-        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}
+        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode }}
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -445,7 +465,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --acquire-assets
       - name: Qualify on this runner
-        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}
+        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode }}
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
@@ -474,7 +494,7 @@ jobs:
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
         run: python3 -B scripts/ops/hosted_test_env_qualification_1951.py --execute
       - name: Admit runner for source-pinned four-case qualification
-        if: inputs.sql_four_case_mode
+        if: inputs.sql_four_case_mode || inputs.sql_final_mode
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -482,7 +502,7 @@ jobs:
           ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
         run: python3 -B scripts/ops/hosted_test_env_qualification_four_case.py --admission-only
       - name: Acquire source-pinned four-case assets
-        if: inputs.sql_four_case_mode
+        if: inputs.sql_four_case_mode || inputs.sql_final_mode
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -491,7 +511,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B scripts/ops/hosted_test_env_qualification_four_case.py --acquire-assets
       - name: Qualify source-pinned four-case assets on this runner
-        if: inputs.sql_four_case_mode
+        if: inputs.sql_four_case_mode || inputs.sql_final_mode
+        id: four_case_qualification
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -499,11 +520,66 @@ jobs:
           ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
         run: python3 -B scripts/ops/hosted_test_env_qualification_four_case.py --execute
       - name: Preserve encrypted qualification evidence
-        if: always()
+        if: always() && !inputs.sql_four_case_mode && !inputs.sql_final_mode
         uses: actions/upload-artifact@v4
         with:
           name: hosted-test-env-qualification
           path: native-qualification-export/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Publish public four-case qualification
+        if: (inputs.sql_four_case_mode || inputs.sql_final_mode) && steps.four_case_qualification.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-test-env-qualification
+          path: native-qualification-export/public.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Admit fixed final SQL source checkouts
+        if: inputs.sql_final_mode && steps.four_case_qualification.outcome == 'success'
+        id: final_source_budget
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+          ALOPEX_FINAL_SQL_LOCK_SHA256: ${{ inputs.final_sql_lock_sha256 }}
+        run: python3 -B scripts/ops/final_sql_job.py admit-sources
+      - name: Check out fixed public SQL docs source
+        if: inputs.sql_final_mode && steps.final_source_budget.outcome == 'success'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: alopex-db/docs
+          ref: 5c3d068b9ce4d60fbc1608924882df13b0a27568
+          path: alopex-final-docs
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out fixed candidate SQL helpers
+        if: inputs.sql_final_mode && steps.final_source_budget.outcome == 'success'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: alopex-db/alopex
+          ref: 426418099c4337e73f5ced4444215a640898ed5a
+          path: alopex-final-product
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Measure public final SQL comparison
+        if: inputs.sql_final_mode && steps.final_source_budget.outcome == 'success'
+        id: final_sql
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+          ALOPEX_FINAL_SQL_LOCK_SHA256: ${{ inputs.final_sql_lock_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/ops/final_sql_job.py run
+      - name: Publish verified public final SQL comparison
+        if: inputs.sql_final_mode && steps.final_sql.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-sql-final-comparison
+          path: native-final-sql-export/public.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -544,20 +620,25 @@ jobs:
           ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
           ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
         run: python3 -B scripts/ops/four_case_job.py run
-      - name: Seal private four-case evidence
+      - name: Prepare public four-case result
+        id: matrix_export
         if: always() && inputs.sql_four_case_mode && steps.matrix.outcome != 'skipped'
         env:
           ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
           ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
-        run: python3 -B scripts/ops/four_case_job.py seal
-      - name: Preserve encrypted four-case evidence
-        if: always() && inputs.sql_four_case_mode && steps.matrix.outcome != 'skipped'
-        uses: actions/upload-artifact@v4
+        run: python3 -B scripts/ops/four_case_job.py export
+      - name: Verify four-case public measurement
+        id: matrix_public
+        if: always() && inputs.sql_four_case_mode && steps.matrix_export.outcome == 'success'
+        env:
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+        run: python3 -B scripts/ops/four_case_job.py verify-public
+      - name: Publish verified four-case measurement
+        if: always() && inputs.sql_four_case_mode && steps.matrix_public.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-sql-four-case-matrix
-          path: |
-            native-sql-four-case-export/private-evidence.cms
-            native-sql-four-case-export/public.json
+          path: native-sql-four-case-export/public.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -578,7 +659,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   wal_cost_682:
-    if: inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode
+    if: ${{ inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
@@ -784,7 +865,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   s04_inspect:
-    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
+    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
