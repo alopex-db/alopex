@@ -111,28 +111,35 @@ jobs:
               assert e.get('GITHUB_REF', '').startswith('refs/heads/')
               assert e.get('RUNNER_ENVIRONMENT') == 'github-hosted'
               assert platform.system() == 'Linux' and platform.machine() == 'x86_64'
-              code = 'STORAGE'
+              code = 'STORAGE_MOUNTINFO'
               lines = pathlib.Path('/proc/self/mountinfo').read_text().splitlines()
               assert 1 <= len(lines) <= 4096
               devices = {}
               for line in lines:
+                  code = 'STORAGE_MOUNT_PATH'
                   mount = line.split(' - ', 1)[0].split()[4]
                   mount = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m.group(1), 8)), mount)
                   path = pathlib.Path(mount)
                   assert path.is_absolute() and path.exists() and not path.is_symlink()
                   identity = path.stat().st_dev
+                  code = 'STORAGE_FS_STATS'
                   fs = os.statvfs(path)
                   assert fs.f_frsize > 0 and 0 <= fs.f_bavail <= fs.f_bfree <= fs.f_blocks
                   used = (fs.f_blocks - fs.f_bfree) * fs.f_frsize
                   free = fs.f_bavail * fs.f_frsize
                   previous = devices.get(identity)
                   devices[identity] = (max(used, previous[0]), min(free, previous[1])) if previous else (used, free)
+              code = 'STORAGE_DEVICE_COUNT'
               assert 1 <= len(devices) <= 256
+              code = 'STORAGE_WORKSPACE'
               workspace = pathlib.Path(e['GITHUB_WORKSPACE'])
               assert workspace.is_absolute() and workspace.parent.exists()
+              code = 'STORAGE_BUDGET'
               baseline = sum(value[0] for value in devices.values())
               assert baseline + 10_000_000_000 < 40_000_000_000
+              code = 'STORAGE_FREE'
               assert devices[workspace.parent.stat().st_dev][1] > 10_000_000_000
+              code = 'STORAGE_ENV'
               with open(e['GITHUB_ENV'], 'a', encoding='ascii') as output:
                   output.write('HNSW_ADMISSION_BASELINE=' + str(baseline) + '\n')
               print(json.dumps({'case': 'HNSW_HOSTED_PRECHECK', 'outcome': 'passed'}))
