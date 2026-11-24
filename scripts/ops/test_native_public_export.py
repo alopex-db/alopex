@@ -121,6 +121,8 @@ class PublicExportTests(unittest.TestCase):
             lambda receipt: receipt["source"].update(tree="d" * 40),
             lambda receipt: receipt.pop("source"),
             lambda receipt: receipt.update(server_sha256="d" * 64),
+            lambda receipt: receipt.update(python_wheel_sha256="d" * 64),
+            lambda receipt: receipt.update(parser_sha256="d" * 64),
         )
         for change in changes:
             with self.subTest(change=repr(change)):
