@@ -2,10 +2,13 @@
 
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.compatibility.run import assert_complete
+from scripts.compatibility import storage
 from scripts.compatibility.storage import allocated_bytes
 
 
@@ -120,6 +123,38 @@ class MatrixAcceptanceTests(unittest.TestCase):
         self.assertEqual(
             total, self.root.stat().st_blocks * 512 + payload.stat().st_blocks * 512
         )
+
+    def test_linked_worktree_inventory_includes_main_workspace(self):
+        workspace = self.root / "workspace"
+        main = workspace / "alopex"
+        linked = self.root / "linked" / "alopex"
+        main.mkdir(parents=True)
+        (workspace / "sibling-output").mkdir()
+        for command in [
+            ["git", "init", "-q", str(main)],
+            [
+                "git", "-C", str(main), "-c", "user.name=Test",
+                "-c", "user.email=test@example.invalid", "commit", "-q",
+                "--allow-empty", "-m", "fixture",
+            ],
+            ["git", "-C", str(main), "worktree", "add", "-q", "--detach", str(linked)],
+        ]:
+            subprocess.run(command, check=True, capture_output=True)
+
+        for checkout in [main, linked]:
+            with patch.object(storage, "REPO", checkout), patch.object(
+                storage, "allocated_bytes", return_value=123
+            ) as count:
+                self.assertEqual(storage.inventory()["allocated_bytes"], 123)
+            self.assertTrue(
+                workspace.resolve() in count.call_args.args[0],
+                "main workspace missing from inventory roots",
+            )
+
+    def test_inventory_stops_when_worktree_discovery_fails(self):
+        with patch.object(storage, "worktree_paths", side_effect=RuntimeError("git failed")):
+            with self.assertRaisesRegex(RuntimeError, "git failed"):
+                storage.inventory()
 
 
 if __name__ == "__main__":

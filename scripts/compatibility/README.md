@@ -42,8 +42,10 @@ Do not install the published candidate as a substitute for a source-build CI che
 Before building, measure the entire host's Alopex working storage, including other
 worktrees, `/tmp`, environments and Cargo caches. Keep one shared Cargo target and
 serialize builds. At 40 GB, stop and clean regenerable outputs; 50 GB is the hard
-per-host maximum. An inventory failure stops execution. `storage.py` discovers
-linked worktrees and usual local roots; pass `--root` for any additional location.
+per-host maximum. An inventory failure stops execution. `storage.py` uses the
+main Git worktree's parent as the workspace root even when invoked from a linked
+worktree, and discovers linked worktrees and usual local roots; pass `--root`
+for any additional location.
 It records the inventory and monitors child commands every 15 seconds.
 
 ```bash
