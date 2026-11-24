@@ -1,0 +1,31 @@
+name: Bounded Stage-2 public evidence upload
+description: Upload one validated public case result
+inputs:
+  case_id:
+    description: Fixed Stage-2 case ID
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Verify evidence and storage reserve
+      id: preflight
+      if: ${{ always() }}
+      shell: bash
+      env:
+        STRESS_CASE_ID: ${{ inputs.case_id }}
+      run: python3 scripts/ci/stress_upload_boundary.py --case "${STRESS_CASE_ID}" --stage before
+    - name: Upload public case result
+      if: ${{ always() && steps.preflight.outcome == 'success' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: ${{ inputs.case_id }}-public
+        path: target/stress-publish/${{ inputs.case_id }}/${{ inputs.case_id }}.json
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 90
+    - name: Verify post-upload host allocation
+      if: ${{ always() && steps.preflight.outcome == 'success' }}
+      shell: bash
+      env:
+        STRESS_CASE_ID: ${{ inputs.case_id }}
+      run: python3 scripts/ci/stress_upload_boundary.py --case "${STRESS_CASE_ID}" --stage after
