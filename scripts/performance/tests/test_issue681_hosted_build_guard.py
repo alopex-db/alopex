@@ -57,7 +57,7 @@ class HostStorageGuardTest(unittest.TestCase):
             root = Path(tmp).resolve()
             device = root.stat().st_dev
             samples = iter(((20_000_000_000,
-                             {device: 20_000_000_000, device + 1: 1_000_000_000}),
+                             {device: 20_000_000_000, device + 1: 20_000_000_000}),
                             (19_000_000_000, {device: 20_000_000_000})))
             check = guard.HostStorageGuard(root, scanner=lambda: next(samples))
             with self.assertRaisesRegex(ValueError, "^PUBLIC_CAPACITY$"):

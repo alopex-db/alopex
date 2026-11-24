@@ -85,6 +85,7 @@ class HostedIdentityTests(unittest.TestCase):
             "GITHUB_SHA": SHA,
             "RUNNER_ENVIRONMENT": "github-hosted",
             "HNSW_ADMISSION_BASELINE": "1000000000",
+            "HNSW_ADMISSION_ROOT_SEAL": "synthetic-seal",
             "RUNNER_TEMP": str(Path(self.keys.name).resolve()),
         }
         self.claims = {
@@ -186,11 +187,17 @@ class HostedIdentityTests(unittest.TestCase):
             with mock.patch.object(identity, "_identity"), \
                     mock.patch.object(identity.qualify, "platform_security"), \
                     mock.patch.object(identity.qualify, "storage"), \
+                    mock.patch.object(identity.qualify.scoped_storage,
+                                      "make_manifest", return_value=object()), \
+                    mock.patch.object(identity.qualify.scoped_storage,
+                                      "root_seal", return_value="synthetic-seal"), \
                     mock.patch.object(identity.rust_preflight, "check"), \
                     mock.patch.object(identity.qualify, "mounted_allocation",
                                       return_value=(1_100_000_000, {device: 11_000_000_000})):
                 self.assertEqual(identity.run(env),
                                  ({"case": identity.CASE, "outcome": "passed"}, 0))
+                stale = dict(env, HNSW_ADMISSION_ROOT_SEAL="stale")
+                self.assertEqual(identity.run(stale)[0]["error_code"], "STORAGE")
                 with mock.patch.object(identity.qualify, "platform_security",
                                        side_effect=PermissionError("private path")):
                     self.assertEqual(identity.run(env)[0]["error_code"], "PLATFORM")

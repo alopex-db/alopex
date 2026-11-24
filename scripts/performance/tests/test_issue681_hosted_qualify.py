@@ -3,6 +3,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -19,6 +20,15 @@ HEAD = "a" * 40
 
 
 class HostedQualificationTest(unittest.TestCase):
+    def synthetic_mount(self, root):
+        device = root.stat().st_dev
+        value = (f"1 1 {os.major(device)}:{os.minor(device)} / / rw - "
+                 "ext4 synthetic rw\n")
+        patcher = mock.patch.object(qualify.scoped_storage, "_mount_text",
+                                    return_value=value)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def event(self, directory, *, base="integration/v0.8.17-candidate"):
         path = Path(directory) / "event.json"
         path.write_text(json.dumps({
@@ -74,55 +84,56 @@ class HostedQualificationTest(unittest.TestCase):
                          {"case": qualify.CASE, "outcome": "failed",
                           "error_code": "STORAGE"})
 
-    def test_complete_mount_inventory_deduplicates_conservatively(self):
-        with tempfile.TemporaryDirectory() as directory:
-            nested = Path(directory) / "nested"
-            nested.mkdir()
-            raw = ("1 0 8:1 / / rw - ext4 /dev/root rw\n"
-                   f"2 1 8:2 / {directory} rw - ext4 /dev/data rw\n"
-                   f"3 2 8:2 / {nested} rw - ext4 /dev/data rw\n")
-            devices = {"/": 1, directory: 2, str(nested): 2}
-            samples = {"/": (100, 70, 60),
-                       directory: (100, 80, 75),
-                       str(nested): (100, 75, 65)}
-
-            def stat(path):
-                return SimpleNamespace(st_dev=devices[str(path)])
-
-            def vfs(path):
-                blocks, free, available = samples[str(path)]
-                return SimpleNamespace(f_blocks=blocks, f_bfree=free,
-                                       f_bavail=available, f_frsize=4096)
-
-            used, free = qualify.mounted_allocation(
-                raw, stat_fn=stat, statvfs_fn=vfs)
-            self.assertEqual(used, (30 + 25) * 4096)
-            self.assertEqual(free[2], 65 * 4096)
-            with self.assertRaises(ValueError):
-                qualify.mounted_allocation(raw.splitlines()[1] + "\n",
-                                           stat_fn=stat, statvfs_fn=vfs)
-
-    def test_storage_budget_accepts_complete_upper_bound_and_rejects_limit(self):
+    def test_scoped_inventory_counts_hardlink_once_and_rejects_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
+            self.synthetic_mount(root)
             home, workspace, temporary = (root / name for name in
                                           ("home", "workspace", "temporary"))
             for path in (home, workspace, temporary):
                 path.mkdir()
+            checkout = workspace / "checkout"
+            checkout.mkdir()
+            source = checkout / "source"
+            source.write_bytes(b"x" * 4096)
+            alias = checkout / "alias"
+            alias.hardlink_to(source)
+            manifest = qualify.scoped_storage.make_manifest(
+                checkout, temporary, home=home, scratch=root / "scratch")
+            used, free = qualify.mounted_allocation(manifest)
+            self.assertGreater(used, 0)
+            self.assertIn(root.stat().st_dev, free)
+            alias.unlink()
+            alias.symlink_to(source)
+            with self.assertRaises(ValueError):
+                qualify.mounted_allocation(manifest)
+
+    def test_storage_budget_accepts_complete_upper_bound_and_rejects_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            self.synthetic_mount(root)
+            home, workspace, temporary = (root / name for name in
+                                          ("home", "workspace", "temporary"))
+            for path in (home, workspace, temporary):
+                path.mkdir()
+            (workspace / "checkout").mkdir()
             env = {"GITHUB_WORKSPACE": str(workspace / "checkout"),
                    "RUNNER_TEMP": str(temporary)}
+            manifest = qualify.scoped_storage.make_manifest(
+                workspace / "checkout", temporary, home=home,
+                scratch=root / "scratch")
             device = workspace.stat().st_dev
             with mock.patch.object(qualify.Path, "home", return_value=home), \
                  mock.patch.object(qualify, "mounted_allocation",
                                    return_value=(20_000_000_000,
                                                  {device: 20_000_000_000})):
-                qualify.storage(env)
+                qualify.storage(env, manifest)
             with mock.patch.object(qualify.Path, "home", return_value=home), \
                  mock.patch.object(qualify, "mounted_allocation",
                                    return_value=(31_000_000_000,
                                                  {device: 20_000_000_000})):
                 with self.assertRaises(ValueError):
-                    qualify.storage(env)
+                    qualify.storage(env, manifest)
 
     def test_platform_checks_selected_cgroup_and_child_counter(self):
         status = ("CapEff:\t0000000000000000\nSeccomp:\t2\n"

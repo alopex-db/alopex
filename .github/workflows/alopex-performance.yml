@@ -98,7 +98,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           python3 - <<'PY'
-          import json, os, pathlib, platform, re, sys
+          import hashlib, json, os, pathlib, platform, re, stat, sys, time
           code = 'SOURCE'
           try:
               e = os.environ
@@ -111,37 +111,181 @@ jobs:
               assert e.get('GITHUB_REF', '').startswith('refs/heads/')
               assert e.get('RUNNER_ENVIRONMENT') == 'github-hosted'
               assert platform.system() == 'Linux' and platform.machine() == 'x86_64'
-              code = 'STORAGE_MOUNTINFO'
-              lines = pathlib.Path('/proc/self/mountinfo').read_text().splitlines()
-              assert 1 <= len(lines) <= 4096
-              devices = {}
-              for line in lines:
-                  code = 'STORAGE_MOUNT_PATH'
-                  mount = line.split(' - ', 1)[0].split()[4]
-                  mount = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m.group(1), 8)), mount)
-                  path = pathlib.Path(mount)
-                  assert path.is_absolute() and path.exists() and not path.is_symlink()
-                  identity = path.stat().st_dev
-                  code = 'STORAGE_FS_STATS'
-                  fs = os.statvfs(path)
-                  assert fs.f_frsize > 0 and 0 <= fs.f_bavail <= fs.f_bfree <= fs.f_blocks
-                  used = (fs.f_blocks - fs.f_bfree) * fs.f_frsize
-                  free = fs.f_bavail * fs.f_frsize
-                  previous = devices.get(identity)
-                  devices[identity] = (max(used, previous[0]), min(free, previous[1])) if previous else (used, free)
-              code = 'STORAGE_DEVICE_COUNT'
-              assert 1 <= len(devices) <= 256
               code = 'STORAGE_WORKSPACE'
               workspace = pathlib.Path(e['GITHUB_WORKSPACE'])
-              assert workspace.is_absolute() and workspace.parent.exists()
+              temporary = pathlib.Path(e['RUNNER_TEMP'])
+              home = pathlib.Path.home()
+              scratch = pathlib.Path('/tmp/alopex-nim-parser-v0.8.17-contract-0.28.0-x86_64-unknown-linux-gnu')
+              def root_identity(path, scratch_parent=False):
+                  assert (path.is_absolute() and path.is_dir() and
+                          not path.is_symlink() and path.resolve(strict=True) == path)
+                  info = path.lstat()
+                  assert stat.S_ISDIR(info.st_mode)
+                  if scratch_parent:
+                      mode = stat.S_IMODE(info.st_mode)
+                      assert ((info.st_uid == 0 and mode == 0o1777) or
+                              (info.st_uid == os.geteuid() and mode == 0o700))
+                  else:
+                      assert info.st_uid == os.geteuid()
+                  return info.st_dev, info.st_ino, info.st_uid, info.st_mode
+              for path in (workspace, workspace.parent, temporary, home):
+                  root_identity(path)
+              root_identity(scratch.parent, scratch_parent=True)
+              assert not any(path.exists() or path.is_symlink() for path in
+                             (scratch, pathlib.Path(str(scratch) + '.lock')))
+              assert not any(workspace.iterdir())
+              code = 'STORAGE_FS_STATS'
+              free_by_device = {}
+              for path in (workspace.parent, temporary, home, scratch.parent):
+                  fs = os.statvfs(path)
+                  assert fs.f_frsize > 0 and 0 <= fs.f_bavail <= fs.f_bfree <= fs.f_blocks
+                  device = path.stat().st_dev
+                  free = fs.f_bavail * fs.f_frsize
+                  free_by_device[device] = min(free_by_device.get(device, free), free)
+              local = home / '.local'
+              if local.exists() or local.is_symlink():
+                  assert local.is_dir() and not local.is_symlink() and local.stat().st_uid == os.geteuid()
+                  installs = tuple(sorted(path for path in local.iterdir()
+                                          if path.name.startswith('alopex-')))
+              else:
+                  installs = ()
+              roots = (workspace.parent, temporary, home / '.cargo', home / '.cache',
+                       home / '.rustup', *installs, scratch, pathlib.Path(str(scratch) + '.lock'))
+              optional = {home / '.cargo', home / '.cache', home / '.rustup', scratch,
+                          pathlib.Path(str(scratch) + '.lock')}
+              code = 'STORAGE_ROOTS'
+              def mount_text():
+                  with open('/proc/self/mountinfo', encoding='utf-8') as source:
+                      value = source.read(4_000_001)
+                  assert len(value.encode('utf-8')) <= 4_000_000
+                  return value
+              def mount_path(value):
+                  assert isinstance(value, str) and not re.search(r'\\(?![0-7]{3})', value)
+                  decoded = re.sub(r'\\([0-7]{3})',
+                                   lambda found: chr(int(found.group(1), 8)), value)
+                  assert (decoded.startswith('/') and '\x00' not in decoded and
+                          (decoded == '/' or (not decoded.endswith('/') and
+                           all(part not in ('', '.', '..')
+                               for part in decoded.split('/')[1:]))))
+                  return pathlib.Path(decoded)
+              def mount_topology(anchors, roots, value):
+                  assert isinstance(value, str) and len(value.encode('utf-8')) <= 4_000_000
+                  lines = value.splitlines()
+                  assert 1 <= len(lines) <= 4096
+                  rows, ids, points = [], set(), set()
+                  for line in lines:
+                      assert len(line) <= 8192 and line.count(' - ') == 1
+                      before, after = line.split(' - ', 1)
+                      fields, tail = before.split(), after.split()
+                      assert (len(fields) >= 6 and len(tail) >= 3 and
+                              fields[0].isdecimal() and fields[1].isdecimal() and
+                              re.fullmatch(r'[0-9]+:[0-9]+', fields[2]))
+                      mount_id, parent_id = int(fields[0]), int(fields[1])
+                      root, point = mount_path(fields[3]), mount_path(fields[4])
+                      assert mount_id > 0 and parent_id > 0 and mount_id not in ids
+                      ids.add(mount_id)
+                      points.add(point)
+                      major, minor = (int(part) for part in fields[2].split(':'))
+                      rows.append((mount_id, parent_id, major, minor, str(root),
+                                   str(point), tuple(fields[5:]), tuple(tail)))
+                  assert pathlib.Path('/') in points
+                  grouped = {}
+                  for row in rows:
+                      grouped.setdefault(pathlib.Path(row[5]), []).append(row)
+                  def visible(point):
+                      stack = grouped[point]
+                      by_id = {row[0]: row for row in stack}
+                      bases = [row for row in stack if row[1] not in by_id or
+                               row[1] == row[0]]
+                      assert len(bases) == 1
+                      ordered = [bases[0]]
+                      while len(ordered) < len(stack):
+                          children = [row for row in stack if
+                                      row[1] == ordered[-1][0] and row[0] != ordered[-1][0]]
+                          assert len(children) == 1 and children[0] not in ordered
+                          ordered.append(children[0])
+                      return ordered[-1]
+                  admitted = {path for path, _ in anchors} | set(roots)
+                  relevant = set()
+                  for path, _ in anchors:
+                      covering = [point for point in grouped if path == point or
+                                  path.is_relative_to(point)]
+                      assert covering
+                      point = max(covering, key=lambda item: len(item.parts))
+                      selected = visible(point)
+                      device = path.stat().st_dev
+                      assert (selected[2], selected[3]) == (os.major(device), os.minor(device))
+                      relevant.update(grouped[point])
+                  for root in roots:
+                      if not root.exists() and not root.is_symlink():
+                          continue
+                      covering = [point for point in grouped if root == point or
+                                  root.is_relative_to(point)]
+                      assert covering
+                      point = max(covering, key=lambda item: len(item.parts))
+                      visible(point)
+                      relevant.update(grouped[point])
+                      for point, stack in grouped.items():
+                          if point != root and point.is_relative_to(root):
+                              assert point in admitted
+                              visible(point)
+                              relevant.update(stack)
+                  return tuple(sorted(relevant))
+              fixed = (workspace, workspace.parent, temporary, home, scratch.parent)
+              if local.exists():
+                  fixed += (local,)
+              fixed += tuple(path for path in (home / '.cargo', home / '.cache',
+                                               home / '.rustup', *installs) if path.exists())
+              anchors = tuple((path, root_identity(path, scratch_parent=path == scratch.parent))
+                              for path in dict.fromkeys(fixed))
+              mounts = mount_topology(anchors, roots, mount_text())
+              def check_anchors():
+                  assert all(root_identity(path, scratch_parent=path == scratch.parent) == identity
+                             for path, identity in anchors)
+                  assert mount_topology(anchors, roots, mount_text()) == mounts
+              check_anchors()
+              seen = set()
+              baseline = entries = 0
+              deadline = time.monotonic() + 90
+              for root in roots:
+                  if not root.exists() and not root.is_symlink():
+                      assert root in optional
+                      continue
+                  pending = [(root, 0)]
+                  while pending:
+                      assert time.monotonic() <= deadline and entries < 200000
+                      path, depth = pending.pop()
+                      assert depth <= 64
+                      info = path.lstat()
+                      assert (info.st_uid == os.geteuid() and
+                              info.st_dev in free_by_device and info.st_blocks >= 0 and
+                              not stat.S_ISLNK(info.st_mode) and
+                              (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)))
+                      if path in (scratch, pathlib.Path(str(scratch) + '.lock')):
+                          assert (stat.S_ISDIR(info.st_mode) and
+                                  stat.S_IMODE(info.st_mode) == 0o700)
+                      identity = (info.st_dev, info.st_ino)
+                      if identity in seen:
+                          continue
+                      seen.add(identity)
+                      entries += 1
+                      baseline += info.st_blocks * 512
+                      assert baseline < 50_000_000_000
+                      if stat.S_ISDIR(info.st_mode):
+                          with os.scandir(path) as children:
+                              pending.extend((pathlib.Path(child.path), depth + 1)
+                                             for child in children)
+              check_anchors()
               code = 'STORAGE_BUDGET'
-              baseline = sum(value[0] for value in devices.values())
               assert baseline + 10_000_000_000 < 40_000_000_000
               code = 'STORAGE_FREE'
-              assert devices[workspace.parent.stat().st_dev][1] > 10_000_000_000
+              assert all(free > 10_000_000_000 for free in free_by_device.values())
               code = 'STORAGE_ENV'
               with open(e['GITHUB_ENV'], 'a', encoding='ascii') as output:
                   output.write('HNSW_ADMISSION_BASELINE=' + str(baseline) + '\n')
+                  values = (tuple((str(path), identity) for path, identity in anchors), mounts)
+                  output.write('HNSW_ADMISSION_ROOT_SEAL=' +
+                               hashlib.sha256(repr(values).encode('utf-8')).hexdigest() + '\n')
               print(json.dumps({'case': 'HNSW_HOSTED_PRECHECK', 'outcome': 'passed'}))
           except BaseException:
               print(json.dumps({'case': 'HNSW_HOSTED_PRECHECK', 'outcome': 'failed', 'error_code': code}))

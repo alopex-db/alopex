@@ -85,6 +85,7 @@ class HostedParserBuildTests(unittest.TestCase):
             paths[name] = tool
         paths["git_env"] = builder.acquire._git_env(paths["git-home"])
         paths["guard"] = object.__new__(builder.capacity.HostStorageGuard)
+        paths["guard"].manifest = type("Manifest", (), {"scratch": builder.SCRATCH})()
         return paths
 
     def test_changed_source_tool_seed_and_scratch_stop_before_build(self):
@@ -115,6 +116,7 @@ class HostedParserBuildTests(unittest.TestCase):
                                        side_effect=(ValueError("changed source")
                                                     if failure == "source" else None)), \
                      mock.patch.object(builder, "_run") as run:
+                    paths["guard"].manifest.scratch = scratch
                     with self.assertRaisesRegex(ValueError,
                                                 "^PUBLIC_PARSER_INPUT$"):
                         builder.build_parser(
@@ -186,6 +188,7 @@ class HostedParserBuildTests(unittest.TestCase):
                  mock.patch.object(builder, "_run", side_effect=run), \
                  mock.patch.object(builder.stage, "stage_parser",
                                    side_effect=staged):
+                paths["guard"].manifest.scratch = scratch
                 result = builder.build_parser(
                     paths["source"], paths["nim"], paths["nimble"],
                     paths["seed"], paths["build"], paths["stage"],

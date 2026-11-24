@@ -256,8 +256,12 @@ def run(env, *, fetch=_request, now=None, checkout=None):
         code = "TOOLCHAIN"
         rust_preflight.check()
         code = "STORAGE"
-        qualify.storage(env)
-        current, available = qualify.mounted_allocation()
+        manifest = qualify.scoped_storage.make_manifest(
+            Path(env["GITHUB_WORKSPACE"]), Path(env["RUNNER_TEMP"]))
+        require(qualify.scoped_storage.root_seal(manifest) ==
+                env["HNSW_ADMISSION_ROOT_SEAL"])
+        qualify.storage(env, manifest)
+        current, available = qualify.mounted_allocation(manifest)
         baseline = _decimal(env["HNSW_ADMISSION_BASELINE"])
         require(0 <= current - baseline <= 250_000_000 and
                 current + 10_000_000_000 < 40_000_000_000 and

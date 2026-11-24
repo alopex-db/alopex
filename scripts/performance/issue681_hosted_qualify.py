@@ -11,6 +11,7 @@ import subprocess
 import sys
 
 import issue681_public_admission as admission
+import issue681_hosted_storage as scoped_storage
 
 CASE = "HNSW_HOSTED_QUAL"
 STOP_BYTES = 40_000_000_000
@@ -90,45 +91,12 @@ def platform_security():
             continue
 
 
-def mounted_allocation(raw=None, *, stat_fn=os.stat,
-                       statvfs_fn=os.statvfs):
-    """Upper-bound Alopex storage with all visible filesystem allocation."""
-    if raw is None:
-        raw = Path("/proc/self/mountinfo").read_text()
-    lines = raw.splitlines()
-    require(1 <= len(lines) <= 4096)
-    devices = {}
-    saw_root = False
-    for line in lines:
-        fields = line.split(" - ", 1)[0].split()
-        require(len(fields) >= 6)
-        mount = re.sub(r"\\([0-7]{3})",
-                       lambda match: chr(int(match.group(1), 8)), fields[4])
-        path = Path(mount)
-        require(path.is_absolute() and path.exists() and
-                not path.is_symlink())
-        saw_root |= path == Path("/")
-        device = stat_fn(path).st_dev
-        vfs = statvfs_fn(path)
-        require(all(type(value) is int for value in
-                    (device, vfs.f_blocks, vfs.f_bfree, vfs.f_bavail,
-                     vfs.f_frsize)) and
-                vfs.f_frsize > 0 and
-                0 <= vfs.f_bavail <= vfs.f_bfree <= vfs.f_blocks)
-        allocation = (vfs.f_blocks - vfs.f_bfree) * vfs.f_frsize
-        available = vfs.f_bavail * vfs.f_frsize
-        if device in devices:
-            previous = devices[device]
-            devices[device] = (max(previous[0], allocation),
-                               min(previous[1], available))
-        else:
-            devices[device] = (allocation, available)
-    require(saw_root and 1 <= len(devices) <= 256)
-    return sum(value[0] for value in devices.values()), {
-        device: value[1] for device, value in devices.items()}
+def mounted_allocation(manifest):
+    """Measure admitted Alopex roots and separate free write pools."""
+    return scoped_storage.snapshot(manifest)
 
 
-def storage(env):
+def storage(env, manifest=None):
     home = Path.home()
     workspace = Path(env["GITHUB_WORKSPACE"]).parent
     temporary = Path(env["RUNNER_TEMP"])
@@ -136,11 +104,12 @@ def storage(env):
         require(root.is_absolute() and root.is_dir() and
                 not root.is_symlink() and root.resolve(strict=True) == root and
                 root.stat().st_uid == os.geteuid())
-    used, available = mounted_allocation()
-    require(available[os.stat(workspace).st_dev] >
-            BUILD_BYTES + RESERVE_BYTES and
-            available[os.stat(home).st_dev] > 1_000_000_000 and
-            available[os.stat(temporary).st_dev] > 1_000_000_000)
+    if manifest is None:
+        manifest = scoped_storage.make_manifest(Path(env["GITHUB_WORKSPACE"]),
+                                                temporary)
+    used, available = mounted_allocation(manifest)
+    require(all(free > BUILD_BYTES + RESERVE_BYTES
+                for free in available.values()))
     require(used + BUILD_BYTES + RESERVE_BYTES < STOP_BYTES and
             used + BUILD_BYTES + RESERVE_BYTES < CEILING_BYTES)
 
