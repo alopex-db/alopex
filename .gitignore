@@ -41,6 +41,8 @@ profile*.log
 crates/*/proptest-regressions/
 crates/alopex-core/artifacts/
 crates/*/fuzz/Cargo.lock
+!crates/alopex-sql/fuzz/Cargo.lock
+!crates/alopex-dataframe/fuzz/Cargo.lock
 crates/*/fuzz/artifacts/
 crates/*/fuzz/corpus/
 

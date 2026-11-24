@@ -42,6 +42,7 @@ unset RUSTDOCFLAGS
 
 cargo +nightly test \
   "${CARGO_UNSTABLE_ARGS[@]}" \
+  --locked \
   -p alopex-core \
   --target "${TARGET}" \
   --features lane_sanitizer \

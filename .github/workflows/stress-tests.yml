@@ -12,6 +12,7 @@ on:
     - cron: "0 3 * * 0"
 
 env:
+  STRESS_EVIDENCE_MODE: public
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
   ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
   NIM_SQL_PARSER_LIB_DIR: ${{ github.workspace }}/crates/alopex-sql/nim-sql-parser
@@ -19,41 +20,84 @@ env:
 jobs:
   stress-tests:
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
     timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - &monitored_checkout
+        name: Monitored exact-source checkout
+        id: bootstrap
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          exec 3>&1 4>&2
+          private_log="$(mktemp "${RUNNER_TEMP}/stress-bootstrap-log.XXXXXX" 2>/dev/null)" || { printf 'STRESS_MONITORED_CHECKOUT_REJECTED\n' >&4; exit 1; }
+          if ! exec 5>"${private_log}" 2>/dev/null; then printf 'STRESS_MONITORED_CHECKOUT_REJECTED\n' >&4; exit 1; fi
+          exec 1>&5 2>&5
+          trap 'status=$?; if [ "$status" -ne 0 ]; then printf "STRESS_MONITORED_CHECKOUT_REJECTED\n" >&4; fi' EXIT
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          import re
+          from urllib.parse import urlparse
+          from urllib.request import urlopen
 
-      - name: Set up Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-          profile: minimal
+          source = os.environ["GITHUB_SHA"]
+          assert re.fullmatch(r"[0-9a-f]{40}", source)
+          url = f"https://raw.githubusercontent.com/alopex-db/alopex/{source}/scripts/ci/stress_monitored_checkout.py"
+          with urlopen(url, timeout=60) as response:
+              resolved = urlparse(response.geturl())
+              assert resolved.scheme == "https" and resolved.hostname == "raw.githubusercontent.com"
+              body = response.read(100_001)
+          assert 0 < len(body) <= 100_000
+          assert hashlib.sha256(body).hexdigest() == "be96a2e4a82edf48daadce01d0f1124601fa3f01e72e3c617f64e201092e78b5"
+          destination = Path(os.environ["RUNNER_TEMP"]) / "stress-monitored-checkout.py"
+          with destination.open("xb") as stream:
+              stream.write(body)
+          PY
+          python3 "${RUNNER_TEMP}/stress-monitored-checkout.py"
+          printf 'RUNNER_ENVIRONMENT=github-hosted\nCARGO_TARGET_DIR=%s/target\n' "${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
+          printf 'STRESS_MONITORED_CHECKOUT_OK\n' >&3
+
+      - name: Install stable Rust under storage guard
+        run: python3 scripts/ci/stress_guarded_command.py --case stress --phase toolchain -- rustup toolchain install stable --profile minimal
 
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
+        run: python3 scripts/ci/stress_guarded_command.py --case stress --phase parser -- bash scripts/build-nim-parser.sh --backend docker
       - name: Run stress tests (short)
+        id: stress_case
         env:
+          STRESS_EVIDENCE_MODE: public
+          STRESS_ARTIFACTS_DIR: ${{ github.workspace }}/target/stress-public-artifacts/stress
           RUST_BACKTRACE: 1
           STRESS_TEST_TIMEOUT: 120
-          STRESS_REPORT_DIR: target/stress-reports # set empty string to skip artifact upload
+          STRESS_STORAGE_MODE: both
+          STRESS_REPORT_DIR: target/stress-reports
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: |
-          cargo test --features test-hooks,lane_ci --test stress_* -- --test-threads=1
+        run: python3 scripts/ci/stress_guarded_command.py --case stress --phase test -- cargo test --locked --features test-hooks,lane_ci,lane_smoke --test 'stress_*' -- --test-threads=1
 
-      - name: Upload stress reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+      - name: Assemble stress public evidence
+        id: stress_evidence
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          STRESS_OUTCOME: ${{ steps.stress_case.outcome == 'success' && 'passed' || 'failed' }}
+        run: python3 scripts/ci/stress_guarded_command.py --case stress --phase seal -- python3 scripts/ci/stress_public_case.py --case stress --outcome "${STRESS_OUTCOME}"
+
+      - name: Upload stress public evidence
+        if: ${{ always() && steps.stress_evidence.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
         with:
-          name: stress-reports
-          path: target/stress-reports
-          if-no-files-found: ignore
+          case_id: stress
 
   sanitizer-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ${{ matrix.os }}
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -68,20 +112,18 @@ jobs:
           - os: ubuntu-latest
             sanitizer: msan
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - *monitored_checkout
 
-      - name: Set up Rust (nightly)
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          override: true
-          profile: minimal
-          components: rust-src
+      - name: Install nightly Rust under storage guard
+        env:
+          STRESS_CASE_ID: ${{ matrix.sanitizer }}
+        run: python3 scripts/ci/stress_guarded_command.py --case "${STRESS_CASE_ID}" --phase toolchain -- rustup toolchain install nightly --profile minimal --component rust-src
 
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
+        env:
+          STRESS_CASE_ID: ${{ matrix.sanitizer }}
+        run: python3 scripts/ci/stress_guarded_command.py --case "${STRESS_CASE_ID}" --phase parser -- bash scripts/build-nim-parser.sh --backend docker
       # macOS/Windows ランナーは docker で Linux コンテナを動かせないため、
       # ネイティブ Nim ツールチェーン (2.2 固定) をセットアップして共有ライブラリを生成する。
       # 要 CI 検証: macOS/Windows ランナー上でのみ動作確認可能（ローカル検証不可）。
@@ -96,173 +138,140 @@ jobs:
         shell: bash
         run: bash scripts/build-nim-parser.sh --backend host
       - name: Run sanitizer lane
+        id: sanitizer_case
         env:
+          STRESS_CASE_ID: ${{ matrix.sanitizer }}
+          STRESS_EVIDENCE_MODE: public
           RUST_BACKTRACE: 1
           STRESS_REPORT_DIR: target/stress-reports/${{ matrix.sanitizer }}
-          STRESS_ARTIFACTS_DIR: target/stress-artifacts/${{ matrix.sanitizer }}
+          STRESS_ARTIFACTS_DIR: ${{ github.workspace }}/target/stress-public-artifacts/${{ matrix.sanitizer }}
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: |
-          ./scripts/run-sanitizer-lane.sh ${{ matrix.sanitizer }}
+        run: python3 scripts/ci/stress_guarded_command.py --case "${STRESS_CASE_ID}" --phase test -- ./scripts/run-sanitizer-lane.sh "${STRESS_CASE_ID}"
 
-      - name: Upload sanitizer reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: sanitizer-${{ matrix.os }}-${{ matrix.sanitizer }}-reports
-          path: target/stress-reports/${{ matrix.sanitizer }}
-          if-no-files-found: ignore
+      - name: Assemble sanitizer public evidence
+        id: sanitizer_evidence
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          STRESS_CASE_ID: ${{ matrix.sanitizer }}
+          STRESS_OUTCOME: ${{ steps.sanitizer_case.outcome == 'success' && 'passed' || 'failed' }}
+        run: python3 scripts/ci/stress_guarded_command.py --case "${STRESS_CASE_ID}" --phase seal -- python3 scripts/ci/stress_public_case.py --case "${STRESS_CASE_ID}" --outcome "${STRESS_OUTCOME}"
 
-      - name: Upload sanitizer artifacts
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+      - name: Upload sanitizer public evidence
+        if: ${{ always() && steps.sanitizer_evidence.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
         with:
-          name: sanitizer-${{ matrix.os }}-${{ matrix.sanitizer }}-artifacts
-          path: target/stress-artifacts/${{ matrix.sanitizer }}
-          if-no-files-found: ignore
+          case_id: ${{ matrix.sanitizer }}
 
   fuzz-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     timeout-minutes: 2880
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - *monitored_checkout
 
-      - name: Set up Rust (nightly)
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          override: true
-          profile: minimal
+      - name: Install nightly Rust under storage guard
+        run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase toolchain -- rustup toolchain install nightly --profile minimal
 
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
+        run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase parser -- bash scripts/build-nim-parser.sh --backend docker
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase fuzz_install -- cargo install cargo-fuzz --version 0.13.2 --locked
 
       - name: Run SQL fuzz target
+        id: sql_fuzz
         env:
-          STRESS_REPORT_DIR: target/stress-reports/fuzz/sql_parser
+          STRESS_EVIDENCE_MODE: public
+          STRESS_REPORT_DIR: ${{ github.workspace }}/target/stress-reports/fuzz/sql_parser
           FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.fuzz_seconds || '600' }}
           ASAN_OPTIONS: detect_odr_violation=0:detect_leaks=0
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: |
-          cd crates/alopex-sql/fuzz
-          export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
-          cargo fuzz run sql_parser -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}"
+        run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase test -- python3 scripts/ci/stress_locked_fuzz.py --case sql_parser --seconds "${FUZZ_MAX_TOTAL_TIME}"
+
+      - name: Assemble SQL fuzz public evidence
+        id: sql_fuzz_evidence
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          STRESS_OUTCOME: ${{ steps.sql_fuzz.outcome == 'success' && 'passed' || 'failed' }}
+        run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase seal -- python3 scripts/ci/stress_public_case.py --case sql_parser --outcome "${STRESS_OUTCOME}"
 
       - name: Run DataFrame fuzz target
+        id: dataframe_fuzz
         env:
-          STRESS_REPORT_DIR: target/stress-reports/fuzz/dataframe_conversion
+          STRESS_EVIDENCE_MODE: public
+          STRESS_REPORT_DIR: ${{ github.workspace }}/target/stress-reports/fuzz/dataframe_conversion
           FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.fuzz_seconds || '600' }}
           ASAN_OPTIONS: detect_odr_violation=0:detect_leaks=0
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: |
-          cd crates/alopex-dataframe/fuzz
-          export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
-          cargo fuzz run dataframe_conversion -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}"
+        run: python3 scripts/ci/stress_guarded_command.py --case dataframe_conversion --phase test -- python3 scripts/ci/stress_locked_fuzz.py --case dataframe_conversion --seconds "${FUZZ_MAX_TOTAL_TIME}"
 
-      - name: Upload fuzz reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+      - name: Assemble DataFrame fuzz public evidence
+        id: dataframe_fuzz_evidence
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          STRESS_OUTCOME: ${{ steps.dataframe_fuzz.outcome == 'success' && 'passed' || 'failed' }}
+        run: python3 scripts/ci/stress_guarded_command.py --case dataframe_conversion --phase seal -- python3 scripts/ci/stress_public_case.py --case dataframe_conversion --outcome "${STRESS_OUTCOME}"
+
+      - name: Upload SQL fuzz public evidence
+        if: ${{ always() && steps.sql_fuzz_evidence.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
         with:
-          name: fuzz-reports
-          path: target/stress-reports/fuzz
-          if-no-files-found: ignore
+          case_id: sql_parser
+
+      - name: Upload DataFrame fuzz public evidence
+        if: ${{ always() && steps.dataframe_fuzz_evidence.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
+        with:
+          case_id: dataframe_conversion
 
   perf-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      RUSTUP_TOOLCHAIN: stable
     timeout-minutes: 90
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - *monitored_checkout
 
-      - name: Set up Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-          profile: minimal
+      - name: Install stable Rust under storage guard
+        run: python3 scripts/ci/stress_guarded_command.py --case perf --phase toolchain -- rustup toolchain install stable --profile minimal
 
-      - name: Download latest perf baselines
-        id: perf-baseline
+      - name: Load pinned historical perf baselines under storage guard
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          mkdir -p "${GITHUB_WORKSPACE}/target/stress-baselines"
-          found=false
-          for run_id in $(gh run list --workflow stress-tests.yml --event schedule --status success --limit 20 --json databaseId -q '.[].databaseId'); do
-            if [ "$run_id" = "$GITHUB_RUN_ID" ]; then
-              continue
-            fi
-            if gh run download "$run_id" -n perf-baselines -D "${GITHUB_WORKSPACE}/target/stress-baselines"; then
-              found=true
-              echo "Downloaded perf baseline artifact from run ${run_id}."
-              break
-            fi
-          done
-
-          if [ "$found" != "true" ]; then
-            echo "No completed scheduled perf baseline artifact found; this run will seed baselines."
-          fi
-          echo "found=${found}" >> "$GITHUB_OUTPUT"
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 scripts/ci/stress_guarded_command.py --case perf --phase baseline_fetch -- python3 scripts/ci/stress_legacy_baseline.py
 
       - name: Build Nim SQL parser library
         if: runner.os == 'Linux'
-        run: bash scripts/build-nim-parser.sh --backend docker
+        run: python3 scripts/ci/stress_guarded_command.py --case perf --phase parser -- bash scripts/build-nim-parser.sh --backend docker
       - name: Run perf baseline checks
+        id: perf_case
         env:
+          STRESS_EVIDENCE_MODE: public
           RUST_BACKTRACE: 1
-          STRESS_BASELINE_REQUIRED: ${{ steps.perf-baseline.outputs.found == 'true' && 'true' || 'false' }}
-          STRESS_BASELINE_UPDATE: ${{ steps.perf-baseline.outputs.found == 'true' && 'false' || 'true' }}
+          STRESS_BASELINE_REQUIRED: "true"
+          STRESS_BASELINE_UPDATE: "false"
           STRESS_BASELINE_DIR: ${{ github.workspace }}/target/stress-baselines
           STRESS_REPORT_DIR: ${{ github.workspace }}/target/stress-reports/perf
-          STRESS_ARTIFACTS_DIR: ${{ github.workspace }}/target/stress-artifacts/perf
+          STRESS_ARTIFACTS_DIR: ${{ github.workspace }}/target/stress-public-artifacts/perf
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: |
-          cargo test -p alopex-core --features lane_perf --test stress_perf_baseline -- --test-threads=1
+        run: python3 scripts/ci/stress_guarded_command.py --case perf --phase test -- cargo test --locked -p alopex-core --features lane_perf --test stress_perf_baseline -- --test-threads=1
 
-      - name: Inspect perf outputs
-        if: ${{ always() }}
-        run: |
-          set -euo pipefail
-          for dir in \
-            "${GITHUB_WORKSPACE}/target/stress-baselines" \
-            "${GITHUB_WORKSPACE}/target/stress-reports" \
-            "${GITHUB_WORKSPACE}/target/stress-artifacts"; do
-            echo "::group::${dir}"
-            if [ -d "$dir" ]; then
-              find "$dir" -maxdepth 6 -type f -print | sort
-            else
-              echo "missing"
-            fi
-            echo "::endgroup::"
-          done
+      - name: Assemble perf public evidence
+        id: perf_evidence
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          STRESS_OUTCOME: ${{ steps.perf_case.outcome == 'success' && 'passed' || 'failed' }}
+        run: python3 scripts/ci/stress_guarded_command.py --case perf --phase seal -- python3 scripts/ci/stress_public_case.py --case perf --outcome "${STRESS_OUTCOME}"
 
-      - name: Upload perf reports
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+      - name: Upload perf public evidence
+        if: ${{ always() && steps.perf_evidence.outcome == 'success' }}
+        uses: ./.github/actions/stress-upload
         with:
-          name: perf-reports
-          path: ${{ github.workspace }}/target/stress-reports
-          if-no-files-found: ignore
-
-      - name: Upload perf artifacts
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: perf-artifacts
-          path: ${{ github.workspace }}/target/stress-artifacts
-          if-no-files-found: ignore
-
-      - name: Upload perf baselines
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: perf-baselines
-          path: ${{ github.workspace }}/target/stress-baselines
-          if-no-files-found: ignore
+          case_id: perf
