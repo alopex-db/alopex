@@ -176,19 +176,18 @@ without a valid container must first be converged with its existing v2 reader.
 An interrupted fence can leave a fenced v2 WAL; retry with explicit budgets is
 supported. Existing fence/activation temp files are not overwritten.
 
-`FileVersion::CURRENT` remains 0.1.0 for ordinary writers; `MAX_SUPPORTED` is
-0.2.0 for readers. Old readers reject 0.2.0 before restoring a container, and
+`FileVersion::CURRENT` remains 0.1.0 for ordinary writers and generic readers;
+`MAX_SUPPORTED` is 0.2.0 for the crate-private LSM container reader. Old readers
+and the current generic reader reject 0.2.0 before reading sections, and
 reject v3 when the live sidecar takes priority. Current default LSM open also
 requires explicit overflow options for a fenced container. Converge preserves
 both the 0.2 header and WAL v3 manifest; container-only rehydrate recreates v3.
 The manifest WAL version may not exceed its container fence. There is no downgrade.
 
-The low-level `AlopexFileReader` accepts supported 0.2.0 container headers so
-that the opt-in LSM path can inspect them. It is not an LSM database opener:
-the production non-LSM paths in this release do not open fenced containers
-through that reader, and default `LsmKV::open` applies its own opt-in check.
-Versions above `MAX_SUPPORTED`, including 0.3.0, are rejected at the format
-reader boundary.
+The public `AlopexFileReader::open` and WASM `open_with_config` reject 0.2.0.
+Only the crate-private LSM container path can read a fenced header, after its
+opt-in check; `LsmKV::open` without overflow options rejects it. Versions above
+`MAX_SUPPORTED`, including 0.3.0, are rejected by both reader paths.
 
 Before enabling overflow on an existing WAL v2 database, account for every
 uncheckpointed WAL record. `open_with_overflow` rejects the open with

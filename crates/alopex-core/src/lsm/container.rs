@@ -59,7 +59,7 @@ use crate::lsm::wal::{WalConfig, WalWriter, WAL_FORMAT_VERSION};
 use crate::storage::compression::CompressionAlgorithm;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::storage::format::{
-    AlopexFileReader, AlopexFileWriter, FileFlags, FileReader, FileSource, FileVersion, SectionType,
+    AlopexFileReader, AlopexFileWriter, FileFlags, FileReader, FileVersion, SectionType,
 };
 
 /// Manifest 形式のバージョン。前方互換を明示的に拒否するために使う。
@@ -419,7 +419,7 @@ pub(crate) fn rehydrate(
     data_dir: &Path,
     wal_config: &WalConfig,
 ) -> Result<RehydrateOutcome> {
-    let reader = AlopexFileReader::open(FileSource::Path(container.to_path_buf()))?;
+    let reader = AlopexFileReader::open_lsm_container(container)?;
     reader
         .header()
         .check_compatibility(&FileVersion::MAX_SUPPORTED)?;
