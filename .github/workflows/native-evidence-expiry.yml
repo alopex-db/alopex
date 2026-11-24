@@ -1,0 +1,51 @@
+name: Native evidence renewal deadline
+
+on:
+  schedule:
+    - cron: '17 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recipients:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: integration/v0.8.17-candidate
+          path: candidate
+          persist-credentials: false
+      - name: Check active recipient renewal deadline
+        run: python3 -B candidate/scripts/ops/check_evidence_certificate.py --minimum-seconds 1209600
+      - name: Read reviewed frozen comparator identity
+        id: frozen
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re
+          text = pathlib.Path('candidate/.github/workflows/alopex-performance.yml').read_text()
+          stage = text.split('      - name: Stage frozen #682 comparator in measured workspace\n')
+          assert len(stage) == 2
+          refs = re.findall(r'^          ref: ([0-9a-f]{40})$', stage[1].split('      - name:', 1)[0], re.M)
+          pins = re.findall(r'--certificate frozen-wal-controller/\.github/ops/native-evidence-cert.pem --expected-sha256 ([0-9a-f]{64})', text)
+          assert len(refs) == len(pins) == 1
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'ref={refs[0]}\npin={pins[0]}\n')
+          PY
+      - uses: actions/checkout@v4
+        if: always() && steps.frozen.outcome == 'success'
+        with:
+          ref: ${{ steps.frozen.outputs.ref }}
+          path: frozen
+          persist-credentials: false
+      - name: Check frozen recipient renewal deadline
+        if: always() && steps.frozen.outcome == 'success'
+        env:
+          RECIPIENT_PIN: ${{ steps.frozen.outputs.pin }}
+        run: >-
+          python3 -B candidate/scripts/ops/check_evidence_certificate.py
+          --certificate frozen/.github/ops/native-evidence-cert.pem
+          --expected-sha256 "$RECIPIENT_PIN" --minimum-seconds 1209600
