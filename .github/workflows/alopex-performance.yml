@@ -12,6 +12,11 @@ on:
         required: false
         type: boolean
         default: false
+      hnsw_release_admission_mode:
+        description: Admission-only selected #681 hosted job; no acquisition or measurement
+        required: false
+        type: boolean
+        default: false
       sql_four_case_mode:
         description: Continue same-job #804 qualification into the pinned #712 SQL matrix
         required: false
@@ -43,7 +48,11 @@ on:
         type: boolean
         default: false
       expected_controller_sha:
-        description: Exact controller commit for qualification mode
+        description: Exact controller commit for qualification or selected #681 admission
+        required: false
+        type: string
+      expected_hnsw_source_tree:
+        description: Independently reviewed exact #681 source tree SHA
         required: false
         type: string
       four_case_lock_sha256:
@@ -72,8 +81,137 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  hnsw_release_admission:
+    if: ${{ inputs.hnsw_release_admission_mode && inputs.issue_number == '681' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - name: Gate selected source and storage before checkout
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          EXPECTED_HNSW_SOURCE_TREE: ${{ inputs.expected_hnsw_source_tree }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, platform, re, sys
+          code = 'SOURCE'
+          try:
+              e = os.environ
+              assert e.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+              assert e.get('GITHUB_JOB') == 'hnsw_release_admission'
+              assert e.get('ISSUE_NUMBER') == '681'
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_CONTROLLER_SHA', ''))
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_HNSW_SOURCE_TREE', ''))
+              assert e['EXPECTED_CONTROLLER_SHA'] == e.get('GITHUB_SHA')
+              assert e.get('GITHUB_REF', '').startswith('refs/heads/')
+              assert e.get('RUNNER_ENVIRONMENT') == 'github-hosted'
+              assert platform.system() == 'Linux' and platform.machine() == 'x86_64'
+              code = 'STORAGE'
+              lines = pathlib.Path('/proc/self/mountinfo').read_text().splitlines()
+              assert 1 <= len(lines) <= 4096
+              devices = {}
+              for line in lines:
+                  mount = line.split(' - ', 1)[0].split()[4]
+                  mount = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m.group(1), 8)), mount)
+                  path = pathlib.Path(mount)
+                  assert path.is_absolute() and path.exists() and not path.is_symlink()
+                  identity = path.stat().st_dev
+                  fs = os.statvfs(path)
+                  assert fs.f_frsize > 0 and 0 <= fs.f_bavail <= fs.f_bfree <= fs.f_blocks
+                  used = (fs.f_blocks - fs.f_bfree) * fs.f_frsize
+                  free = fs.f_bavail * fs.f_frsize
+                  previous = devices.get(identity)
+                  devices[identity] = (max(used, previous[0]), min(free, previous[1])) if previous else (used, free)
+              assert 1 <= len(devices) <= 256
+              workspace = pathlib.Path(e['GITHUB_WORKSPACE'])
+              assert workspace.is_absolute() and workspace.parent.exists()
+              baseline = sum(value[0] for value in devices.values())
+              assert baseline + 10_000_000_000 < 40_000_000_000
+              assert devices[workspace.parent.stat().st_dev][1] > 10_000_000_000
+              with open(e['GITHUB_ENV'], 'a', encoding='ascii') as output:
+                  output.write('HNSW_ADMISSION_BASELINE=' + str(baseline) + '\n')
+              print(json.dumps({'case': 'HNSW_HOSTED_PRECHECK', 'outcome': 'passed'}))
+          except BaseException:
+              print(json.dumps({'case': 'HNSW_HOSTED_PRECHECK', 'outcome': 'failed', 'error_code': code}))
+              sys.exit(1)
+          PY
+      - name: Fetch exact selected source without path output
+        timeout-minutes: 2
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          EXPECTED_HNSW_SOURCE_TREE: ${{ inputs.expected_hnsw_source_tree }}
+          GH_CHECKOUT_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, re, stat, subprocess, sys, tempfile
+          try:
+              e = os.environ
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_CONTROLLER_SHA', ''))
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_HNSW_SOURCE_TREE', ''))
+              ref = e.get('GITHUB_REF', '')
+              assert re.fullmatch(r'refs/heads/[A-Za-z0-9._/-]+', ref)
+              assert '..' not in ref and '//' not in ref and not ref.endswith('/')
+              workspace = pathlib.Path(e['GITHUB_WORKSPACE'])
+              assert (workspace.is_absolute() and workspace.is_dir() and
+                      not workspace.is_symlink() and workspace.resolve(strict=True) == workspace and
+                      workspace.stat().st_uid == os.geteuid() and not any(workspace.iterdir()))
+              workspace.chmod(0o700)
+              git_binary = pathlib.Path('/usr/bin/git')
+              git_info = git_binary.stat()
+              assert (stat.S_ISREG(git_info.st_mode) and git_info.st_uid == 0 and
+                      not git_info.st_mode & 0o022)
+              temporary = pathlib.Path(e['RUNNER_TEMP'])
+              assert (temporary.is_absolute() and temporary.is_dir() and
+                      not temporary.is_symlink() and temporary.resolve(strict=True) == temporary and
+                      temporary.stat().st_uid == os.geteuid())
+              credentials = base64.b64encode(('x-access-token:' + e['GH_CHECKOUT_TOKEN']).encode()).decode()
+              with tempfile.TemporaryDirectory(dir=temporary) as template:
+                  git_env = {'HOME': str(pathlib.Path.home()), 'PATH': '/usr/bin:/bin',
+                             'LANG': 'C', 'GIT_CONFIG_COUNT': '1',
+                             'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
+                             'GIT_TEMPLATE_DIR': template,
+                             'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
+                             'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: basic ' + credentials,
+                             'GIT_TERMINAL_PROMPT': '0', 'GIT_LFS_SKIP_SMUDGE': '1'}
+                  def git(*args, read=False):
+                      result = subprocess.run([str(git_binary), '-C', str(workspace), *args],
+                                              env=git_env, stdin=subprocess.DEVNULL,
+                                              stdout=subprocess.PIPE if read else subprocess.DEVNULL,
+                                              stderr=subprocess.DEVNULL, timeout=105)
+                      assert result.returncode == 0
+                      if read:
+                          assert len(result.stdout) <= 4096
+                          return result.stdout.decode('ascii').strip()
+                  git('init', '-q')
+                  git('fetch', '--no-tags', '--depth=1',
+                      'https://github.com/alopex-db/alopex.git', ref)
+                  assert git('rev-parse', 'FETCH_HEAD', read=True) == e['EXPECTED_CONTROLLER_SHA']
+                  git('checkout', '--detach', '-q', 'FETCH_HEAD')
+                  assert git('rev-parse', 'HEAD', read=True) == e['EXPECTED_CONTROLLER_SHA']
+                  assert git('rev-parse', 'HEAD^{tree}', read=True) == e['EXPECTED_HNSW_SOURCE_TREE']
+                  assert git('status', '--porcelain', '--untracked-files=all', read=True) == ''
+              print(json.dumps({'case': 'HNSW_HOSTED_CHECKOUT', 'outcome': 'passed'}))
+          except BaseException:
+              print(json.dumps({'case': 'HNSW_HOSTED_CHECKOUT', 'outcome': 'failed',
+                                'error_code': 'SOURCE'}))
+              sys.exit(1)
+          PY
+      - name: Authenticate selected job and admit host
+        timeout-minutes: 5
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          EXPECTED_HNSW_SOURCE_TREE: ${{ inputs.expected_hnsw_source_tree }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GH_ACTIONS_READ_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/performance/issue681_hosted_identity.py
   s04_socket_inventory:
-    if: ${{ inputs.s04_socket_inventory_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
+    if: ${{ inputs.s04_socket_inventory_mode && inputs.issue_number == '684' && !inputs.hnsw_release_admission_mode && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -249,7 +387,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   inventory:
-    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
+    if: ${{ !inputs.hnsw_release_admission_mode && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -270,7 +408,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   qualification:
-    if: inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode))
+    if: ${{ !inputs.hnsw_release_admission_mode && inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -578,7 +716,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   wal_cost_682:
-    if: inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode
+    if: ${{ !inputs.hnsw_release_admission_mode && inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
@@ -784,7 +922,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   s04_inspect:
-    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
+    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.hnsw_release_admission_mode && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
