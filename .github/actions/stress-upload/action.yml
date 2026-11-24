@@ -13,8 +13,10 @@ runs:
       shell: bash
       env:
         STRESS_CASE_ID: ${{ inputs.case_id }}
+        RUNNER_ENVIRONMENT: ${{ runner.environment }}
       run: python3 scripts/ci/stress_upload_boundary.py --case "${STRESS_CASE_ID}" --stage before
     - name: Upload public case result
+      id: upload
       if: ${{ always() && steps.preflight.outcome == 'success' }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
@@ -23,9 +25,20 @@ runs:
         if-no-files-found: error
         compression-level: 0
         retention-days: 90
+    - name: Verify uploaded public bytes
+      if: ${{ always() && steps.upload.outcome == 'success' }}
+      shell: bash
+      env:
+        STRESS_CASE_ID: ${{ inputs.case_id }}
+        RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        STRESS_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        STRESS_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: python3 scripts/ci/stress_upload_boundary.py --case "${STRESS_CASE_ID}" --stage receipt
     - name: Verify post-upload host allocation
       if: ${{ always() && steps.preflight.outcome == 'success' }}
       shell: bash
       env:
         STRESS_CASE_ID: ${{ inputs.case_id }}
+        RUNNER_ENVIRONMENT: ${{ runner.environment }}
       run: python3 scripts/ci/stress_upload_boundary.py --case "${STRESS_CASE_ID}" --stage after

@@ -7,10 +7,13 @@ The workflow captures all diagnostics privately and prints only a fixed code.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import resource
+import shutil
+import stat
 import subprocess
 import sys
 
@@ -20,7 +23,7 @@ RAW_BASE = "https://raw.githubusercontent.com/alopex-db/alopex"
 SOURCE = re.compile(r"[0-9a-f]{40}\Z")
 HELPERS = {
     "scripts/compatibility/storage.py":
-        "3ea08dddc485faacadadbd2950b184da25c4b2bda60e84d97b48471e37d25fc8",
+        "b4337923f069f388c838bb554f54ad26b479cd27a1e888b75040d6c36783d5b6",
     "scripts/release/release_storage.py":
         "14b10712125f26c195cbb286323ce91f26ba76ed8e35e20e0f1ffcd1eb4e50af",
 }
@@ -70,6 +73,54 @@ def guarded_checkout_command(*, helper: Path, workspace: Path,
     return command
 
 
+def failed_checkout_cleanup(*, workspace: Path, runner_temp: Path,
+                            bootstrap_dir: Path, helper: Path,
+                            original: tuple[int, int, int]) -> None:
+    removal_error = False
+    removed = False
+    try:
+        info = workspace.lstat()
+        if (not stat.S_ISDIR(info.st_mode)
+                or (info.st_dev, info.st_ino, info.st_uid) != original
+                or info.st_uid != os.getuid()
+                or not shutil.rmtree.avoids_symlink_attacks):
+            raise ValueError("OWNERSHIP")
+        for entry in workspace.iterdir():
+            mode = entry.lstat().st_mode
+            if stat.S_ISDIR(mode):
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        removed = not any(workspace.iterdir())
+        if not removed:
+            raise ValueError("OWNERSHIP")
+    except (OSError, ValueError):
+        removal_error = True
+
+    log = bootstrap_dir / "failed-checkout-final.storage.private.jsonl"
+    output = bootstrap_dir / "failed-checkout-final.output.private.log"
+    command = [sys.executable, str(helper), "--docker", "--log", str(log)]
+    for root in (workspace, runner_temp, Path.home() / ".cargo",
+                 Path.home() / ".cache", Path.home() / ".local",
+                 Path.home() / ".rustup", Path("/tmp")):
+        command.extend(("--root", str(root)))
+    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        result = subprocess.run(command, stdout=stream,
+                                stderr=subprocess.STDOUT, check=False)
+    status = bootstrap_dir / "failed-checkout-cleanup.private.json"
+    descriptor = os.open(status, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump({"workspace_removed": removed,
+                   "inventory_completed": result.returncode == 0,
+                   "removal_failed": removal_error}, stream, sort_keys=True)
+        stream.write("\n")
+    if removal_error or result.returncode:
+        raise ValueError("CLEANUP")
+
+
 def main() -> None:
     os.umask(0o077)
     source = os.environ.get("GITHUB_SHA", "")
@@ -81,6 +132,10 @@ def main() -> None:
             or workspace.is_symlink() or runner_temp.is_symlink()
             or list(workspace.iterdir())):
         raise ValueError("STATE")
+    info = workspace.stat()
+    original = (info.st_dev, info.st_ino, info.st_uid)
+    if info.st_uid != os.getuid():
+        raise ValueError("STATE")
     bootstrap_dir = runner_temp / "stress-bootstrap"
     bootstrap_dir.mkdir(mode=0o700, exist_ok=False)
     helpers = {name: fetch_helper(source, name, digest, bootstrap_dir)
@@ -90,20 +145,28 @@ def main() -> None:
         helper=helpers["scripts/release/release_storage.py"],
         workspace=workspace, runner_temp=runner_temp, home=Path.home(),
         log=log)
-    subprocess.run(command, check=True)
-    actual = subprocess.check_output(
-        ["git", "-C", str(workspace), "rev-parse", "HEAD"],
-        text=True, timeout=15).strip()
-    if actual != source:
-        raise ValueError("SOURCE")
-    for relative, downloaded in helpers.items():
-        if (workspace / relative).read_bytes() != downloaded.read_bytes():
+    try:
+        subprocess.run(command, check=True)
+        actual = subprocess.check_output(
+            ["git", "-C", str(workspace), "rev-parse", "HEAD"],
+            text=True, timeout=15).strip()
+        if actual != source:
             raise ValueError("SOURCE")
-    clean = subprocess.check_output(
-        ["git", "-C", str(workspace), "status", "--porcelain"],
-        text=True, timeout=15)
-    if clean:
-        raise ValueError("SOURCE")
+        for relative, downloaded in helpers.items():
+            if (workspace / relative).read_bytes() != downloaded.read_bytes():
+                raise ValueError("SOURCE")
+        clean = subprocess.check_output(
+            ["git", "-C", str(workspace), "status", "--porcelain"],
+            text=True, timeout=15)
+        if clean:
+            raise ValueError("SOURCE")
+    except (OSError, ValueError, subprocess.CalledProcessError,
+            subprocess.TimeoutExpired):
+        failed_checkout_cleanup(workspace=workspace, runner_temp=runner_temp,
+                                bootstrap_dir=bootstrap_dir,
+                                helper=helpers["scripts/release/release_storage.py"],
+                                original=original)
+        raise
 
 
 if __name__ == "__main__":

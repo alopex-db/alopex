@@ -20,6 +20,8 @@ env:
 jobs:
   stress-tests:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
     env:
       RUSTUP_TOOLCHAIN: stable
     timeout-minutes: 30
@@ -53,7 +55,7 @@ jobs:
               assert resolved.scheme == "https" and resolved.hostname == "raw.githubusercontent.com"
               body = response.read(100_001)
           assert 0 < len(body) <= 100_000
-          assert hashlib.sha256(body).hexdigest() == "be96a2e4a82edf48daadce01d0f1124601fa3f01e72e3c617f64e201092e78b5"
+          assert hashlib.sha256(body).hexdigest() == "903f2ca95f3bbcd5f1eae9805a43b65216ef877baa9714144ca0529a87842c2d"
           destination = Path(os.environ["RUNNER_TEMP"]) / "stress-monitored-checkout.py"
           with destination.open("xb") as stream:
               stream.write(body)
@@ -61,6 +63,11 @@ jobs:
           python3 "${RUNNER_TEMP}/stress-monitored-checkout.py"
           printf 'RUNNER_ENVIRONMENT=github-hosted\nCARGO_TARGET_DIR=%s/target\n' "${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
           printf 'STRESS_MONITORED_CHECKOUT_OK\n' >&3
+
+      - name: Record owned Stage-2 target
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 scripts/ci/stress_cleanup.py --stage prepare --cases stress
 
       - name: Install stable Rust under storage guard
         run: python3 scripts/ci/stress_guarded_command.py --case stress --phase toolchain -- rustup toolchain install stable --profile minimal
@@ -93,9 +100,17 @@ jobs:
         with:
           case_id: stress
 
+      - name: Remove owned output and inventory host
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 scripts/ci/stress_cleanup.py --stage cleanup --cases stress
+
   sanitizer-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      actions: read
     env:
       RUSTUP_TOOLCHAIN: nightly
     timeout-minutes: 60
@@ -113,6 +128,12 @@ jobs:
             sanitizer: msan
     steps:
       - *monitored_checkout
+
+      - name: Record owned Stage-2 target
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          STRESS_CASES: ${{ matrix.sanitizer }}
+        run: python3 scripts/ci/stress_cleanup.py --stage prepare --cases "${STRESS_CASES}"
 
       - name: Install nightly Rust under storage guard
         env:
@@ -162,14 +183,28 @@ jobs:
         with:
           case_id: ${{ matrix.sanitizer }}
 
+      - name: Remove owned output and inventory host
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          STRESS_CASES: ${{ matrix.sanitizer }}
+        run: python3 scripts/ci/stress_cleanup.py --stage cleanup --cases "${STRESS_CASES}"
+
   fuzz-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
     env:
       RUSTUP_TOOLCHAIN: nightly
     timeout-minutes: 2880
     steps:
       - *monitored_checkout
+
+      - name: Record owned Stage-2 target
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 scripts/ci/stress_cleanup.py --stage prepare --cases sql_parser,dataframe_conversion
 
       - name: Install nightly Rust under storage guard
         run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase toolchain -- rustup toolchain install nightly --profile minimal
@@ -226,6 +261,12 @@ jobs:
         with:
           case_id: dataframe_conversion
 
+      - name: Remove owned output and inventory host
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 scripts/ci/stress_cleanup.py --stage cleanup --cases sql_parser,dataframe_conversion
+
   perf-lane:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
@@ -237,6 +278,11 @@ jobs:
     timeout-minutes: 90
     steps:
       - *monitored_checkout
+
+      - name: Record owned Stage-2 target
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 scripts/ci/stress_cleanup.py --stage prepare --cases perf
 
       - name: Install stable Rust under storage guard
         run: python3 scripts/ci/stress_guarded_command.py --case perf --phase toolchain -- rustup toolchain install stable --profile minimal
@@ -275,3 +321,9 @@ jobs:
         uses: ./.github/actions/stress-upload
         with:
           case_id: perf
+
+      - name: Remove owned output and inventory host
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 scripts/ci/stress_cleanup.py --stage cleanup --cases perf
