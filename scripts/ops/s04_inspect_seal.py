@@ -14,7 +14,7 @@ import tempfile
 
 REPO = Path(__file__).resolve().parents[2]
 CERT = REPO / ".github/ops/native-evidence-cert.pem"
-CERT_SHA256 = "d33a612dab2f76986e0dc6ba0ba45be15265ceccd2d56b07c14f9f696259f6b2"
+CERT_SHA256 = "e8a39adb8f76185a87f805f6d083bdbe2bd7ea5d3bc05607f1a7a2e0deb8b775"
 MAX_PLAINTEXT = 1_048_576
 MAX_CIPHERTEXT = 2_097_152
 

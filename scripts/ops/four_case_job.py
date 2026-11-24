@@ -25,7 +25,7 @@ from four_case_diagnostic import controller, entrypoint, stage_pair  # noqa: E40
 LOCK_DIR = "alopex-712-lock"
 MATRIX_DIR = "alopex-712-matrix"
 CERT = REPO / ".github/ops/native-evidence-cert.pem"
-CERT_SHA256 = "d33a612dab2f76986e0dc6ba0ba45be15265ceccd2d56b07c14f9f696259f6b2"
+CERT_SHA256 = "e8a39adb8f76185a87f805f6d083bdbe2bd7ea5d3bc05607f1a7a2e0deb8b775"
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 MAX_FILES_PER_PAIR = 64
 MAX_RECEIPT_FILES = 16

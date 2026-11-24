@@ -2,7 +2,7 @@
 
 The checked-in `.github/ops/native-evidence-cert.pem` is the public encryption
 certificate for private CMS evidence produced by ops and qualification jobs.
-Its current validity ends on **2026-12-05 15:00:49 UTC**. Plan a replacement
+Its current validity ends on **2027-02-20 07:20:43 UTC**. Plan a replacement
 before that date. A certificate replacement is an evidence trust change and
 requires a reviewed source commit and an owner for the off-repository private
 key. Never commit or print a private key, execution profile, or plaintext
@@ -27,8 +27,10 @@ evidence.
 
 1. Replace only `.github/ops/native-evidence-cert.pem` with the reviewed public
    certificate. In the same commit, update `CERT_SHA256` in
-   `scripts/ops/s04_inspect_seal.py`; `s04_capture_seal.py` imports that pin.
-   Replacing the PEM alone causes both S04 paths to report `CERT_MISMATCH`.
+   `scripts/ops/s04_inspect_seal.py` and `scripts/ops/four_case_job.py`;
+   `s04_capture_seal.py` imports the S04 pin. Replacing the PEM alone causes
+   pinned paths to reject the certificate. The former Stage-2 CMS finalizer is
+   absent from the current source and must not be restored for this rotation.
 2. Review every certificate consumer: `scripts/ops/evidence.py`, both S04
    sealers, `same_job_four_case.py`, `hosted_test_env_qualification.py`,
    `hosted_test_env_qualification_1951.py`, `hosted_test_env_inventory.py`,
