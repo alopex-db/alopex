@@ -1,0 +1,1057 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alopex.invalid/private/s04-selected-job-profile-v1",
+  "title": "Owner-only selected-job S04 public admission profile",
+  "description": "Private single-run binding; no credentials. Cross-field arithmetic, canonical root disjointness and exact manifest order require an independent semantic validator before construction.",
+  "type": "object",
+  "required": [
+    "schema",
+    "binding",
+    "storage",
+    "runtime",
+    "security",
+    "network",
+    "assets",
+    "workload",
+    "time_budget"
+  ],
+  "properties": {
+    "schema": {
+      "const": "alopex.s04-selected-job-profile/v1"
+    },
+    "binding": {
+      "type": "object",
+      "required": [
+        "repository",
+        "issue_number",
+        "candidate_sha",
+        "source_sha",
+        "workflow_ref",
+        "workflow_sha",
+        "run_id",
+        "run_attempt",
+        "phase",
+        "selected_architecture",
+        "host_identity",
+        "physical_host_id",
+        "profile_owner_uid",
+        "profile_mode"
+      ],
+      "properties": {
+        "repository": {
+          "const": "alopex-db/alopex"
+        },
+        "issue_number": {
+          "const": 684
+        },
+        "candidate_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "workflow_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workflow_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "run_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "phase": {
+          "const": "s04_public_admission"
+        },
+        "selected_architecture": {
+          "enum": [
+            "x86_64",
+            "aarch64"
+          ]
+        },
+        "host_identity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "physical_host_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile_owner_uid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "profile_mode": {
+          "const": "0600"
+        }
+      },
+      "additionalProperties": false
+    },
+    "storage": {
+      "type": "object",
+      "required": [
+        "physical_host_id",
+        "roots",
+        "coverage_attestation",
+        "allocation_accounting",
+        "stop_bytes",
+        "absolute_ceiling_bytes",
+        "collection_reserve_bytes",
+        "cleanup_reserve_bytes",
+        "recovery_reserve_bytes",
+        "monitor_interval_seconds",
+        "maximum_growth_between_samples_bytes",
+        "sample_max_age_seconds",
+        "measured_baseline_bytes",
+        "planned_peak_extra_bytes",
+        "backing_free_bytes",
+        "stop_action",
+        "cleanup_plan"
+      ],
+      "properties": {
+        "physical_host_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "roots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/storage_root"
+          },
+          "minItems": 1
+        },
+        "coverage_attestation": {
+          "const": true
+        },
+        "allocation_accounting": {
+          "const": "one_physical_host_all_alopex_allocated_bytes"
+        },
+        "stop_bytes": {
+          "const": 40000000000
+        },
+        "absolute_ceiling_bytes": {
+          "const": 50000000000
+        },
+        "collection_reserve_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "cleanup_reserve_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "recovery_reserve_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "monitor_interval_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_growth_between_samples_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sample_max_age_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "measured_baseline_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planned_peak_extra_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "backing_free_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stop_action": {
+          "const": "stop_before_40gb_preserve_evidence"
+        },
+        "cleanup_plan": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "runtime": {
+      "type": "object",
+      "required": [
+        "docker_context",
+        "endpoint_class",
+        "socket_path",
+        "daemon_root",
+        "process_owner_uid",
+        "container_labels",
+        "volume_labels",
+        "cpu_allocation",
+        "memory_bytes",
+        "swap_bytes",
+        "pids",
+        "case_seconds",
+        "job_limit_seconds",
+        "stop_before_seconds",
+        "architecture_compatibility"
+      ],
+      "properties": {
+        "docker_context": {
+          "type": "string",
+          "minLength": 1
+        },
+        "endpoint_class": {
+          "const": "local_unix_socket"
+        },
+        "socket_path": {
+          "type": "string",
+          "pattern": "^/[^\\u0000\\r\\n]+$"
+        },
+        "daemon_root": {
+          "type": "string",
+          "pattern": "^/[^\\u0000\\r\\n]+$"
+        },
+        "process_owner_uid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "container_labels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "volume_labels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "cpu_allocation": {
+          "type": "object",
+          "required": [
+            "server",
+            "client",
+            "controller"
+          ],
+          "properties": {
+            "server": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minItems": 1
+            },
+            "client": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minItems": 1
+            },
+            "controller": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "minItems": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "memory_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "swap_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pids": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "case_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "job_limit_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stop_before_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "architecture_compatibility": {
+          "const": "native_verified"
+        }
+      },
+      "additionalProperties": false
+    },
+    "security": {
+      "type": "object",
+      "required": [
+        "policy_manifest_sha256",
+        "kernel_release",
+        "cgroup_version",
+        "lsm_kind",
+        "lsm_policy_id",
+        "seccomp_policy_id",
+        "seccomp_sha256",
+        "worker_effective_capabilities",
+        "pid_namespace",
+        "ipc_namespace",
+        "host_management_mounts",
+        "required_counters",
+        "checks"
+      ],
+      "properties": {
+        "policy_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "kernel_release": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cgroup_version": {
+          "enum": [
+            "v2"
+          ]
+        },
+        "lsm_kind": {
+          "enum": [
+            "apparmor",
+            "selinux"
+          ]
+        },
+        "lsm_policy_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "seccomp_policy_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "seccomp_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "worker_effective_capabilities": {
+          "const": []
+        },
+        "pid_namespace": {
+          "const": "private"
+        },
+        "ipc_namespace": {
+          "const": "private"
+        },
+        "host_management_mounts": {
+          "const": []
+        },
+        "required_counters": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "checks": {
+          "type": "object",
+          "required": [
+            "SOURCE",
+            "PROFILE",
+            "STORAGE_BEFORE",
+            "STORAGE_MONITOR",
+            "FILESYSTEM",
+            "PROCESS_IO",
+            "DOCKER_LOCAL",
+            "KERNEL_POLICY",
+            "ISOLATION",
+            "NETWORK",
+            "RUNTIME_LIMITS",
+            "ASSETS",
+            "TIME_BUDGET",
+            "CLEANUP_RESERVE"
+          ],
+          "properties": {
+            "SOURCE": {
+              "$ref": "#/$defs/security_check"
+            },
+            "PROFILE": {
+              "$ref": "#/$defs/security_check"
+            },
+            "STORAGE_BEFORE": {
+              "$ref": "#/$defs/security_check"
+            },
+            "STORAGE_MONITOR": {
+              "$ref": "#/$defs/security_check"
+            },
+            "FILESYSTEM": {
+              "$ref": "#/$defs/security_check"
+            },
+            "PROCESS_IO": {
+              "$ref": "#/$defs/security_check"
+            },
+            "DOCKER_LOCAL": {
+              "$ref": "#/$defs/security_check"
+            },
+            "KERNEL_POLICY": {
+              "$ref": "#/$defs/security_check"
+            },
+            "ISOLATION": {
+              "$ref": "#/$defs/security_check"
+            },
+            "NETWORK": {
+              "$ref": "#/$defs/security_check"
+            },
+            "RUNTIME_LIMITS": {
+              "$ref": "#/$defs/security_check"
+            },
+            "ASSETS": {
+              "$ref": "#/$defs/security_check"
+            },
+            "TIME_BUDGET": {
+              "$ref": "#/$defs/security_check"
+            },
+            "CLEANUP_RESERVE": {
+              "$ref": "#/$defs/security_check"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "network": {
+      "type": "object",
+      "required": [
+        "deny_unlisted_edges",
+        "edges",
+        "credential_handles_separate"
+      ],
+      "properties": {
+        "deny_unlisted_edges": {
+          "const": true
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/network_edge"
+          },
+          "minItems": 0
+        },
+        "credential_handles_separate": {
+          "const": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "assets": {
+      "type": "object",
+      "required": [
+        "image_digest",
+        "image_architecture",
+        "image_source",
+        "products",
+        "case_manifest_sha256",
+        "public_receipt_schema_sha256"
+      ],
+      "properties": {
+        "image_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "image_architecture": {
+          "type": "string",
+          "minLength": 1
+        },
+        "image_source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "products": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/asset"
+            },
+            {
+              "$ref": "#/$defs/asset"
+            }
+          ],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "case_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "public_receipt_schema_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "workload": {
+      "type": "object",
+      "required": [
+        "cell_count",
+        "pair_count",
+        "pairs",
+        "pairing_rule",
+        "noise_rule",
+        "acceptance_rule",
+        "case_manifest_path"
+      ],
+      "properties": {
+        "cell_count": {
+          "const": 54
+        },
+        "pair_count": {
+          "const": 27
+        },
+        "pairs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pair"
+          },
+          "minItems": 27,
+          "maxItems": 27
+        },
+        "pairing_rule": {
+          "const": "all_27_pairs_complete_in_manifest_order"
+        },
+        "noise_rule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "acceptance_rule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "case_manifest_path": {
+          "type": "string",
+          "pattern": "^/[^\\u0000\\r\\n]+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "time_budget": {
+      "type": "object",
+      "required": [
+        "pilot_required",
+        "pilot_case_mix_sha256",
+        "stages",
+        "checkpoint_every_cells",
+        "checkpoint_every_seconds",
+        "abort_if_projected_over_seconds",
+        "abort_if_projected_storage_over_bytes",
+        "conservative_total_seconds",
+        "margin_seconds",
+        "job_limit_seconds",
+        "comparison_indivisible"
+      ],
+      "properties": {
+        "pilot_required": {
+          "const": true
+        },
+        "pilot_case_mix_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "stages": {
+          "type": "object",
+          "required": [
+            "precheckout_inventory",
+            "checkout",
+            "source_asset_verify",
+            "dependency_acquisition",
+            "image_volume_construction",
+            "security_804",
+            "pilot",
+            "measurement_54",
+            "raw_public_audit",
+            "collection",
+            "cleanup"
+          ],
+          "properties": {
+            "precheckout_inventory": {
+              "$ref": "#/$defs/stage_budget"
+            },
+            "checkout": {
+              "$ref": "#/$defs/stage_budget"
+            },
+            "source_asset_verify": {
+              "$ref": "#/$defs/stage_budget"
+            },
+            "dependency_acquisition": {
+              "$ref": "#/$defs/stage_budget"
+            },
+            "image_volume_construction": {
+              "$ref": "#/$defs/stage_budget"
+            },
+            "security_804": {
+              "$ref": "#/$defs/stage_budget"
+            },
+            "pilot": {
+              "$ref": "#/$defs/stage_budget"
+            },
+            "measurement_54": {
+              "$ref": "#/$defs/stage_budget"
+            },
+            "raw_public_audit": {
+              "$ref": "#/$defs/stage_budget"
+            },
+            "collection": {
+              "$ref": "#/$defs/stage_budget"
+            },
+            "cleanup": {
+              "$ref": "#/$defs/stage_budget"
+            }
+          },
+          "additionalProperties": false
+        },
+        "checkpoint_every_cells": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "checkpoint_every_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "abort_if_projected_over_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "abort_if_projected_storage_over_bytes": {
+          "const": 40000000000
+        },
+        "conservative_total_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "margin_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "job_limit_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "comparison_indivisible": {
+          "const": true
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "security_check": {
+      "type": "object",
+      "required": [
+        "config_location",
+        "policy_id",
+        "observed_property",
+        "positive_check_id",
+        "negative_check_id",
+        "positive_operation",
+        "denied_operation",
+        "evidence_location"
+      ],
+      "properties": {
+        "config_location": {
+          "type": "string",
+          "pattern": "^/[^\\u0000\\r\\n]+$"
+        },
+        "policy_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observed_property": {
+          "type": "string",
+          "minLength": 1
+        },
+        "positive_check_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "negative_check_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "positive_operation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "denied_operation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_location": {
+          "type": "string",
+          "pattern": "^/[^\\u0000\\r\\n]+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "cell": {
+      "type": "object",
+      "required": [
+        "cell_id",
+        "case_id",
+        "arm",
+        "asset_sha256",
+        "input_sha256",
+        "parameters_sha256"
+      ],
+      "properties": {
+        "cell_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "case_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arm": {
+          "enum": [
+            "baseline",
+            "candidate"
+          ]
+        },
+        "asset_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "input_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "parameters_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "pair": {
+      "type": "object",
+      "required": [
+        "pair_id",
+        "order",
+        "baseline",
+        "candidate",
+        "order_rule"
+      ],
+      "properties": {
+        "pair_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 27
+        },
+        "baseline": {
+          "$ref": "#/$defs/cell"
+        },
+        "candidate": {
+          "$ref": "#/$defs/cell"
+        },
+        "order_rule": {
+          "enum": [
+            "baseline_then_candidate",
+            "candidate_then_baseline"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "asset": {
+      "type": "object",
+      "required": [
+        "role",
+        "name",
+        "sha256",
+        "architecture",
+        "source_uri",
+        "size_bytes"
+      ],
+      "properties": {
+        "role": {
+          "enum": [
+            "baseline",
+            "candidate"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "architecture": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_uri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "storage_root": {
+      "type": "object",
+      "required": [
+        "kind",
+        "canonical_path",
+        "physical_device_id",
+        "scan_method",
+        "maximum_scan_age_seconds",
+        "owns_container_storage",
+        "includes_descendants"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "workspace",
+            "worktrees",
+            "temp",
+            "cargo_build",
+            "cargo_cache",
+            "copied_binaries",
+            "wheels_venvs",
+            "local_installations",
+            "container_images",
+            "container_build_cache",
+            "container_volumes",
+            "container_logs",
+            "other_alopex",
+            "recovery_reserve"
+          ]
+        },
+        "canonical_path": {
+          "type": "string",
+          "pattern": "^/[^\\u0000\\r\\n]+$"
+        },
+        "physical_device_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scan_method": {
+          "enum": [
+            "allocated_bytes_recursive",
+            "filesystem_accounting",
+            "runtime_accounting"
+          ]
+        },
+        "maximum_scan_age_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "owns_container_storage": {
+          "type": "boolean"
+        },
+        "includes_descendants": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "network_edge": {
+      "type": "object",
+      "required": [
+        "source",
+        "destination",
+        "protocol",
+        "port",
+        "authentication",
+        "stage"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "destination": {
+          "type": "string",
+          "minLength": 1
+        },
+        "protocol": {
+          "enum": [
+            "unix",
+            "tcp",
+            "udp"
+          ]
+        },
+        "port": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          ]
+        },
+        "authentication": {
+          "enum": [
+            "peer_credentials",
+            "mutual_tls",
+            "token_handle",
+            "none_loopback_only"
+          ]
+        },
+        "stage": {
+          "enum": [
+            "precheckout_inventory",
+            "checkout",
+            "source_asset_verify",
+            "dependency_acquisition",
+            "image_volume_construction",
+            "security_804",
+            "pilot",
+            "measurement_54",
+            "raw_public_audit",
+            "collection",
+            "cleanup"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "stage_budget": {
+      "type": "object",
+      "required": [
+        "work_count",
+        "input_bytes",
+        "rate_units",
+        "measured_rate_per_second",
+        "rate_evidence",
+        "expected_seconds",
+        "conservative_seconds",
+        "peak_extra_bytes",
+        "owner",
+        "concurrency"
+      ],
+      "properties": {
+        "work_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "input_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rate_units": {
+          "enum": [
+            "bytes",
+            "cases",
+            "checks",
+            "assets",
+            "steps"
+          ]
+        },
+        "measured_rate_per_second": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "rate_evidence": {
+          "type": "object",
+          "required": [
+            "source_sha",
+            "run_id",
+            "run_attempt",
+            "observed_at_utc",
+            "sample_count",
+            "scope"
+          ],
+          "properties": {
+            "source_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "run_id": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "run_attempt": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "observed_at_utc": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "sample_count": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "scope": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "expected_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "conservative_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "peak_extra_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "owner": {
+          "enum": [
+            "operator",
+            "selected_job",
+            "independent_verifier"
+          ]
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
