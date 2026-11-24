@@ -505,7 +505,7 @@ jobs:
       VERSION: ${{ needs.verify.outputs.version }}
       SOURCE_COMMIT: ${{ needs.verify.outputs.commit }}
       PARITY_RUN_ID: ${{ inputs.parity_run_id || '' }}
-      REPORT_ROOT: benchmark-output/hnsw
+      REPORT_ROOT: benchmark-output
     steps:
       - uses: actions/checkout@v4
         with:
@@ -518,21 +518,11 @@ jobs:
           token: ${{ secrets.DOCS_REPO_TOKEN }}
           path: docs-repo
 
-      - name: Download successful exact-SHA Extended Verification evidence
+      - name: Authenticate and download selected Extended Verification run
         id: benchmark_evidence
         shell: bash
         run: |
           set -euo pipefail
-          published="benchmark-output/published"
-          mkdir -p "${published}"
-          if cp "docs-repo/reports/vector-benchmarks/v${VERSION}.json" "${published}/hnsw-diagnostic.json" 2>/dev/null && \
-             cp "docs-repo/reports/vector-benchmarks/v${VERSION}.md" "${published}/hnsw-diagnostic.md" 2>/dev/null && \
-             python3 scripts/performance/release_hnsw_evidence.py \
-               --root "${published}" --version "${VERSION}" --commit "${SOURCE_COMMIT}" --public-pair; then
-            echo "already_published=true" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-          rm -rf "${published}"
           [[ "${PARITY_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
           run="${RUNNER_TEMP}/parity-performance-run.json"
           gh api "repos/${REPOSITORY}/actions/runs/${PARITY_RUN_ID}" > "${run}"
@@ -543,31 +533,58 @@ jobs:
 
           with open(sys.argv[1], encoding="utf-8") as stream:
               run = json.load(stream)
+          if run.get("id") != int(os.environ["PARITY_RUN_ID"]):
+              raise SystemExit("selected parity run identity does not match")
           if run.get("head_sha") != os.environ["SOURCE_COMMIT"]:
               raise SystemExit("RC-approved parity run does not match the release commit")
           if run.get("path") != ".github/workflows/parity-performance.yml":
               raise SystemExit("RC-approved run is not parity-performance")
           if run.get("conclusion") != "success":
               raise SystemExit("RC-approved parity run is not successful")
+          if type(run.get("run_attempt")) is not int or run["run_attempt"] <= 0:
+              raise SystemExit("selected parity attempt is invalid")
           print(run["run_attempt"])
           PY
           )"
           gh run download "${PARITY_RUN_ID}" --repo "${REPOSITORY}" \
-            --name "parity-performance-${PARITY_RUN_ID}-${run_attempt}" \
+            --name "parity-performance-public-${PARITY_RUN_ID}-${run_attempt}" \
             --dir benchmark-output
-          echo "already_published=false" >> "${GITHUB_OUTPUT}"
+          echo "run_attempt=${run_attempt}" >> "${GITHUB_OUTPUT}"
 
       - name: Validate the canonical benchmark pair
-        if: steps.benchmark_evidence.outputs.already_published != 'true'
         shell: bash
         run: |
           set -euo pipefail
           python3 scripts/performance/release_hnsw_evidence.py \
-            --root "${REPORT_ROOT}" --version "${VERSION}" --commit "${SOURCE_COMMIT}"
+            --root "${REPORT_ROOT}" --version "${VERSION}" --commit "${SOURCE_COMMIT}" \
+            --run-id "${PARITY_RUN_ID}" --run-attempt "${{ steps.benchmark_evidence.outputs.run_attempt }}"
+
+      - name: Compare an existing docs report with the selected run
+        id: published_pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          published="benchmark-output/published"
+          existing_json="docs-repo/reports/vector-benchmarks/v${VERSION}.json"
+          existing_md="docs-repo/reports/vector-benchmarks/v${VERSION}.md"
+          if [[ -e "${existing_json}" || -e "${existing_md}" ]]; then
+            [[ -f "${existing_json}" && -f "${existing_md}" ]]
+            mkdir -p "${published}"
+            cp "${existing_json}" "${published}/hnsw-diagnostic.json"
+            cp "${existing_md}" "${published}/hnsw-diagnostic.md"
+            python3 scripts/performance/release_hnsw_evidence.py \
+              --root "${published}" --version "${VERSION}" --commit "${SOURCE_COMMIT}" \
+              --run-id "${PARITY_RUN_ID}" --run-attempt "${{ steps.benchmark_evidence.outputs.run_attempt }}" --public-pair
+            cmp -s "${published}/hnsw-diagnostic.json" "${REPORT_ROOT}/hnsw-diagnostic.json"
+            cmp -s "${published}/hnsw-diagnostic.md" "${REPORT_ROOT}/hnsw-diagnostic.md"
+            echo "already_published=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "already_published=false" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Publish candidate branch for docs ingestion
         id: candidate
-        if: steps.benchmark_evidence.outputs.already_published != 'true'
+        if: steps.published_pair.outputs.already_published != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -600,7 +617,7 @@ jobs:
         run: |
           set -euo pipefail
           source_root="${REPORT_ROOT}"
-          if [[ "${{ steps.benchmark_evidence.outputs.already_published }}" == true ]]; then
+          if [[ "${{ steps.published_pair.outputs.already_published }}" == true ]]; then
             source_root="benchmark-output/published"
           fi
           report="reports/vector-benchmarks/v${VERSION}"
