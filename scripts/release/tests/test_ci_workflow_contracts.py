@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import shlex
+import json
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,55 @@ FLOATING_SETUP = "uses: jiro4989/setup-nim-action@"
 
 
 class CiWorkflowContractTests(unittest.TestCase):
+    def test_issue681_selected_admission_is_mutually_exclusive_and_read_only(self) -> None:
+        workflow = self.workflow("alopex-performance.yml")
+        parsed = subprocess.run(
+            ["ruby", "-rjson", "-ryaml", "-e",
+             "puts JSON.generate(YAML.load_file(ARGV.fetch(0)))",
+             str(WORKFLOW_DIR / "alopex-performance.yml")],
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+        document = json.loads(parsed.stdout)
+        jobs = document["jobs"]
+        admission = jobs["hnsw_release_admission"]
+        self.assertIn("hnsw_release_admission_mode", workflow)
+        self.assertIn("on:\n  workflow_dispatch:", workflow)
+        self.assertNotIn("pull_request:", workflow)
+        self.assertEqual(admission["runs-on"], "ubuntu-24.04")
+        self.assertEqual(admission["timeout-minutes"], 10)
+        self.assertEqual(admission["permissions"],
+                         {"contents": "read", "actions": "read", "id-token": "write"})
+        self.assertIn("inputs.issue_number == '681'", admission["if"])
+        self.assertIn("inputs.hnsw_release_admission_mode", admission["if"])
+        for old_mode in ("qualification_mode", "sql_four_case_mode", "sql_final_mode",
+                         "public_native_build_mode", "wal_cost_mode",
+                         "sql_diagnostic_mode", "s04_inspect_mode",
+                         "s04_socket_inventory_mode", "s04_capture_mode"):
+            self.assertIn("!inputs." + old_mode, admission["if"])
+        for name, job in jobs.items():
+            if name != "hnsw_release_admission":
+                self.assertIn("!inputs.hnsw_release_admission_mode", job["if"], name)
+                self.assertNotIn("id-token", job.get("permissions", {}), name)
+        steps = admission["steps"]
+        self.assertEqual(len(steps), 3)
+        self.assertIn("Fetch exact selected source", steps[1]["name"])
+        self.assertIn("GIT_CONFIG_NOSYSTEM", steps[1]["run"])
+        self.assertIn("GIT_TEMPLATE_DIR", steps[1]["run"])
+        self.assertIn("GIT_CONFIG_VALUE_0", steps[1]["run"])
+        self.assertIn("HEAD^{tree}", steps[1]["run"])
+        self.assertEqual(steps[1]["timeout-minutes"], 2)
+        self.assertEqual(steps[2]["timeout-minutes"], 5)
+        self.assertEqual(steps[2]["run"],
+                         "python3 -B scripts/performance/issue681_hosted_identity.py")
+        self.assertLess(workflow.index("Gate selected source and storage before checkout"),
+                        workflow.index("Authenticate selected job and admit host"))
+        for step in steps:
+            text = json.dumps(step)
+            for forbidden in ("cargo ", "docker ", "upload-artifact",
+                              "issue681_hosted_acquire", "issue681_hosted_full_job",
+                              "issue681_public_pair", "issue681_private_release"):
+                self.assertNotIn(forbidden, text)
+
     def test_toolchain_identity_checks_drain_output_and_preserve_failures(self) -> None:
         action = (WORKFLOW_DIR.parent / "actions/setup-nim-parser-toolchain/action.yml").read_text(
             encoding="utf-8"
@@ -306,7 +356,7 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertIn("name: Change scope", ci)
         self.assertIn("needs: [scope]", ci)
         self.assertIn("needs.scope.outputs.production == 'true'", ci)
-        self.assertIn("Release-process-only change", ci)
+        self.assertIn("Scoped non-product verification passed", ci)
         self.assertIn("paths-ignore:", compatibility)
         self.assertIn("python -m unittest discover -s scripts/release/tests", process)
         self.assertNotIn("cargo test", process)
@@ -317,6 +367,27 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertGreaterEqual(parity.count("scripts/parity/**"), 2)
         self.assertIn("scripts.parity.test_compat_fixture_contract", parity)
         self.assertNotIn("cargo test", parity)
+
+    def test_hnsw_harness_contract_is_scoped_and_joined_without_raw_logs(self) -> None:
+        workflow = self.workflow("ci.yml")
+        scope = (REPOSITORY_ROOT / "scripts/ci/classify-change-scope.sh").read_text()
+        job = workflow.split("  hnsw-contract:", maxsplit=1)[1].split(
+            "\n  fmt:", maxsplit=1
+        )[0]
+        join = workflow.split("  ci-success:", maxsplit=1)[1]
+
+        self.assertIn("hnsw_contract: ${{ steps.classify.outputs.hnsw_contract }}", workflow)
+        self.assertIn("scripts/performance/issue681_*", scope)
+        self.assertIn("scripts/performance/tests/test_issue681_*", scope)
+        self.assertIn("scripts/performance/phase_rss.py", scope)
+        self.assertIn("if: needs.scope.outputs.hnsw_contract == 'true'", job)
+        self.assertIn("timeout-minutes: 5", job)
+        self.assertIn("-p 'test_issue681_*.py'", job)
+        self.assertIn("-p 'test_phase_rss.py'", job)
+        self.assertIn('>"${private_log}" 2>&1', job)
+        self.assertNotIn("upload-artifact", job)
+        self.assertIn("needs['hnsw-contract'].result", join)
+        self.assertIn("expected_hnsw=success", join)
 
     def test_workflows_do_not_clone_an_unpinned_chirps_checkout(self) -> None:
         for workflow_path in WORKFLOW_DIR.glob("*.yml"):

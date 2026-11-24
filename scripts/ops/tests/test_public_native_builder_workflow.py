@@ -13,6 +13,7 @@ OLD_JOBS = ("s04_socket_inventory", "inventory", "qualification",
             "wal_cost_682", "s04_inspect")
 CONTROLLER_SELECTOR_SHA256 = "fb7f9c0acfc32a279a9f100b509a840b8c86c4895308ca3e7021d0f232950397"
 NEW_GUARD = " && !inputs.public_native_build_mode"
+ADMISSION_GUARD = "!inputs.hnsw_release_admission_mode && "
 
 
 def job(text: str, name: str) -> str:
@@ -44,7 +45,8 @@ class PublicNativeBuilderWorkflow(unittest.TestCase):
             match = re.search(r"^    if: (.+)$", job(self.text, name), re.M)
             self.assertIsNotNone(match, name)
             self.assertEqual(match.group(1).count(NEW_GUARD), 1, name)
-            selectors.append(match.group(1).replace(NEW_GUARD, ""))
+            self.assertEqual(match.group(1).count(ADMISSION_GUARD), 1, name)
+            selectors.append(match.group(1).replace(NEW_GUARD, "").replace(ADMISSION_GUARD, ""))
         self.assertEqual(hashlib.sha256("\n".join(selectors).encode()).hexdigest(),
                          CONTROLLER_SELECTOR_SHA256)
         self.assertIn("\npermissions:\n  contents: read\n  actions: read\n", self.text)
@@ -55,7 +57,8 @@ class PublicNativeBuilderWorkflow(unittest.TestCase):
         selector = re.search(r"^    if: (.+)$", entry, re.M).group(1)
         self.assertIn("inputs.public_native_build_mode", selector)
         self.assertIn("inputs.issue_number == '712'", selector)
-        for mode in ("qualification_mode", "sql_four_case_mode", "sql_final_mode", "wal_cost_mode",
+        for mode in ("qualification_mode", "sql_four_case_mode", "sql_final_mode",
+                     "hnsw_release_admission_mode", "wal_cost_mode",
                      "sql_diagnostic_mode", "s04_inspect_mode",
                      "s04_socket_inventory_mode", "s04_capture_mode"):
             self.assertIn("!inputs." + mode, selector)
@@ -76,16 +79,23 @@ class PublicNativeBuilderWorkflow(unittest.TestCase):
         self.assertNotIn("native-evidence-cert.pem", entry)
 
     def test_final_sql_and_public_builder_modes_are_mutually_exclusive(self):
-        names = (*OLD_JOBS, "public_native_build")
+        names = (*OLD_JOBS, "public_native_build", "hnsw_release_admission")
         final = {"issue_number": "712", "qualification_mode": True,
                  "sql_final_mode": True}
         builder = {"issue_number": "712", "public_native_build_mode": True}
         both = dict(final, public_native_build_mode=True)
+        admission = {"issue_number": "681", "hnsw_release_admission_mode": True}
+        admission_and_builder = dict(admission, public_native_build_mode=True)
+        admission_and_final = dict(admission, sql_final_mode=True)
         self.assertEqual([name for name in names if enabled(self.text, name, final)],
                          ["qualification"])
         self.assertEqual([name for name in names if enabled(self.text, name, builder)],
                          ["public_native_build"])
         self.assertEqual([name for name in names if enabled(self.text, name, both)], [])
+        self.assertEqual([name for name in names if enabled(self.text, name, admission)],
+                         ["hnsw_release_admission"])
+        self.assertEqual([name for name in names if enabled(self.text, name, admission_and_builder)], [])
+        self.assertEqual([name for name in names if enabled(self.text, name, admission_and_final)], [])
 
 
 if __name__ == "__main__":
