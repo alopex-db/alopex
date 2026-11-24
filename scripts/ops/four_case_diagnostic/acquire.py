@@ -20,6 +20,14 @@ from . import acquisition, qualification
 
 EXPANDED_LIMIT = 268_435_456
 ENTRY_LIMIT = 32
+PUBLIC_FILES = frozenset({
+    "result.json", "assets/assets.json", "assets/bin/alopex-server",
+    "assets/lib/libalopex_sql_parser.so",
+    "assets/wheels/alopex-0.8.17-cp38-abi3-linux_x86_64.whl",
+    "assets/receipts/build.json", "assets/harness.tar",
+})
+PUBLIC_DIRS = frozenset({"assets", "assets/bin", "assets/lib",
+                         "assets/wheels", "assets/receipts"})
 
 
 def _require(value, code="ASSET_IDENTITY"):
@@ -31,6 +39,14 @@ def _private_dir(path):
     info = path.lstat()
     _require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and
              stat.S_IMODE(info.st_mode) == 0o700, "ASSET_STATE")
+
+
+def _private_parents(root, target):
+    current = root
+    for part in target.relative_to(root).parts[:-1]:
+        current = current / part
+        current.mkdir(mode=0o700, exist_ok=True)
+        _private_dir(current)
 
 
 def _write(path, data):
@@ -65,8 +81,8 @@ def _extract(archive, root):
             mode = entry.external_attr >> 16
             _require(name and name not in seen and not raw.startswith("/") and
                      "\\" not in raw and all(part not in ("", ".", "..") for part in parts) and
-                     (name in ("result.json", "private-evidence.cms") or
-                      (parts[0] == "assets" and (len(parts) > 1 or entry.is_dir()))) and
+                     (name in PUBLIC_DIRS if entry.is_dir() else
+                      name in PUBLIC_FILES) and
                      not entry.flag_bits & 1 and
                      (stat.S_IFMT(mode) in (0, stat.S_IFDIR) if entry.is_dir()
                       else stat.S_IFMT(mode) in (0, stat.S_IFREG)),
@@ -75,16 +91,16 @@ def _extract(archive, root):
             expanded += entry.file_size
             _require(expanded <= EXPANDED_LIMIT and entry.file_size <= EXPANDED_LIMIT,
                      "ASSET_ARCHIVE")
-        _require({"result.json", "private-evidence.cms", "assets/assets.json"} <= seen,
+        _require(seen - PUBLIC_DIRS == PUBLIC_FILES,
                  "ASSET_ARCHIVE")
         for entry in entries:
             name = PurePosixPath(entry.filename.rstrip("/"))
             target = root.joinpath(*name.parts)
+            _private_parents(root, target)
             if entry.is_dir():
-                target.mkdir(mode=0o700, parents=True, exist_ok=True)
+                target.mkdir(mode=0o700, exist_ok=True)
                 _private_dir(target)
                 continue
-            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             _private_dir(target.parent)
             descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             copied = 0

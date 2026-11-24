@@ -27,10 +27,11 @@ evidence.
 
 1. Replace only `.github/ops/native-evidence-cert.pem` with the reviewed public
    certificate. In the same commit, update `CERT_SHA256` in
-   `scripts/ops/s04_inspect_seal.py` and `scripts/ops/four_case_job.py`;
-   `s04_capture_seal.py` imports the S04 pin. Replacing the PEM alone causes
-   pinned paths to reject the certificate. The former Stage-2 CMS finalizer is
-   absent from the current source and must not be restored for this rotation.
+   `scripts/ops/s04_inspect_seal.py`; `s04_capture_seal.py` imports the S04 pin.
+   The public-only `scripts/ops/four_case_job.py` has no certificate pin or CMS
+   sealing path. Replacing the PEM alone causes the remaining pinned paths to
+   reject the certificate. The former Stage-2 CMS finalizer is absent from the
+   current source and must not be restored for this rotation.
 2. Review every certificate consumer: `scripts/ops/evidence.py`, both S04
    sealers, `same_job_four_case.py`, `hosted_test_env_qualification.py`,
    `hosted_test_env_qualification_1951.py`, `hosted_test_env_inventory.py`,

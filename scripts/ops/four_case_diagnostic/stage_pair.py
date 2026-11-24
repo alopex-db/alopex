@@ -13,7 +13,15 @@ import os
 import shutil
 import stat
 
-from . import supervisor
+from . import qualification, supervisor
+
+
+def _valid_storage(value):
+    try:
+        qualification._storage(value)
+        return True
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def validate_stage_binding(config, output, proof, receipt):
@@ -50,9 +58,7 @@ def validate_stage_binding(config, output, proof, receipt):
             security.get("lsm_profile") != "docker-default" or
             security.get("seccomp_sha256") !=
             receipt.get("security_profile_digest") or
-            profile.get("storage") != {"stop_bytes": 40_000_000_000,
-                                       "reserve_bytes": 1_000_000_000,
-                                       "poll_seconds": 10} or
+            not _valid_storage(profile.get("storage")) or
             proof.get("runs") != {
                 name: {"phase": "deleted", "collection_verified": True,
                        "cleanup_errors": []}
@@ -108,7 +114,8 @@ def _extra_bundle(manifest, config, proof, profile, bundle, budget, *, repo,
                   runner_temp):
     """Stage only allowlisted Python/harness files under /input/four-case."""
     required = {"__init__", "adapter", "log_parser", "operation", "oracle",
-                "runner", "worker", "supervisor", "container_pair_entrypoint"}
+                "runner", "worker", "supervisor", "public_attribution", "public_timing",
+                "container_pair_entrypoint"}
     package = manifest.get("package_files")
     docs, product = manifest.get("docs_files"), manifest.get("product_files")
     if (type(package) is not dict or set(package) !=

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from pathlib import PurePosixPath
 
 
 CASES = frozenset(("E01", "E02", "E03", "E04", "E05", "E06", "E07",
@@ -36,13 +37,47 @@ RECEIPT_FIELDS = frozenset(("job_id", "source_commit", "source_tree",
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 ASSET_ROLES = frozenset(("server", "wheel", "library", "receipt", "harness"))
+STORAGE_KEYS = frozenset(("roots", "runtime_storage_roots",
+                          "readonly_sudo_du_root", "stop_bytes", "reserve_bytes",
+                          "poll_seconds", "readonly_sudo_du_timeout_seconds",
+                          "planned_bytes"))
+PLANNED_BYTES = {"fetch": 1_000_000_000, "build": 3_000_000_000,
+                 "runtime": 500_000_000, "accept": 1_000_000_000,
+                 "collect": 500_000_000}
+
+
+def _storage(value):
+    require(type(value) is dict and set(value) == STORAGE_KEYS, "POLICY")
+    roots, runtime = value["roots"], value["runtime_storage_roots"]
+    require(type(roots) is list and roots and type(runtime) is list and
+            len(runtime) == 1 and
+            all(type(path) is str and path.startswith("/") and
+                ".." not in PurePosixPath(path).parts and
+                str(PurePosixPath(path)) == path for path in roots + runtime) and
+            len(set(roots)) == len(roots) and runtime[0] in roots and
+            all(not PurePosixPath(root).is_relative_to(PurePosixPath(runtime[0])) and
+                not PurePosixPath(runtime[0]).is_relative_to(PurePosixPath(root))
+                for root in roots if root != runtime[0]) and
+            value["readonly_sudo_du_root"] == runtime[0] and
+            type(value["stop_bytes"]) is int and
+            value["stop_bytes"] == 40_000_000_000 and
+            type(value["reserve_bytes"]) is int and
+            value["reserve_bytes"] == 1_000_000_000 and
+            type(value["poll_seconds"]) is int and value["poll_seconds"] == 10 and
+            type(value["readonly_sudo_du_timeout_seconds"]) is int and
+            value["readonly_sudo_du_timeout_seconds"] == 60 and
+            type(value["planned_bytes"]) is dict and
+            set(value["planned_bytes"]) == set(PLANNED_BYTES) and
+            all(type(value["planned_bytes"][key]) is int and
+                value["planned_bytes"][key] == expected
+                for key, expected in PLANNED_BYTES.items()), "POLICY")
 REQUIRED_OPERATORS = frozenset({
     "hosted_test_env_qualification_four_case.py",
     "four_case_job.py",
     *(f"four_case_diagnostic/{name}.py" for name in (
         "__init__", "acquire", "acquisition", "adapter", "attestor", "audit",
         "container_pair_entrypoint", "controller", "docs_stage", "evidence_assembly",
-        "entrypoint", "intake", "log_parser", "operation", "oracle",
+        "entrypoint", "intake", "log_parser", "operation", "oracle", "public_attribution", "public_timing",
         "producer", "qualification", "runner", "stage_pair", "supervisor",
         "worker")),
 })
@@ -128,10 +163,8 @@ def validate(lock, proof, receipt, *, job_id, expected_source_commit,
             profile["image_lock_sha256"] == pin["image_lock_sha256"] and
             profile["security"] == {"lsm_kind": "apparmor",
                                     "lsm_profile": "docker-default",
-                                    "seccomp_sha256": pin["seccomp_sha256"]} and
-            profile["storage"] == {"stop_bytes": 40_000_000_000,
-                                   "reserve_bytes": 1_000_000_000,
-                                   "poll_seconds": 10}, "POLICY")
+                                    "seccomp_sha256": pin["seccomp_sha256"]}, "POLICY")
+    _storage(profile["storage"])
     require(proof["acquisition"] == {
                 "schema": "alopex.sql-four-case-acquisition/v2",
                 "qualification_job_id": job_id,

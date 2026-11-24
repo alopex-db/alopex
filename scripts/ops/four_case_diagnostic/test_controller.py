@@ -31,7 +31,8 @@ class ControllerTests(unittest.TestCase):
             "fixture_sha256": "a" * 64,
             "package_files": {f"four_case_diagnostic/{name}.py": "b" * 64 for name in
                               ("__init__", "adapter", "container_pair_entrypoint",
-                               "log_parser", "operation", "oracle", "runner",
+                               "log_parser", "operation", "oracle", "public_attribution",
+                               "public_timing", "runner",
                                "supervisor", "worker")},
             "docs_files": {"subject_identity.py": "c" * 64,
                            "sql_resources.py": "d" * 64},
@@ -183,6 +184,27 @@ class ControllerTests(unittest.TestCase):
         public = json.loads((self.output / "receipt.public.json").read_text())
         self.assertEqual(public["status"], "failed")
         self.assertEqual(public["pair_count"], 0)
+        self.assertEqual(controller.verify_failed_receipt(
+            self.output, run_attempt="1"), public)
+
+    def test_failure_reports_only_completed_pairs(self):
+        digest = self.save()
+        checked = []
+
+        def verify(config, *_):
+            checked.append((config["case"], config["trial"]))
+            return {"status": "passed" if len(checked) < 5 else "failed",
+                    "collection_verified": len(checked) < 5,
+                    "owned_resources_cleaned": len(checked) < 5}
+
+        with patch.object(controller.entrypoint, "attest_current_job",
+                          return_value=(self.proof, self.receipt)), \
+             patch.object(controller.supervisor, "run_collected_pair", side_effect=verify):
+            with self.assertRaisesRegex(ValueError, "PAIR_FAILED"):
+                self.invoke(digest, lambda config, output, *_: self.staged(output))
+        public = json.loads((self.output / "receipt.public.json").read_text())
+        self.assertEqual(public["pair_count"], 4)
+        self.assertEqual(public["error_code"], "PAIR_FAILED")
 
     def test_rejects_reused_run_between_pairs(self):
         digest = self.save()
