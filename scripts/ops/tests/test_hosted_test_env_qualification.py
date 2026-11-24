@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import tempfile
 import unittest
@@ -532,8 +533,24 @@ class Sequence(unittest.TestCase):
         workflow = Path(__file__).resolve().parents[3] / (
             ".github/workflows/alopex-performance.yml")
         source = workflow.read_text()
-        self.assertIn("inventory:\n    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode", source)
-        self.assertIn("qualification:\n    if: ${{ inputs.qualification_mode", source)
+        def inventory_exclusions(text):
+            gate = re.search(r"(?m)^  inventory:\n    if: \$\{\{ ([^\n]+) \}\}$", text)
+            self.assertIsNotNone(gate)
+            return set(re.findall(r"!inputs\.([a-z0-9_]+)", gate.group(1)))
+        required = {"hnsw_release_admission_mode", "qualification_mode",
+                    "sql_four_case_mode", "sql_final_mode", "wal_cost_mode",
+                    "sql_diagnostic_mode", "s04_inspect_mode", "s04_socket_inventory_mode",
+                    "s04_capture_mode", "public_native_build_mode"}
+        self.assertTrue(required <= inventory_exclusions(source))
+        inventory_line = re.search(r"(?m)^  inventory:\n    if: \$\{\{ [^\n]+ \}\}$", source).group(0)
+        self.assertIn(" && !inputs.s04_socket_inventory_mode", inventory_line)
+        without_socket = source.replace(
+            inventory_line,
+            inventory_line.replace(" && !inputs.s04_socket_inventory_mode", "", 1),
+            1,
+        )
+        self.assertFalse(required <= inventory_exclusions(without_socket))
+        self.assertIn("qualification:\n    if: ${{ !inputs.hnsw_release_admission_mode && inputs.qualification_mode", source)
         self.assertIn("inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode", source)
         self.assertIn("inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode)", source)
         self.assertIn("inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode", source)
