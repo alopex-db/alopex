@@ -69,8 +69,8 @@ pub struct PublicSloConfig {
 
 impl From<&SloConfig> for PublicSloConfig {
     fn from(config: &SloConfig) -> Self {
-        assert!(config.min_throughput.map_or(true, f64::is_finite));
-        assert!(config.max_error_ratio.map_or(true, f64::is_finite));
+        assert!(config.min_throughput.is_none_or(f64::is_finite));
+        assert!(config.max_error_ratio.is_none_or(f64::is_finite));
         let ns = |value: Option<std::time::Duration>| value.map(|v| v.as_nanos() as u64);
         Self {
             p99_max_latency_ns: ns(config.p99_max_latency),
