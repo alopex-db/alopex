@@ -75,9 +75,10 @@ jobs:
           STRESS_ARTIFACTS_DIR: ${{ github.workspace }}/target/stress-public-artifacts/stress
           RUST_BACKTRACE: 1
           STRESS_TEST_TIMEOUT: 120
+          STRESS_STORAGE_MODE: both
           STRESS_REPORT_DIR: target/stress-reports
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: python3 scripts/ci/stress_guarded_command.py --case stress --phase test -- cargo test --features test-hooks,lane_ci --test 'stress_*' -- --test-threads=1
+        run: python3 scripts/ci/stress_guarded_command.py --case stress --phase test -- cargo test --locked --features test-hooks,lane_ci,lane_smoke --test 'stress_*' -- --test-threads=1
 
       - name: Assemble stress public evidence
         id: stress_evidence
@@ -177,21 +178,17 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase parser -- bash scripts/build-nim-parser.sh --backend docker
       - name: Install cargo-fuzz
-        run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase fuzz_install -- cargo install cargo-fuzz --locked
+        run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase fuzz_install -- cargo install cargo-fuzz --version 0.13.2 --locked
 
       - name: Run SQL fuzz target
         id: sql_fuzz
         env:
           STRESS_EVIDENCE_MODE: public
-          STRESS_REPORT_DIR: target/stress-reports/fuzz/sql_parser
-          FUZZ_CRASH_DIR: target/stress-artifacts/fuzz/sql_parser
+          STRESS_REPORT_DIR: ${{ github.workspace }}/target/stress-reports/fuzz/sql_parser
           FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.fuzz_seconds || '600' }}
           ASAN_OPTIONS: detect_odr_violation=0:detect_leaks=0
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: |
-          export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
-          python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase test -- \
-            bash -c 'mkdir -p "${GITHUB_WORKSPACE}/${FUZZ_CRASH_DIR}" && cd crates/alopex-sql/fuzz && cargo fuzz run sql_parser -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}" -artifact_prefix="${GITHUB_WORKSPACE}/${FUZZ_CRASH_DIR}/"'
+        run: python3 scripts/ci/stress_guarded_command.py --case sql_parser --phase test -- python3 scripts/ci/stress_locked_fuzz.py --case sql_parser --seconds "${FUZZ_MAX_TOTAL_TIME}"
 
       - name: Assemble SQL fuzz public evidence
         id: sql_fuzz_evidence
@@ -204,15 +201,11 @@ jobs:
         id: dataframe_fuzz
         env:
           STRESS_EVIDENCE_MODE: public
-          STRESS_REPORT_DIR: target/stress-reports/fuzz/dataframe_conversion
-          FUZZ_CRASH_DIR: target/stress-artifacts/fuzz/dataframe_conversion
+          STRESS_REPORT_DIR: ${{ github.workspace }}/target/stress-reports/fuzz/dataframe_conversion
           FUZZ_MAX_TOTAL_TIME: ${{ github.event.inputs.fuzz_seconds || '600' }}
           ASAN_OPTIONS: detect_odr_violation=0:detect_leaks=0
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: |
-          export STRESS_REPORT_DIR="${GITHUB_WORKSPACE}/${STRESS_REPORT_DIR}"
-          python3 scripts/ci/stress_guarded_command.py --case dataframe_conversion --phase test -- \
-            bash -c 'mkdir -p "${GITHUB_WORKSPACE}/${FUZZ_CRASH_DIR}" && cd crates/alopex-dataframe/fuzz && cargo fuzz run dataframe_conversion -- -max_total_time="${FUZZ_MAX_TOTAL_TIME}" -artifact_prefix="${GITHUB_WORKSPACE}/${FUZZ_CRASH_DIR}/"'
+        run: python3 scripts/ci/stress_guarded_command.py --case dataframe_conversion --phase test -- python3 scripts/ci/stress_locked_fuzz.py --case dataframe_conversion --seconds "${FUZZ_MAX_TOTAL_TIME}"
 
       - name: Assemble DataFrame fuzz public evidence
         id: dataframe_fuzz_evidence
@@ -268,7 +261,7 @@ jobs:
           STRESS_REPORT_DIR: ${{ github.workspace }}/target/stress-reports/perf
           STRESS_ARTIFACTS_DIR: ${{ github.workspace }}/target/stress-public-artifacts/perf
           LD_LIBRARY_PATH: ${{ github.workspace }}/${{ env.NIM_SQL_PARSER_DIR }}:${{ env.LD_LIBRARY_PATH }}
-        run: python3 scripts/ci/stress_guarded_command.py --case perf --phase test -- cargo test -p alopex-core --features lane_perf --test stress_perf_baseline -- --test-threads=1
+        run: python3 scripts/ci/stress_guarded_command.py --case perf --phase test -- cargo test --locked -p alopex-core --features lane_perf --test stress_perf_baseline -- --test-threads=1
 
       - name: Assemble perf public evidence
         id: perf_evidence

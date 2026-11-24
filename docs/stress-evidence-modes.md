@@ -20,6 +20,11 @@ pass criteria.
   Metrics and performance comparisons retain finite numeric values and fixed
   identifiers. Fuzz jobs record a bounded execution count and duration;
   sanitizer jobs record duration. Raw stacks and crash inputs are not public.
+- The short stress job runs the existing CI assertions and the smoke harness
+  with both storage modes. A passing public `stress` case requires exactly six
+  successful smoke records: `sync_single`, `sync_multi`, and `async_multi` for
+  each of `memory` and `disk`. Ignored nightly, sanitizer, and performance
+  tests do not count as these records.
 - `STRESS_EVIDENCE_MODE=debug` is explicit local opt-in. It may collect detailed
   diagnostics under an owner-only local root, and CI rejects this mode. The
   Stage 2 uploader accepts only the public output root and checks source,
@@ -27,6 +32,10 @@ pass criteria.
 - The legacy performance reference is an exact successful scheduled artifact
   with pinned run/source/ZIP digest. Public results include baseline identity,
   current values and comparison results; no run silently seeds or changes it.
+- SQL and DataFrame fuzz targets are separate Cargo workspaces. Their tracked
+  lockfiles are checked against the exact source, validated with offline locked
+  metadata before execution, and checked again after execution. A changed or
+  missing lockfile rejects the fuzz case.
 - Case-level `execution.duration_ms` measures the guarded command, including
   the storage supervisor. Per-run `metrics.duration_ms` measures the Rust
   workload. Fuzz `execution.fuzz_executions` is the final libFuzzer `DONE`

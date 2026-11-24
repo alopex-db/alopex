@@ -47,12 +47,35 @@ def fixture(root: Path, case_id: str = "stress") -> tuple[Path, Path]:
     return workspace, run
 
 
+def smoke_fixture(root: Path) -> tuple[Path, dict[str, Path]]:
+    workspace, template = fixture(root)
+    case = template.parents[2]
+    runs = {}
+    for name in sorted(public_case.STRESS_RUNS):
+        run = case / "smoke" / name / template.name
+        shutil.copytree(template, run)
+        metadata = json.loads((run / "run.json").read_bytes())
+        metadata["test_name"] = name
+        metadata["lane"] = "smoke"
+        metadata["execution_model"] = {
+            "sync_single": "SyncSingle", "sync_multi": "SyncMulti",
+            "async_multi": "AsyncMulti",
+        }[name.rsplit("_", 1)[0]]
+        metadata["concurrency"] = {
+            "sync_single": 1, "sync_multi": 4, "async_multi": 2,
+        }[name.rsplit("_", 1)[0]]
+        write(run / "run.json", metadata)
+        runs[name] = run
+    shutil.rmtree(case / "ci")
+    return workspace, runs
+
+
 class PublicCaseTests(unittest.TestCase):
     def test_assembles_numeric_measurement_and_source(self):
         with tempfile.TemporaryDirectory() as directory:
-            workspace, run = fixture(Path(directory))
+            workspace, run = fixture(Path(directory), case_id="asan")
             shutil.copytree(run, run.with_name("20261122T010000Z-0001"))
-            result = public_case.assemble(workspace=workspace, case_id="stress",
+            result = public_case.assemble(workspace=workspace, case_id="asan",
                                           source=SOURCE, outcome="passed")
             self.assertEqual(result["runs"][0]["metrics"]["successes"], 12)
             self.assertEqual([item["run_index"] for item in result["runs"]], [0, 1])
@@ -60,7 +83,8 @@ class PublicCaseTests(unittest.TestCase):
 
     def test_rejects_local_strings_extra_files_nonfinite_and_missing_metrics(self):
         with tempfile.TemporaryDirectory() as directory:
-            workspace, run = fixture(Path(directory))
+            workspace, runs = smoke_fixture(Path(directory))
+            run = runs["sync_single_memory"]
             original = (run / "run.json").read_bytes()
             value = json.loads(original)
             value["host_path"] = "/private/sensitive"
@@ -86,7 +110,8 @@ class PublicCaseTests(unittest.TestCase):
 
     def test_rejects_symlink_and_outcome_mismatch(self):
         with tempfile.TemporaryDirectory() as directory:
-            workspace, run = fixture(Path(directory))
+            workspace, runs = smoke_fixture(Path(directory))
+            run = runs["sync_single_memory"]
             (run / "logs").symlink_to(run)
             with self.assertRaises(ValueError):
                 public_case.assemble(workspace=workspace, case_id="stress",
@@ -95,6 +120,41 @@ class PublicCaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 public_case.assemble(workspace=workspace, case_id="stress",
                                      source=SOURCE, outcome="failed")
+
+    def test_passed_stress_requires_exact_six_smoke_runs(self):
+        for change in ("missing", "skipped", "wrong_name", "wrong_lane", "extra"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                workspace, runs = smoke_fixture(Path(directory))
+                result = public_case.assemble(workspace=workspace, case_id="stress",
+                                              source=SOURCE, outcome="passed")
+                self.assertEqual(len(result["runs"]), 6)
+                run = runs["sync_single_memory"]
+                if change == "missing":
+                    shutil.rmtree(run)
+                elif change == "skipped":
+                    check = json.loads((run / "checks/summary.json").read_bytes())
+                    check.update(skipped=True, success=False, code="skipped")
+                    write(run / "checks/summary.json", check)
+                elif change in {"wrong_name", "wrong_lane"}:
+                    renamed = (run.parents[2] /
+                               ("ci" if change == "wrong_lane" else "smoke") /
+                               ("unexpected_run" if change == "wrong_name"
+                                else "sync_single_memory") / run.name)
+                    renamed.parent.mkdir(parents=True)
+                    run.rename(renamed)
+                    metadata = json.loads((renamed / "run.json").read_bytes())
+                    metadata["test_name"] = renamed.parent.name
+                    metadata["lane"] = renamed.parent.parent.name
+                    write(renamed / "run.json", metadata)
+                else:
+                    extra = run.parents[2] / "smoke" / "unexpected_run" / run.name
+                    shutil.copytree(run, extra)
+                    metadata = json.loads((extra / "run.json").read_bytes())
+                    metadata["test_name"] = "unexpected_run"
+                    write(extra / "run.json", metadata)
+                with self.assertRaises(ValueError):
+                    public_case.assemble(workspace=workspace, case_id="stress",
+                                         source=SOURCE, outcome="passed")
 
     def test_perf_comparison_keeps_numeric_baseline_and_rejects_raw_text(self):
         name = "perf_mixed_point_latency.json"

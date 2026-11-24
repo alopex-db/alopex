@@ -22,6 +22,11 @@ CASES = frozenset({"stress", "asan", "tsan", "lsan", "msan",
                    "sql_parser", "dataframe_conversion", "perf"})
 FUZZ_CASES = frozenset({"sql_parser", "dataframe_conversion"})
 SANITIZER_CASES = frozenset({"asan", "tsan", "lsan", "msan"})
+STRESS_RUNS = frozenset({
+    f"{model}_{mode}"
+    for model in ("sync_single", "sync_multi", "async_multi")
+    for mode in ("memory", "disk")
+})
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,79}\Z")
 STAMP = re.compile(r"([0-9]{8}T[0-9]{6}Z)-([0-9]{4})\Z")
@@ -338,6 +343,13 @@ def assemble(*, workspace: Path, case_id: str, source: str, outcome: str) -> dic
                     value["passed"] for value in item["performance"].values()))
                 for item in runs)):
         raise ValueError("EVIDENCE")
+    if outcome == "passed" and case_id == "stress":
+        if (len(runs) != len(STRESS_RUNS)
+                or {item["run"]["test_name"] for item in runs} != STRESS_RUNS
+                or any(item["run"]["lane"] != "smoke"
+                       or item["check"]["skipped"]
+                       or not item["check"]["success"] for item in runs)):
+            raise ValueError("EVIDENCE")
     if outcome == "passed" and case_id == "perf":
         expected = {"perf_mixed_point_latency",
                     "perf_sequential_throughput_and_amplification"}
