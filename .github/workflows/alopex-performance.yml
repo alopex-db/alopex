@@ -252,6 +252,8 @@ jobs:
           ref: ${{ inputs.expected_controller_sha }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Check evidence recipient validity before socket collection
+        run: python3 -B scripts/ops/check_evidence_certificate.py --minimum-seconds 86400
       - name: Collect selected socket metadata without connection
         id: collect
         env:
@@ -450,6 +452,7 @@ jobs:
         with:
           fetch-depth: 1
       - name: Check evidence recipient validity before work
+        if: ${{ !inputs.sql_four_case_mode && !inputs.sql_final_mode }}
         run: python3 -B scripts/ops/check_evidence_certificate.py --minimum-seconds 86400
       - name: Install independently pinned four-case inputs
         if: inputs.sql_four_case_mode || inputs.sql_final_mode

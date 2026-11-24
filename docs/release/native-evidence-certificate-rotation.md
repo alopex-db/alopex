@@ -33,7 +33,7 @@ evidence.
    reject the certificate. The former Stage-2 CMS finalizer is absent from the
    current source and must not be restored for this rotation.
 2. Review every certificate consumer: `scripts/ops/evidence.py`, both S04
-   sealers, `same_job_four_case.py`, `hosted_test_env_qualification.py`,
+   sealers, `s04_socket_inventory_seal.py`, `same_job_four_case.py`, `hosted_test_env_qualification.py`,
    `hosted_test_env_qualification_1951.py`, `hosted_test_env_inventory.py`,
    `diagnostic_entrypoint.py`, and `wal_cost_next/seal_wrapper.py`. Confirm
    that no workflow embeds a stale certificate digest or private-key location.
@@ -109,6 +109,7 @@ Ubuntu signing keys or trust decisions.
 | --- | --- |
 | `scripts/ops/evidence.py`, `live_wrapper.py` | Exact diagnostic allowlist, size/hash bounds, CMS output and private modes; plaintext archive retained on seal failure |
 | `s04_inspect_seal.py`, `s04_capture_seal.py` | PEM byte pin, private ownership/modes, bounded receipt, fixed public outcome and ciphertext digest; existing cleanup semantics retained |
+| `s04_socket_inventory_seal.py` | The shared S04 pin and pre-collection validity gate protect the encrypted socket inventory; an invalid recipient stops collection before private data is made |
 | `hosted_test_env_inventory.py` | Read-only host receipt encrypted before artifact upload |
 | `hosted_test_env_qualification.py`, `hosted_test_env_qualification_1951.py` | Qualification receipts and candidate identity; capacity, source and cleanup gates |
 | `same_job_four_case.py`, `diagnostic_entrypoint.py` | Same-run/paired measurements and bounded private evidence |

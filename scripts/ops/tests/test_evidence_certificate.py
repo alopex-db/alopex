@@ -71,7 +71,8 @@ class CertificateTests(unittest.TestCase):
 
     def test_workflow_admits_every_lane_and_frozen_recipient(self):
         source = (REPO/'.github/workflows/alopex-performance.yml').read_text()
-        for name, work in (('inventory', 'Collect encrypted read-only host inventory'),
+        for name, work in (('s04_socket_inventory', 'Collect selected socket metadata without connection'),
+                           ('inventory', 'Collect encrypted read-only host inventory'),
                            ('qualification', 'Admit this runner before candidate acquisition'),
                            ('wal_cost_682', 'Qualify, capture signed indexes, measure WAL, and check candidate closure'),
                            ('s04_inspect', 'Inspect selected Docker context read-only')):
@@ -81,6 +82,12 @@ class CertificateTests(unittest.TestCase):
             job = match.group(1)
             self.assertLess(job.index('check_evidence_certificate.py'), job.index(work))
             self.assertIn('--minimum-seconds 86400', job)
+            if name == 's04_socket_inventory':
+                self.assertIn("if: always() && steps.collect.outcome != 'skipped'", job)
+        qualification = source.split('  qualification:\n', 1)[1].split('  wal_cost_682:\n', 1)[0]
+        recipient_step = qualification.split('      - name: Check evidence recipient validity before work\n', 1)[1].split('      - name:', 1)[0]
+        self.assertIn('if: ${{ !inputs.sql_four_case_mode && !inputs.sql_final_mode }}', recipient_step)
+        self.assertIn('run: python3 -B scripts/ops/check_evidence_certificate.py --minimum-seconds 86400', recipient_step)
         self.assertIn('--certificate frozen-wal-controller/.github/ops/native-evidence-cert.pem', source)
         self.assertIn('ref: fd34ca342617c247a9c711bcf597da8bbef3118f', source)
         current_pin = reviewed_pin(OPS/'s04_inspect_seal.py')
