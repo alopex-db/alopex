@@ -17,6 +17,51 @@ MAX_SECONDS = 90
 MAX_MOUNT_BYTES = 4_000_000
 MAX_MOUNTS = 4096
 SCRATCH_NAME = "alopex-nim-parser-v0.8.17-contract-0.28.0-x86_64-unknown-linux-gnu"
+TOOLCHAIN_SYSTEM_PREFIXES = (
+    Path("/usr/share/rust"),
+    Path("/usr/local/bin"),
+    Path("/usr/bin"),
+)
+
+
+def admitted_cargo_bin_symlink(
+    root: Path,
+    path: Path,
+    info: os.stat_result,
+    home: Path,
+    pools: dict[int, int],
+) -> tuple[Path, os.stat_result] | None:
+    """Admit only direct regular-file toolchain symlinks inside ~/.cargo/bin."""
+    cargo_root = home / ".cargo"
+    cargo_bin = cargo_root / "bin"
+    if root != cargo_root or path.parent != cargo_bin:
+        return None
+    if info.st_uid not in (0, os.geteuid()) or info.st_dev not in pools or info.st_blocks < 0:
+        return None
+    try:
+        bin_info = cargo_bin.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(bin_info.st_mode) or stat.S_ISLNK(bin_info.st_mode) or bin_info.st_uid != os.geteuid():
+        return None
+    try:
+        target = path.resolve(strict=True)
+        tinfo = target.lstat()
+    except (OSError, RuntimeError):
+        return None
+    if (not stat.S_ISREG(tinfo.st_mode) or tinfo.st_blocks < 0 or
+            tinfo.st_uid not in (0, os.geteuid()) or (tinfo.st_mode & 0o022)):
+        return None
+    user_prefixes = (cargo_root, home / ".rustup")
+    in_user = any(target != prefix and target.is_relative_to(prefix)
+                  for prefix in user_prefixes)
+    in_system = any(target != prefix and target.is_relative_to(prefix)
+                    for prefix in TOOLCHAIN_SYSTEM_PREFIXES)
+    if in_user and tinfo.st_dev in pools:
+        return target, tinfo
+    if in_system and (tinfo.st_dev in pools or tinfo.st_uid == 0):
+        return target, tinfo
+    return None
 
 
 def require(value):
@@ -252,6 +297,26 @@ def snapshot(manifest: Manifest) -> tuple[int, dict[int, int]]:
             path, depth = pending.pop()
             require(depth <= 64)
             info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                admitted = admitted_cargo_bin_symlink(
+                    root, path, info, manifest.home, pools)
+                require(admitted is not None)
+                link_identity = (info.st_dev, info.st_ino)
+                if link_identity not in seen:
+                    seen.add(link_identity)
+                    entries += 1
+                    total += info.st_blocks * 512
+                    require(total < CEILING_BYTES)
+                _, tinfo = admitted
+                if tinfo.st_dev in pools:
+                    target_identity = (tinfo.st_dev, tinfo.st_ino)
+                    if target_identity not in seen:
+                        require(entries < MAX_ENTRIES)
+                        seen.add(target_identity)
+                        entries += 1
+                        total += tinfo.st_blocks * 512
+                        require(total < CEILING_BYTES)
+                continue
             require(info.st_uid == os.geteuid() and
                     info.st_dev in pools and info.st_blocks >= 0)
             if path in (manifest.scratch, Path(str(manifest.scratch) + ".lock")):
@@ -262,7 +327,6 @@ def snapshot(manifest: Manifest) -> tuple[int, dict[int, int]]:
                 continue
             seen.add(identity)
             entries += 1
-            require(not stat.S_ISLNK(info.st_mode))
             require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
             total += info.st_blocks * 512
             require(total < CEILING_BYTES)

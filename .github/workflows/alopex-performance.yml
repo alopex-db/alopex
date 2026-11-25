@@ -99,7 +99,47 @@ jobs:
         run: |
           python3 - <<'PY'
           import hashlib, json, os, pathlib, platform, re, stat, sys, time
+          check_keys = (
+              'source', 'workspace', 'fs_stats', 'root_links',
+              'root_identity_pre', 'mount_pre',
+              'tree_workspace', 'tree_temp', 'tree_cargo', 'tree_cache',
+              'tree_rustup', 'tree_installs', 'tree_scratch', 'tree_scratch_lock',
+              'bounds', 'root_identity_post', 'mount_post',
+              'budget', 'free_space', 'env_write',
+          )
+          checks = {key: 'skipped_prereq' for key in check_keys}
+          root_link_failures = []
+          tree_findings = {}
+          first_error = None
           code = 'SOURCE'
+          def record_failure(err_code):
+              global first_error
+              if first_error is None:
+                  first_error = err_code
+          def add_finding(label, token):
+              tree_findings.setdefault(label, set()).add(token)
+          def set_tree_status(key, status_code):
+              if checks[key] in ('skipped_prereq', 'passed'):
+                  checks[key] = status_code
+              record_failure(status_code)
+          def emit_failure(fallback_code):
+              if checks['env_write'] == 'skipped_prereq':
+                  checks['env_write'] = 'skipped_failed'
+              payload = {
+                  'case': 'HNSW_HOSTED_PRECHECK',
+                  'outcome': 'failed',
+                  'error_code': first_error or fallback_code,
+                  'checks': checks,
+              }
+              if root_link_failures:
+                  payload['root_link_failures'] = root_link_failures
+              if tree_findings:
+                  payload['tree_findings'] = {
+                      label: sorted(tokens)
+                      for label, tokens in sorted(tree_findings.items())
+                  }
+              print(json.dumps(payload, sort_keys=True))
+              sys.exit(1)
           try:
               e = os.environ
               assert e.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
@@ -111,11 +151,13 @@ jobs:
               assert e.get('GITHUB_REF', '').startswith('refs/heads/')
               assert e.get('RUNNER_ENVIRONMENT') == 'github-hosted'
               assert platform.system() == 'Linux' and platform.machine() == 'x86_64'
+              checks['source'] = 'passed'
               code = 'STORAGE_WORKSPACE'
               workspace = pathlib.Path(e['GITHUB_WORKSPACE'])
               temporary = pathlib.Path(e['RUNNER_TEMP'])
               home = pathlib.Path.home()
               scratch = pathlib.Path('/tmp/alopex-nim-parser-v0.8.17-contract-0.28.0-x86_64-unknown-linux-gnu')
+              scratch_lock = pathlib.Path(str(scratch) + '.lock')
               def root_identity(path, scratch_parent=False):
                   assert (path.is_absolute() and path.is_dir() and
                           not path.is_symlink() and path.resolve(strict=True) == path)
@@ -132,8 +174,9 @@ jobs:
                   root_identity(path)
               root_identity(scratch.parent, scratch_parent=True)
               assert not any(path.exists() or path.is_symlink() for path in
-                             (scratch, pathlib.Path(str(scratch) + '.lock')))
+                             (scratch, scratch_lock))
               assert not any(workspace.iterdir())
+              checks['workspace'] = 'passed'
               code = 'STORAGE_FS_STATS'
               free_by_device = {}
               for path in (workspace.parent, temporary, home, scratch.parent):
@@ -143,16 +186,19 @@ jobs:
                   free = fs.f_bavail * fs.f_frsize
                   free_by_device[device] = min(free_by_device.get(device, free), free)
               local = home / '.local'
-              if local.exists() or local.is_symlink():
-                  assert local.is_dir() and not local.is_symlink() and local.stat().st_uid == os.geteuid()
+              if local.is_symlink():
+                  installs = ()
+              elif local.exists():
+                  assert local.is_dir() and local.stat().st_uid == os.geteuid()
                   installs = tuple(sorted(path for path in local.iterdir()
                                           if path.name.startswith('alopex-')))
               else:
                   installs = ()
+              checks['fs_stats'] = 'passed'
               roots = (workspace.parent, temporary, home / '.cargo', home / '.cache',
-                       home / '.rustup', *installs, scratch, pathlib.Path(str(scratch) + '.lock'))
+                       home / '.rustup', *installs, scratch, scratch_lock)
               optional = {home / '.cargo', home / '.cache', home / '.rustup', scratch,
-                          pathlib.Path(str(scratch) + '.lock')}
+                          scratch_lock}
               code = 'STORAGE_ROOTS'
               def mount_text():
                   with open('/proc/self/mountinfo', encoding='utf-8') as source:
@@ -219,6 +265,8 @@ jobs:
                   for root in roots:
                       if not root.exists() and not root.is_symlink():
                           continue
+                      if root.is_symlink():
+                          continue
                       covering = [point for point in grouped if root == point or
                                   root.is_relative_to(point)]
                       assert covering
@@ -232,7 +280,7 @@ jobs:
                               relevant.update(stack)
                   return tuple(sorted(relevant))
               fixed = (workspace, workspace.parent, temporary, home, scratch.parent)
-              if local.exists():
+              if local.exists() or local.is_symlink():
                   fixed += (local,)
               fixed += tuple(path for path in (home / '.cargo', home / '.cache',
                                                home / '.rustup', *installs)
@@ -249,91 +297,317 @@ jobs:
               }
               for path in fixed:
                   if path.is_symlink():
-                      code = (root_link_codes[path] if path in root_link_codes else
-                              'STORAGE_LINK_ROOT_INSTALL' if path in installs else
-                              'STORAGE_LINK_ROOT_OTHER')
-                      assert False
-              code = 'STORAGE_ROOT_IDENTITY'
-              anchors = tuple((path, root_identity(path, scratch_parent=path == scratch.parent))
-                              for path in dict.fromkeys(fixed))
-              code = 'STORAGE_MOUNT'
-              mounts = mount_topology(anchors, roots, mount_text())
+                      link_code = (root_link_codes[path] if path in root_link_codes else
+                                   'STORAGE_LINK_ROOT_INSTALL' if path in installs else
+                                   'STORAGE_LINK_ROOT_OTHER')
+                      if link_code not in root_link_failures:
+                          root_link_failures.append(link_code)
+                      record_failure(link_code)
+              checks['root_links'] = 'failed' if root_link_failures else 'passed'
+              non_link_fixed = tuple(p for p in dict.fromkeys(fixed) if not p.is_symlink())
+              anchors = ()
+              mounts = ()
               def check_anchors():
                   assert all(root_identity(path, scratch_parent=path == scratch.parent) == identity
                              for path, identity in anchors)
               def check_mounts():
                   assert mount_topology(anchors, roots, mount_text()) == mounts
               code = 'STORAGE_ROOT_IDENTITY'
-              check_anchors()
+              try:
+                  anchors = tuple((path, root_identity(path, scratch_parent=path == scratch.parent))
+                                  for path in non_link_fixed)
+                  check_anchors()
+                  checks['root_identity_pre'] = 'passed'
+              except BaseException:
+                  checks['root_identity_pre'] = 'failed'
+                  record_failure('STORAGE_ROOT_IDENTITY')
               code = 'STORAGE_MOUNT'
-              check_mounts()
+              if checks['root_identity_pre'] == 'passed':
+                  try:
+                      mounts = mount_topology(anchors, roots, mount_text())
+                      check_mounts()
+                      checks['mount_pre'] = 'passed'
+                  except BaseException:
+                      checks['mount_pre'] = 'failed'
+                      record_failure('STORAGE_MOUNT')
+              toolchain_system_prefixes = (
+                  pathlib.Path('/usr/share/rust'),
+                  pathlib.Path('/usr/local/bin'),
+                  pathlib.Path('/usr/bin'),
+              )
+              cargo_root = home / '.cargo'
+              cargo_bin = cargo_root / 'bin'
+              user_toolchain_prefixes = (cargo_root, home / '.rustup')
+              def admitted_cargo_bin_symlink(root, path, info):
+                  if root != cargo_root or path.parent != cargo_bin:
+                      return None
+                  if info.st_uid not in (0, os.geteuid()) or info.st_dev not in free_by_device or info.st_blocks < 0:
+                      return None
+                  try:
+                      bin_info = cargo_bin.lstat()
+                  except OSError:
+                      return None
+                  if (not stat.S_ISDIR(bin_info.st_mode) or stat.S_ISLNK(bin_info.st_mode) or
+                          bin_info.st_uid != os.geteuid()):
+                      return None
+                  try:
+                      target = path.resolve(strict=True)
+                      tinfo = target.lstat()
+                  except (OSError, RuntimeError):
+                      return None
+                  if (not stat.S_ISREG(tinfo.st_mode) or tinfo.st_blocks < 0 or
+                          tinfo.st_uid not in (0, os.geteuid()) or (tinfo.st_mode & 0o022)):
+                      return None
+                  in_user = any(target != prefix and target.is_relative_to(prefix)
+                                for prefix in user_toolchain_prefixes)
+                  in_system = any(target != prefix and target.is_relative_to(prefix)
+                                  for prefix in toolchain_system_prefixes)
+                  if in_user and tinfo.st_dev in free_by_device:
+                      return target, tinfo
+                  if in_system and (tinfo.st_dev in free_by_device or tinfo.st_uid == 0):
+                      return target, tinfo
+                  return None
+              def classify_symlink(root, path, info):
+                  all_prefixes = user_toolchain_prefixes + toolchain_system_prefixes
+                  if root == cargo_root and path == cargo_bin:
+                      try:
+                          target = path.resolve(strict=True)
+                          tinfo = target.lstat()
+                      except (OSError, RuntimeError):
+                          return 'CARGO_BIN_LINK_DANGLING'
+                      if stat.S_ISDIR(tinfo.st_mode):
+                          if any(target == p or target.is_relative_to(p) for p in all_prefixes):
+                              return 'CARGO_BIN_DIR_LINK_TOOLCHAIN_PREFIX'
+                          return 'CARGO_BIN_DIR_LINK_OTHER'
+                  if info.st_uid not in (0, os.geteuid()):
+                      return 'LINK_OWNERSHIP_MISMATCH'
+                  try:
+                      target = path.resolve(strict=True)
+                      tinfo = target.lstat()
+                  except (OSError, RuntimeError):
+                      return 'LINK_DANGLING_OR_LOOP'
+                  if stat.S_ISDIR(tinfo.st_mode):
+                      if any(target == p or target.is_relative_to(p) for p in all_prefixes):
+                          return 'LINK_DIR_TARGET_TOOLCHAIN_PREFIX'
+                      return 'LINK_DIR_TARGET_OTHER'
+                  if stat.S_ISREG(tinfo.st_mode):
+                      if tinfo.st_uid not in (0, os.geteuid()) or (tinfo.st_mode & 0o022):
+                          return 'LINK_TARGET_WRITABLE_OR_FOREIGN'
+                      if target == root or target.is_relative_to(root):
+                          return 'LINK_FILE_TARGET_SAME_ROOT'
+                      if any(target != p and target.is_relative_to(p) for p in all_prefixes):
+                          return 'LINK_FILE_TARGET_TOOLCHAIN_PREFIX'
+                      return 'LINK_FILE_TARGET_OTHER_PREFIX'
+                  return 'LINK_SPECIAL_TARGET'
               code = 'STORAGE_TREE'
               seen = set()
               baseline = entries = 0
               deadline = time.monotonic() + 90
+              checks['bounds'] = 'passed'
               tree_link_codes = {
                   workspace.parent: 'STORAGE_LINK_TREE_WORKSPACE',
                   temporary: 'STORAGE_LINK_TREE_TEMP',
-                  home / '.cargo': 'STORAGE_LINK_TREE_CARGO',
+                  cargo_root: 'STORAGE_LINK_TREE_CARGO',
                   home / '.cache': 'STORAGE_LINK_TREE_CACHE',
                   home / '.rustup': 'STORAGE_LINK_TREE_RUSTUP',
                   scratch: 'STORAGE_LINK_TREE_SCRATCH',
-                  pathlib.Path(str(scratch) + '.lock'): 'STORAGE_LINK_TREE_SCRATCH_LOCK',
+                  scratch_lock: 'STORAGE_LINK_TREE_SCRATCH_LOCK',
               }
-              for root in roots:
-                  if not root.exists() and not root.is_symlink():
-                      assert root in optional
+              root_specs = [
+                  ('tree_workspace', 'workspace', workspace.parent),
+                  ('tree_temp', 'temp', temporary),
+                  ('tree_cargo', 'cargo', cargo_root),
+                  ('tree_cache', 'cache', home / '.cache'),
+                  ('tree_rustup', 'rustup', home / '.rustup'),
+              ]
+              if installs:
+                  for inst in installs:
+                      root_specs.append(('tree_installs', 'installs', inst))
+              else:
+                  checks['tree_installs'] = 'skipped_missing'
+              root_specs.extend([
+                  ('tree_scratch', 'scratch', scratch),
+                  ('tree_scratch_lock', 'scratch_lock', scratch_lock),
+              ])
+              global_bound_exceeded = False
+              for key, label, root in root_specs:
+                  if global_bound_exceeded:
                       continue
+                  link_code = tree_link_codes.get(root, 'STORAGE_LINK_TREE_INSTALL' if root in installs else 'STORAGE_LINK_TREE_OTHER')
+                  if root.is_symlink():
+                      root_code = (tree_link_codes[root] if root in (scratch, scratch_lock) else
+                                   root_link_codes.get(root, 'STORAGE_LINK_ROOT_INSTALL' if root in installs else 'STORAGE_LINK_ROOT_OTHER'))
+                      set_tree_status(key, root_code)
+                      add_finding(label, 'ROOT_SYMLINK')
+                      continue
+                  if not root.exists():
+                      if root in optional:
+                          if checks[key] == 'skipped_prereq':
+                              checks[key] = 'skipped_missing'
+                      else:
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_MISSING_REQUIRED_ROOT')
+                      continue
+                  if checks[key] == 'skipped_prereq':
+                      checks[key] = 'passed'
                   pending = [(root, 0)]
                   while pending:
-                      code = 'STORAGE_BOUNDS'
-                      assert time.monotonic() <= deadline and entries < 200000
+                      if time.monotonic() > deadline:
+                          checks['bounds'] = 'failed'
+                          set_tree_status(key, 'STORAGE_BOUNDS')
+                          add_finding(label, 'TREE_TIME_LIMIT')
+                          global_bound_exceeded = True
+                          break
+                      if entries >= 200000:
+                          checks['bounds'] = 'failed'
+                          set_tree_status(key, 'STORAGE_BOUNDS')
+                          add_finding(label, 'TREE_ENTRY_LIMIT')
+                          global_bound_exceeded = True
+                          break
                       path, depth = pending.pop()
-                      assert depth <= 64
-                      code = 'STORAGE_TREE'
-                      info = path.lstat()
+                      if depth > 64:
+                          checks['bounds'] = 'failed'
+                          set_tree_status(key, 'STORAGE_BOUNDS')
+                          add_finding(label, 'TREE_DEPTH_LIMIT')
+                          continue
+                      try:
+                          info = path.lstat()
+                      except OSError:
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_SCANDIR_ERROR')
+                          continue
                       if stat.S_ISLNK(info.st_mode):
-                          code = (tree_link_codes[root] if root in tree_link_codes else
-                                  'STORAGE_LINK_TREE_INSTALL' if root in installs else
-                                  'STORAGE_LINK_TREE_OTHER')
-                          assert False
-                      assert (info.st_uid == os.geteuid() and
-                              info.st_dev in free_by_device and info.st_blocks >= 0 and
-                              (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)))
-                      if path in (scratch, pathlib.Path(str(scratch) + '.lock')):
-                          assert (stat.S_ISDIR(info.st_mode) and
-                                  stat.S_IMODE(info.st_mode) == 0o700)
+                          admitted = admitted_cargo_bin_symlink(root, path, info)
+                          if admitted is not None:
+                              link_id = (info.st_dev, info.st_ino)
+                              if link_id not in seen:
+                                  seen.add(link_id)
+                                  entries += 1
+                                  baseline += info.st_blocks * 512
+                                  if baseline >= 50_000_000_000:
+                                      checks['bounds'] = 'failed'
+                                      set_tree_status(key, 'STORAGE_BOUNDS')
+                                      add_finding(label, 'TREE_CEILING_LIMIT')
+                                      global_bound_exceeded = True
+                                      break
+                              _, tinfo = admitted
+                              if tinfo.st_dev in free_by_device:
+                                  target_id = (tinfo.st_dev, tinfo.st_ino)
+                                  if target_id not in seen:
+                                      if entries >= 200000:
+                                          checks['bounds'] = 'failed'
+                                          set_tree_status(key, 'STORAGE_BOUNDS')
+                                          add_finding(label, 'TREE_ENTRY_LIMIT')
+                                          global_bound_exceeded = True
+                                          break
+                                      seen.add(target_id)
+                                      entries += 1
+                                      baseline += tinfo.st_blocks * 512
+                                      if baseline >= 50_000_000_000:
+                                          checks['bounds'] = 'failed'
+                                          set_tree_status(key, 'STORAGE_BOUNDS')
+                                          add_finding(label, 'TREE_CEILING_LIMIT')
+                                          global_bound_exceeded = True
+                                          break
+                              continue
+                          set_tree_status(key, link_code)
+                          add_finding(label, classify_symlink(root, path, info))
+                          continue
+                      if info.st_uid != os.geteuid():
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_FOREIGN_UID')
+                          continue
+                      if info.st_dev not in free_by_device:
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_UNKNOWN_DEV')
+                          continue
+                      if info.st_blocks < 0:
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_INVALID_BLOCKS')
+                          continue
+                      if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_SPECIAL_MODE')
+                          continue
+                      if path in (scratch, scratch_lock) and not (
+                              stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700):
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_SCRATCH_MODE')
+                          continue
                       identity = (info.st_dev, info.st_ino)
                       if identity in seen:
                           continue
                       seen.add(identity)
                       entries += 1
                       baseline += info.st_blocks * 512
-                      code = 'STORAGE_BOUNDS'
-                      assert baseline < 50_000_000_000
-                      code = 'STORAGE_TREE'
+                      if baseline >= 50_000_000_000:
+                          checks['bounds'] = 'failed'
+                          set_tree_status(key, 'STORAGE_BOUNDS')
+                          add_finding(label, 'TREE_CEILING_LIMIT')
+                          global_bound_exceeded = True
+                          break
                       if stat.S_ISDIR(info.st_mode):
-                          with os.scandir(path) as children:
-                              pending.extend((pathlib.Path(child.path), depth + 1)
-                                             for child in children)
+                          try:
+                              with os.scandir(path) as children:
+                                  pending.extend((pathlib.Path(child.path), depth + 1)
+                                                 for child in children)
+                          except OSError:
+                              set_tree_status(key, 'STORAGE_TREE')
+                              add_finding(label, 'TREE_SCANDIR_ERROR')
               code = 'STORAGE_ROOT_IDENTITY'
-              check_anchors()
+              if checks['root_identity_pre'] == 'passed':
+                  try:
+                      check_anchors()
+                      checks['root_identity_post'] = 'passed'
+                  except BaseException:
+                      checks['root_identity_post'] = 'failed'
+                      record_failure('STORAGE_ROOT_IDENTITY')
               code = 'STORAGE_MOUNT'
-              check_mounts()
+              if checks['mount_pre'] == 'passed':
+                  try:
+                      check_mounts()
+                      checks['mount_post'] = 'passed'
+                  except BaseException:
+                      checks['mount_post'] = 'failed'
+                      record_failure('STORAGE_MOUNT')
               code = 'STORAGE_BUDGET'
-              assert baseline + 10_000_000_000 < 40_000_000_000
+              if baseline + 10_000_000_000 < 40_000_000_000:
+                  checks['budget'] = 'passed'
+              else:
+                  checks['budget'] = 'failed'
+                  record_failure('STORAGE_BUDGET')
               code = 'STORAGE_FREE'
-              assert all(free > 10_000_000_000 for free in free_by_device.values())
+              if all(free > 10_000_000_000 for free in free_by_device.values()):
+                  checks['free_space'] = 'passed'
+              else:
+                  checks['free_space'] = 'failed'
+                  record_failure('STORAGE_FREE')
+              all_ok = (first_error is None and
+                        all(val in ('passed', 'skipped_missing')
+                            for key, val in checks.items() if key != 'env_write'))
+              if not all_ok:
+                  emit_failure(code)
               code = 'STORAGE_ENV'
               with open(e['GITHUB_ENV'], 'a', encoding='ascii') as output:
                   output.write('HNSW_ADMISSION_BASELINE=' + str(baseline) + '\n')
                   values = (tuple((str(path), identity) for path, identity in anchors), mounts)
                   output.write('HNSW_ADMISSION_ROOT_SEAL=' +
                                hashlib.sha256(repr(values).encode('utf-8')).hexdigest() + '\n')
-              print(json.dumps({'case': 'HNSW_HOSTED_PRECHECK', 'outcome': 'passed'}))
+              checks['env_write'] = 'passed'
+              print(json.dumps({'case': 'HNSW_HOSTED_PRECHECK', 'outcome': 'passed',
+                                'checks': checks}, sort_keys=True))
+          except SystemExit:
+              raise
           except BaseException:
-              print(json.dumps({'case': 'HNSW_HOSTED_PRECHECK', 'outcome': 'failed', 'error_code': code}))
-              sys.exit(1)
+              if code == 'SOURCE':
+                  checks['source'] = 'failed'
+              elif code == 'STORAGE_WORKSPACE':
+                  checks['workspace'] = 'failed'
+              elif code == 'STORAGE_FS_STATS':
+                  checks['fs_stats'] = 'failed'
+              elif code == 'STORAGE_ENV':
+                  checks['env_write'] = 'failed'
+              emit_failure(code)
           PY
       - name: Fetch exact selected source without path output
         timeout-minutes: 2
