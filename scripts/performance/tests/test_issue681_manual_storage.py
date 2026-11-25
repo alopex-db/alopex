@@ -62,6 +62,7 @@ class StorageMonitorModeTests(unittest.TestCase):
                 patch.object(runner.subprocess, "check_output", side_effect=check_output), \
                 patch.object(runner, "INVENTORY_INTERVAL_SECONDS", 0), \
                 redirect_stdout(io.StringIO()):
+            os.environ.pop("CI", None)
             if gate is None:
                 os.environ.pop(runner.EXTERNAL_STORAGE_SUPERVISION_ENV, None)
             result = runner.main()
