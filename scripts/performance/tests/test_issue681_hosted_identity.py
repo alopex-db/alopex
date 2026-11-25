@@ -134,7 +134,8 @@ class HostedIdentityTests(unittest.TestCase):
 
     def test_tamper_expiry_and_bound_claims_fail(self):
         self.signed = self.token()
-        changed = self.signed[:-1] + ("A" if self.signed[-1] != "A" else "B")
+        message, signature = self.signed.rsplit(".", 1)
+        changed = message + "." + ("A" if signature[0] != "A" else "B") + signature[1:]
         with self.assertRaises(ValueError):
             identity.verify_jwt(changed, self.jwks, self.now)
         for key, value in (("exp", self.now - 1), ("run_attempt", "3"),
