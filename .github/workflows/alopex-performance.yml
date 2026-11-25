@@ -235,10 +235,24 @@ jobs:
               if local.exists():
                   fixed += (local,)
               fixed += tuple(path for path in (home / '.cargo', home / '.cache',
-                                               home / '.rustup', *installs) if path.exists())
-              if any(path.is_symlink() for path in fixed):
-                  code = 'STORAGE_LINK'
-                  assert False
+                                               home / '.rustup', *installs)
+                              if path.exists() or path.is_symlink())
+              root_link_codes = {
+                  workspace.parent: 'STORAGE_LINK_ROOT_WORKSPACE',
+                  temporary: 'STORAGE_LINK_ROOT_TEMP',
+                  home: 'STORAGE_LINK_ROOT_HOME',
+                  scratch.parent: 'STORAGE_LINK_ROOT_SCRATCH_PARENT',
+                  local: 'STORAGE_LINK_ROOT_LOCAL',
+                  home / '.cargo': 'STORAGE_LINK_ROOT_CARGO',
+                  home / '.cache': 'STORAGE_LINK_ROOT_CACHE',
+                  home / '.rustup': 'STORAGE_LINK_ROOT_RUSTUP',
+              }
+              for path in fixed:
+                  if path.is_symlink():
+                      code = (root_link_codes[path] if path in root_link_codes else
+                              'STORAGE_LINK_ROOT_INSTALL' if path in installs else
+                              'STORAGE_LINK_ROOT_OTHER')
+                      assert False
               code = 'STORAGE_ROOT_IDENTITY'
               anchors = tuple((path, root_identity(path, scratch_parent=path == scratch.parent))
                               for path in dict.fromkeys(fixed))
@@ -257,6 +271,15 @@ jobs:
               seen = set()
               baseline = entries = 0
               deadline = time.monotonic() + 90
+              tree_link_codes = {
+                  workspace.parent: 'STORAGE_LINK_TREE_WORKSPACE',
+                  temporary: 'STORAGE_LINK_TREE_TEMP',
+                  home / '.cargo': 'STORAGE_LINK_TREE_CARGO',
+                  home / '.cache': 'STORAGE_LINK_TREE_CACHE',
+                  home / '.rustup': 'STORAGE_LINK_TREE_RUSTUP',
+                  scratch: 'STORAGE_LINK_TREE_SCRATCH',
+                  pathlib.Path(str(scratch) + '.lock'): 'STORAGE_LINK_TREE_SCRATCH_LOCK',
+              }
               for root in roots:
                   if not root.exists() and not root.is_symlink():
                       assert root in optional
@@ -270,7 +293,9 @@ jobs:
                       code = 'STORAGE_TREE'
                       info = path.lstat()
                       if stat.S_ISLNK(info.st_mode):
-                          code = 'STORAGE_LINK'
+                          code = (tree_link_codes[root] if root in tree_link_codes else
+                                  'STORAGE_LINK_TREE_INSTALL' if root in installs else
+                                  'STORAGE_LINK_TREE_OTHER')
                           assert False
                       assert (info.st_uid == os.geteuid() and
                               info.st_dev in free_by_device and info.st_blocks >= 0 and

@@ -459,17 +459,48 @@ class HostedStorageTests(unittest.TestCase):
                                     timeout=10)
             self.assertEqual(json.loads(failed.stdout),
                              {"case": "HNSW_HOSTED_PRECHECK", "outcome": "failed",
-                              "error_code": "STORAGE_LINK"})
+                              "error_code": "STORAGE_LINK_TREE_TEMP"})
             self.assertNotIn(str(home), failed.stdout)
             (temp / "leak").unlink()
+            prior_env = output.read_text()
             (home / ".cargo").symlink_to(temp, target_is_directory=True)
             cache_link = subprocess.run([sys.executable, "-B", "-c", source],
                                         env=env, text=True, capture_output=True,
                                         timeout=10)
-            self.assertEqual(json.loads(cache_link.stdout)["error_code"],
-                             "STORAGE_LINK")
+            self.assertEqual(json.loads(cache_link.stdout),
+                             {"case": "HNSW_HOSTED_PRECHECK", "outcome": "failed",
+                              "error_code": "STORAGE_LINK_ROOT_CARGO"})
             self.assertNotIn(str(temp), cache_link.stdout)
+            self.assertEqual(output.read_text(), prior_env)
             (home / ".cargo").unlink()
+            (home / ".cargo").symlink_to(home / "missing", target_is_directory=True)
+            dangling = subprocess.run([sys.executable, "-B", "-c", source],
+                                      env=env, text=True, capture_output=True,
+                                      timeout=10)
+            self.assertEqual(json.loads(dangling.stdout)["error_code"],
+                             "STORAGE_LINK_ROOT_CARGO")
+            self.assertEqual(output.read_text(), prior_env)
+            (home / ".cargo").unlink()
+            (home / ".cargo").mkdir(mode=0o700)
+            (home / ".cargo" / "proxy").symlink_to(temp)
+            nested_link = subprocess.run([sys.executable, "-B", "-c", source],
+                                         env=env, text=True, capture_output=True,
+                                         timeout=10)
+            self.assertEqual(json.loads(nested_link.stdout)["error_code"],
+                             "STORAGE_LINK_TREE_CARGO")
+            self.assertNotIn(str(temp), nested_link.stdout)
+            self.assertEqual(output.read_text(), prior_env)
+            (home / ".cargo" / "proxy").unlink()
+            (home / ".cargo" / "proxy").symlink_to(root / "outside")
+            outside_link = subprocess.run([sys.executable, "-B", "-c", source],
+                                          env=env, text=True, capture_output=True,
+                                          timeout=10)
+            self.assertEqual(json.loads(outside_link.stdout)["error_code"],
+                             "STORAGE_LINK_TREE_CARGO")
+            self.assertNotIn(str(root / "outside"), outside_link.stdout)
+            self.assertEqual(output.read_text(), prior_env)
+            (home / ".cargo" / "proxy").unlink()
+            (home / ".cargo").rmdir()
             changed_source = source.replace(
                 "    code = 'STORAGE_ROOT_IDENTITY'\n"
                 "    check_anchors()\n    code = 'STORAGE_MOUNT'\n"
@@ -504,6 +535,29 @@ class HostedStorageTests(unittest.TestCase):
             self.assertEqual(json.loads(unreadable.stdout)["error_code"],
                              "STORAGE_TREE")
             self.assertNotIn("private path", unreadable.stdout)
+            scratch_race = source.replace(
+                "    seen = set()\n    baseline = entries = 0",
+                "    scratch.symlink_to(temporary)\n"
+                "    seen = set()\n    baseline = entries = 0")
+            late_scratch = subprocess.run([sys.executable, "-B", "-c", scratch_race],
+                                          env=env, text=True, capture_output=True,
+                                          timeout=10)
+            self.assertTrue(late_scratch.stdout, late_scratch.stderr)
+            self.assertEqual(json.loads(late_scratch.stdout)["error_code"],
+                             "STORAGE_LINK_TREE_SCRATCH")
+            self.assertEqual(output.read_text(), prior_env)
+            scratch.unlink()
+            home_race = source.replace(
+                "    for path in fixed:\n",
+                f"    home.rename(pathlib.Path({str(root / 'oldhome')!r}))\n"
+                f"    home.symlink_to(pathlib.Path({str(root / 'oldhome')!r}))\n"
+                "    for path in fixed:\n")
+            late_home = subprocess.run([sys.executable, "-B", "-c", home_race],
+                                       env=env, text=True, capture_output=True,
+                                       timeout=10)
+            self.assertEqual(json.loads(late_home.stdout)["error_code"],
+                             "STORAGE_LINK_ROOT_HOME")
+            self.assertEqual(output.read_text(), prior_env)
 
 
 if __name__ == "__main__":
