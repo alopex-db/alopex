@@ -53,7 +53,7 @@ def _roots(values: object) -> list[str]:
 
 
 def reserve(profile_path: Path, *, source_sha: str, git_head: str,
-            run_id: int, run_attempt: int) -> dict:
+            run_id: int, run_attempt: int, selected_suite: str) -> dict:
     _private_file(profile_path)
     require(profile_path.stat().st_size <= 64 * 1024, "INPUT")
     try:
@@ -68,7 +68,7 @@ def reserve(profile_path: Path, *, source_sha: str, git_head: str,
             profile.get("run_id") == run_id and
             profile.get("run_attempt") == run_attempt, "IDENTITY")
     suite = profile.get("suite")
-    require(suite in ("curated", "full"), "INPUT")
+    require(suite in ("curated", "full") and suite == selected_suite, "INPUT")
     require(profile.get("paired_invocations") == (240 if suite == "curated" else 288), "INPUT")
     stages = profile.get("stages")
     require(isinstance(stages, dict) and tuple(stages) == STAGES, "INPUT")
@@ -126,7 +126,8 @@ def main() -> int:
                                            stderr=subprocess.DEVNULL).strip()
         receipt = reserve(args.profile, source_sha=source_sha, git_head=git_head,
                           run_id=int(os.environ["GITHUB_RUN_ID"]),
-                          run_attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]))
+                          run_attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                          selected_suite=os.environ["PARITY_SUITE"])
         require(args.receipt.parent.is_dir() and not args.receipt.is_symlink(), "INPUT")
         os.umask(0o077)
         with args.receipt.open("x", encoding="utf-8") as stream:

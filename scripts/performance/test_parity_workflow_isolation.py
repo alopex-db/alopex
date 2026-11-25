@@ -31,7 +31,7 @@ class ParityWorkflowIsolationTest(unittest.TestCase):
         self.assertNotIn("services:", selected["hosted-capability"])
         self.assertNotIn("upload-artifact", selected["hosted-capability"])
         self.assertIn("if: ${{ !inputs.hosted_capability }}", selected["performance"])
-        self.assertIn("services:", selected["performance"])
+        self.assertNotIn("services:", selected["performance"])
         self.assertIn("if: ${{ always() && !inputs.hosted_capability }}",
                       selected["retain-run-outcome"])
 
@@ -41,6 +41,23 @@ class ParityWorkflowIsolationTest(unittest.TestCase):
             "group: parity-performance-${{ github.sha }}-${{ inputs.hosted_capability && 'capability' || 'measurement' }}",
             source,
         )
+
+    def test_selected_run_stops_before_any_construction_or_acquisition(self):
+        source = WORKFLOW.read_text(encoding="utf-8")
+        performance = jobs(source)["performance"]
+        self.assertNotIn("services:", performance)
+        checkout = performance.index("- uses: actions/checkout@v4")
+        admission = performance.index("id: admission")
+        reservation = performance.index("parity_storage_reservation.py")
+        hold = performance.index("PARITY_ADMISSION_SECURITY_PEER_UNQUALIFIED")
+        first_acquisition = performance.index("- uses: actions/setup-python@v5")
+        self.assertLess(checkout, admission)
+        self.assertLess(admission, reservation)
+        self.assertLess(reservation, hold)
+        self.assertLess(hold, first_acquisition)
+        self.assertIn("PARITY_ADMISSION_PROFILE_MISSING", performance)
+        self.assertIn("PARITY_SUITE:", performance[admission:first_acquisition])
+        self.assertRegex(performance[hold:first_acquisition], r"exit 1\s*")
 
 
 if __name__ == "__main__":

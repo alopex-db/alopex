@@ -51,21 +51,25 @@ jobs:
     name: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }} parity performance
     runs-on: [self-hosted, Linux, X64, alopex-performance]
     timeout-minutes: 360
-    services:
-      postgres:
-        image: postgres:16.14
-        env:
-          POSTGRES_PASSWORD: alopex
-          POSTGRES_DB: alopex_perf
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d alopex_perf"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      - name: Admit selected parity run before construction
+        id: admission
+        env:
+          PARITY_SUITE: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ALOPEX_PARITY_PROFILE:-}" ]]; then
+            printf '::error::PARITY_ADMISSION_PROFILE_MISSING\n'
+            exit 1
+          fi
+          install -d -m 700 "$RUNNER_TEMP/parity-admission-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          python3 -B scripts/performance/parity_storage_reservation.py \
+            --profile "$ALOPEX_PARITY_PROFILE" \
+            --receipt "$RUNNER_TEMP/parity-admission-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/reservation.json"
+          # Storage reservation alone does not qualify the selected runtime or peer.
+          printf '::error::PARITY_ADMISSION_SECURITY_PEER_UNQUALIFIED\n'
+          exit 1
       - name: Prepare owner-only local diagnostics
         run: |
           if ! install -d -m 700 performance-debug performance-debug/sql performance-debug/hnsw >/dev/null 2>&1; then

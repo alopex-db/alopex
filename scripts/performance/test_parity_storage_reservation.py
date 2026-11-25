@@ -49,7 +49,8 @@ class ParityStorageReservationTest(unittest.TestCase):
 
     def reserve(self):
         return reserve(self.profile_path, source_sha=SHA, git_head=SHA,
-                       run_id=RUN_ID, run_attempt=RUN_ATTEMPT)
+                       run_id=RUN_ID, run_attempt=RUN_ATTEMPT,
+                       selected_suite="full")
 
     def test_exact_source_and_complete_budget_reserve_storage(self):
         self.write_profile()
@@ -63,18 +64,29 @@ class ParityStorageReservationTest(unittest.TestCase):
         self.write_profile()
         with self.assertRaises(Failure) as other_run:
             reserve(self.profile_path, source_sha=SHA, git_head=SHA,
-                    run_id=RUN_ID + 1, run_attempt=RUN_ATTEMPT)
+                    run_id=RUN_ID + 1, run_attempt=RUN_ATTEMPT,
+                    selected_suite="full")
         self.assertEqual(other_run.exception.code, "IDENTITY")
         with self.assertRaises(Failure) as retry:
             reserve(self.profile_path, source_sha=SHA, git_head=SHA,
-                    run_id=RUN_ID, run_attempt=RUN_ATTEMPT + 1)
+                    run_id=RUN_ID, run_attempt=RUN_ATTEMPT + 1,
+                    selected_suite="full")
         self.assertEqual(retry.exception.code, "IDENTITY")
+
+    def test_profile_suite_must_match_selected_workflow_suite(self):
+        self.write_profile()
+        with self.assertRaises(Failure) as mismatch:
+            reserve(self.profile_path, source_sha=SHA, git_head=SHA,
+                    run_id=RUN_ID, run_attempt=RUN_ATTEMPT,
+                    selected_suite="curated")
+        self.assertEqual(mismatch.exception.code, "INPUT")
 
     def test_stale_source_or_missing_workload_stops_before_measurement(self):
         self.write_profile()
         with self.assertRaises(Failure) as stale:
             reserve(self.profile_path, source_sha="b" * 40, git_head="b" * 40,
-                    run_id=RUN_ID, run_attempt=RUN_ATTEMPT)
+                    run_id=RUN_ID, run_attempt=RUN_ATTEMPT,
+                    selected_suite="full")
         self.assertEqual(stale.exception.code, "IDENTITY")
         del self.profile["stages"]["paired"]
         self.write_profile()
