@@ -107,7 +107,7 @@ changes shape instead.
 | **Growing up** | Rewrite the data access layer | Same data model from embedded file to cluster |
 | **Language** | Mixed | Pure Rust, memory-safe, no C toolchain required |
 
-The reason for this design — one data backbone from a local file to a distributed cluster, so knowledge links are not broken by repeated database migrations — is in [Even So, I'm Building Alopex DB](https://asopi.tech/en/blog/20260715_1).
+Read the author's blog post, [Even So, I'm Building Alopex DB](https://asopi.tech/en/blog/20260715_1), on why this design uses one data backbone from a local file to a distributed cluster, so knowledge links are not broken by repeated database migrations.
 
 ## What it does today
 
