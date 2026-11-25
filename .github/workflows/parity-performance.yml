@@ -16,12 +16,21 @@ on:
         required: false
         type: boolean
         default: false
+      selected_inventory:
+        description: 'Read-only selected runner diagnostic for #712; no peer or benchmark'
+        required: false
+        type: boolean
+        default: false
+      expected_inventory_sha:
+        description: 'Exact source SHA for one selected runner inventory'
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: parity-performance-${{ github.sha }}-${{ inputs.hosted_capability && 'capability' || 'measurement' }}
+  group: parity-performance-${{ github.sha }}-${{ inputs.selected_inventory && 'inventory' || inputs.hosted_capability && 'capability' || 'measurement' }}
   cancel-in-progress: true
 
 env:
@@ -34,7 +43,7 @@ env:
 
 jobs:
   hosted-capability:
-    if: ${{ inputs.hosted_capability }}
+    if: ${{ inputs.hosted_capability && !inputs.selected_inventory }}
     name: Inspect hosted parity capabilities
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -46,8 +55,44 @@ jobs:
           PARITY_ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: python3 -B scripts/performance/parity_hosted_capability.py
 
+  selected-inventory:
+    if: ${{ inputs.selected_inventory && !inputs.hosted_capability && inputs.issue_number == '712' && inputs.expected_inventory_sha == github.sha }}
+    name: Inspect selected parity runner read-only
+    runs-on: [self-hosted, Linux, X64, alopex-performance]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_inventory_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Collect bounded owner-only inventory
+        id: collect
+        env:
+          EXPECTED_INVENTORY_SHA: ${{ inputs.expected_inventory_sha }}
+          PARITY_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 -B scripts/performance/parity_selected_inventory.py
+      - name: Seal private inventory and fixed status
+        id: seal
+        if: always()
+        env:
+          COLLECT_OUTCOME: ${{ steps.collect.outcome }}
+        run: python3 -B scripts/performance/parity_selected_inventory_seal.py
+      - name: Upload encrypted inventory and fixed status
+        if: always() && steps.seal.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-selected-runner-inventory
+          path: |
+            parity-selected-inventory-export/private-evidence.cms
+            parity-selected-inventory-export/public.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
   performance:
-    if: ${{ !inputs.hosted_capability }}
+    if: ${{ !inputs.hosted_capability && !inputs.selected_inventory }}
     name: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }} parity performance
     runs-on: [self-hosted, Linux, X64, alopex-performance]
     timeout-minutes: 360
@@ -297,7 +342,7 @@ jobs:
   retain-run-outcome:
     name: retain immutable performance run outcome
     needs: performance
-    if: ${{ always() && !inputs.hosted_capability }}
+    if: ${{ always() && !inputs.hosted_capability && !inputs.selected_inventory }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

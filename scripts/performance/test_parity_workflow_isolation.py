@@ -26,19 +26,19 @@ class ParityWorkflowIsolationTest(unittest.TestCase):
         source = WORKFLOW.read_text(encoding="utf-8")
         selected = jobs(source)
         self.assertIn("hosted_capability:", source)
-        self.assertIn("if: ${{ inputs.hosted_capability }}", selected["hosted-capability"])
+        self.assertIn("if: ${{ inputs.hosted_capability && !inputs.selected_inventory }}", selected["hosted-capability"])
         self.assertIn("runs-on: ubuntu-24.04", selected["hosted-capability"])
         self.assertNotIn("services:", selected["hosted-capability"])
         self.assertNotIn("upload-artifact", selected["hosted-capability"])
-        self.assertIn("if: ${{ !inputs.hosted_capability }}", selected["performance"])
+        self.assertIn("if: ${{ !inputs.hosted_capability && !inputs.selected_inventory }}", selected["performance"])
         self.assertNotIn("services:", selected["performance"])
-        self.assertIn("if: ${{ always() && !inputs.hosted_capability }}",
+        self.assertIn("if: ${{ always() && !inputs.hosted_capability && !inputs.selected_inventory }}",
                       selected["retain-run-outcome"])
 
     def test_capability_and_measurement_have_distinct_concurrency_groups(self):
         source = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn(
-            "group: parity-performance-${{ github.sha }}-${{ inputs.hosted_capability && 'capability' || 'measurement' }}",
+            "group: parity-performance-${{ github.sha }}-${{ inputs.selected_inventory && 'inventory' || inputs.hosted_capability && 'capability' || 'measurement' }}",
             source,
         )
 
