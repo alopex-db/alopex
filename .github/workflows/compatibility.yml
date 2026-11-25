@@ -81,8 +81,9 @@ jobs:
       - name: Admit bounded hosted pilot and record source
         run: python scripts/compatibility/windows_overflow_acceptance.py prepare
       - uses: dtolnay/rust-toolchain@1.96.0
-      - name: Setup exact Nim parser toolchain
-        uses: ./.github/actions/setup-nim-parser-toolchain
+      - name: Prepare exact Nim parser toolchain privately
+        timeout-minutes: 13
+        run: python scripts/compatibility/windows_overflow_acceptance.py toolchain
       - name: Build parser under storage watchdog
         run: python scripts/compatibility/windows_overflow_acceptance.py parser
       - name: Probe representative current-source paths
@@ -151,8 +152,9 @@ jobs:
           ALOPEX_PILOT_ADMISSION_PATH: ${{ runner.temp }}/alopex-pilot-admission.json
         run: python scripts/compatibility/windows_overflow_acceptance.py prepare
       - uses: dtolnay/rust-toolchain@1.96.0
-      - name: Setup exact Nim parser toolchain
-        uses: ./.github/actions/setup-nim-parser-toolchain
+      - name: Prepare exact Nim parser toolchain privately
+        timeout-minutes: 13
+        run: python scripts/compatibility/windows_overflow_acceptance.py toolchain
       - name: Build parser under storage watchdog
         run: python scripts/compatibility/windows_overflow_acceptance.py parser
       - name: Normal extension and 15 ordinary public API cases

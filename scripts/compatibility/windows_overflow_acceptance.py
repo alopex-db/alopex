@@ -28,8 +28,8 @@ REPO = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 STAGES = ("spool_write", "spool_sync", "spool_publish", "before_reference",
           "reference_append_sync", "reference_force_sync")
-PHASES = ("prepare", "parser", "normal", "instrumented", "legacy", "verify", "cleanup")
-PILOT_PHASES = ("prepare", "parser", "pilot", "cleanup")
+PHASES = ("prepare", "toolchain", "parser", "normal", "instrumented", "legacy", "verify", "cleanup")
+PILOT_PHASES = ("prepare", "toolchain", "parser", "pilot", "cleanup")
 PHASE_CODES = {phase: phase.upper() for phase in (*PHASES, "pilot")}
 PUBLIC_SCHEMA = "alopex.windows-overflow-public/v1"
 PILOT_SCHEMA = "alopex.windows-overflow-pilot/v1"
@@ -39,9 +39,11 @@ MAX_PRIVATE_BYTES = 268_435_456
 OLD_WHEEL_NAME = "alopex-0.8.16-cp38-abi3-win_amd64.whl"
 OLD_WHEEL_SHA256 = "194401d71e5c41ab8e976330f6007529961aeeb1773aa9162a321725f079a0be"
 PILOT_MAX_SECONDS = 1_200
+PILOT_JOB_EARLY_STOP_SECONDS = 1_500
+TOOLCHAIN_MAX_SECONDS = 720
 FULL_EARLY_STOP_SECONDS = 6_600
 FULL_CLEANUP_RESERVE_SECONDS = 600
-EXPECTED_STAGE_SECONDS = {"parser": 240, "normal": 960, "instrumented": 1_920,
+EXPECTED_STAGE_SECONDS = {"toolchain": 600, "parser": 240, "normal": 960, "instrumented": 1_920,
                           "legacy": 1_200, "verify": 240}
 
 
@@ -280,7 +282,7 @@ def validate_pytest(path):
 
 def pilot_projected_seconds(timings):
     """Conservative full-workload forecast; unmeasured legacy work keeps its reserve."""
-    required = ("runtime-venv", "pytest-install", "normal-build", "normal-package",
+    required = ("toolchain", "parser", "runtime-venv", "pytest-install", "normal-build", "normal-package",
                 "ordinary-case", "rust-build", "rust-case", "instrumented-build",
                 "instrumented-package", "python-case",
                 "legacy-venv", "legacy-download", "legacy-install", "legacy-import")
@@ -330,7 +332,8 @@ class Acceptance:
         self.env.pop("CARGO_ENCODED_RUSTFLAGS", None)
         self.env["PATH"] = str(self.parser) + os.pathsep + self.env["PATH"]
 
-    def run(self, name, command, *, env=None, additional=500_000_000):
+    def run(self, name, command, *, env=None, additional=500_000_000,
+            read_output=True):
         log = self.output / f"{name}.log"
         plan = json.loads((self.output / "plan.json").read_text())
         self.check_time_budget(plan)
@@ -355,28 +358,41 @@ class Acceptance:
                                        stderr=subprocess.STDOUT)
             while True:
                 try:
-                    timeout = 300
+                    timeout = 15
                     if self.suite == "windows-overflow-pilot" and self.phase == "pilot":
                         timeout = min(timeout, max(0.1, PILOT_MAX_SECONDS -
+                                                   (time.time() - self.phase_started)))
+                    if self.phase == "toolchain":
+                        timeout = min(timeout, max(0.1, TOOLCHAIN_MAX_SECONDS -
                                                    (time.time() - self.phase_started)))
                     returncode = process.wait(timeout=timeout)
                     break
                 except subprocess.TimeoutExpired:
                     try:
+                        if log.stat().st_size > MAX_PRIVATE_BYTES:
+                            raise EvidenceError("EVIDENCE")
                         self.check_time_budget(plan)
                     except EvidenceError:
                         self.stop_process_tree(process)
                         raise
         self.check_time_budget(plan)
-        contents = log.read_text(encoding="utf-8", errors="replace")
+        if log.stat().st_size > MAX_PRIVATE_BYTES:
+            raise EvidenceError("EVIDENCE")
+        contents = log.read_text(encoding="utf-8", errors="replace") if read_output or returncode else ""
         if returncode and ("Alopex host storage" in contents
                                   or "declared additional storage" in contents):
             raise EvidenceError("STORAGE")
         require(returncode == 0, f"{name} failed: {returncode}; see {log.name}")
-        return contents
+        return contents if read_output else None
 
     def check_time_budget(self, plan=None):
         if self.suite == "windows-overflow-pilot":
+            if plan is None:
+                plan = json.loads((self.output / "plan.json").read_text())
+            if time.time() - plan["job_started_unix"] >= PILOT_JOB_EARLY_STOP_SECONDS:
+                raise EvidenceError("TIME_BUDGET")
+            if self.phase == "toolchain" and time.time() - self.phase_started >= TOOLCHAIN_MAX_SECONDS:
+                raise EvidenceError("TIME_BUDGET")
             if self.phase == "pilot" and time.time() - self.phase_started >= PILOT_MAX_SECONDS:
                 raise EvidenceError("TIME_BUDGET")
             return
@@ -443,6 +459,7 @@ class Acceptance:
             "excluded": "load/performance, hardware power loss, release-wheel qualification"})
 
     def build_parser(self):
+        started = time.monotonic()
         bash = native_git_bash(shutil.which("git"))
         self.run("parser-build", [str(bash), "--noprofile", "--norc",
                                  "scripts/build-nim-parser.sh", "--backend", "host"],
@@ -450,6 +467,17 @@ class Acceptance:
         write(self.output / "parser-identity.json", {
             "sha256": digest(self.parser / "alopex_sql_parser.dll"),
             "contract": (self.parser / "CONTRACT_VERSION").read_text().strip()})
+        write(self.output / "parser-timing.json", {"seconds": max(0.001, time.monotonic() - started)})
+
+    def toolchain(self):
+        started = time.monotonic()
+        bash = native_git_bash(shutil.which("git"))
+        (self.work / "nim-bootstrap").mkdir(exist_ok=False)
+        self.run("nim-toolchain", [sys.executable, HERE / "windows_nim_toolchain.py",
+                                   "--work-dir", self.work / "nim-bootstrap",
+                                   "--bash", bash], additional=2_000_000_000,
+                 read_output=False)
+        write(self.output / "toolchain-timing.json", {"seconds": max(0.001, time.monotonic() - started)})
 
     def package(self, name):
         root = self.work / name
@@ -485,7 +513,8 @@ class Acceptance:
         validate_pytest(self.output / "ordinary-python.xml")
 
     def pilot(self):
-        timings = {}
+        timings = {phase: json.loads((self.output / f"{phase}-timing.json").read_text())["seconds"]
+                   for phase in ("toolchain", "parser")}
         started = time.monotonic()
 
         def timed(name, command, *, env=None, additional=500_000_000):
@@ -621,7 +650,7 @@ class Acceptance:
         shutil.rmtree(self.output / "live-wal/store")
 
     def verify(self):
-        for phase in ("prepare", "parser", "normal", "instrumented", "legacy"):
+        for phase in ("prepare", "toolchain", "parser", "normal", "instrumented", "legacy"):
             require(json.loads((self.output / f"phase-{phase}.json").read_text())["status"] == "passed",
                     f"missing successful phase: {phase}")
         source = json.loads((self.output / "source.json").read_text())

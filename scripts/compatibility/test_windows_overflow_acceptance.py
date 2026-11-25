@@ -11,6 +11,7 @@ import contextlib
 import io
 from unittest import mock
 import subprocess
+import time
 import windows_overflow_acceptance as acceptance
 
 from windows_overflow_acceptance import (
@@ -49,7 +50,8 @@ class AcceptanceGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "plan.json").write_text(json.dumps({
-                "initial_allocated_bytes": 0, "estimated_peak_additional_bytes": 500_000_000}))
+                "initial_allocated_bytes": 0, "estimated_peak_additional_bytes": 500_000_000,
+                "job_started_unix": 0}))
             owner = object.__new__(acceptance.Acceptance)
             owner.suite = "windows-overflow-pilot"
             owner.phase = "pilot"
@@ -62,11 +64,40 @@ class AcceptanceGuardTests(unittest.TestCase):
             with (mock.patch.object(acceptance.storage, "check",
                                     return_value={"allocated_bytes": 0}),
                   mock.patch.object(acceptance.subprocess, "Popen", return_value=process),
-                  mock.patch.object(acceptance.time, "time", side_effect=[0, 1200, 1200]),
+                  mock.patch.object(acceptance.time, "time", side_effect=[0, 0, 1200, 1200, 1200]),
                   mock.patch.object(owner, "stop_process_tree") as stop):
                 with self.assertRaises(EvidenceError) as caught:
                     owner.run("stall", ["pilot-command"])
             self.assertEqual(caught.exception.code, "TIME_BUDGET")
+            stop.assert_called_once_with(process)
+
+    def test_toolchain_log_cap_stops_process_before_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "plan.json").write_text(json.dumps({
+                "initial_allocated_bytes": 0, "estimated_peak_additional_bytes": 2_000_000_000,
+                "job_started_unix": time.time()}))
+            owner = object.__new__(acceptance.Acceptance)
+            owner.suite = "windows-overflow-pilot"
+            owner.phase = "toolchain"
+            owner.phase_started = time.time()
+            owner.output = root
+            owner.work = root / "work"
+            owner.env = {"RUSTFLAGS": "-D warnings"}
+            process = mock.Mock()
+            def overflow(timeout=None):
+                with (root / "nim-toolchain.log").open("r+b") as stream:
+                    stream.truncate(acceptance.MAX_PRIVATE_BYTES + 1)
+                raise subprocess.TimeoutExpired("toolchain", 0.1)
+            process.wait.side_effect = overflow
+            with (mock.patch.object(acceptance.storage, "check",
+                                    return_value={"allocated_bytes": 0}),
+                  mock.patch.object(acceptance.subprocess, "Popen", return_value=process),
+                  mock.patch.object(owner, "stop_process_tree") as stop):
+                with self.assertRaises(EvidenceError) as caught:
+                    owner.run("nim-toolchain", ["toolchain-command"],
+                              additional=2_000_000_000, read_output=False)
+            self.assertEqual(caught.exception.code, "EVIDENCE")
             stop.assert_called_once_with(process)
 
     def test_full_projection_stops_at_exact_margin_and_rejects_bad_clock(self):
@@ -76,8 +107,21 @@ class AcceptanceGuardTests(unittest.TestCase):
         with self.assertRaises(EvidenceError):
             projected_full_time(2, 1, "normal", 1)
 
+    def test_pilot_global_stop_reserves_cleanup_and_publication(self):
+        owner = object.__new__(acceptance.Acceptance)
+        owner.suite = "windows-overflow-pilot"
+        owner.phase = "pilot"
+        owner.phase_started = 1_499
+        with mock.patch.object(acceptance.time, "time", return_value=1_499):
+            owner.check_time_budget({"job_started_unix": 0})
+        with mock.patch.object(acceptance.time, "time", return_value=1_500):
+            with self.assertRaises(EvidenceError) as caught:
+                owner.check_time_budget({"job_started_unix": 0})
+        self.assertEqual(caught.exception.code, "TIME_BUDGET")
+        self.assertEqual(30 * 60 - acceptance.PILOT_JOB_EARLY_STOP_SECONDS, 300)
+
     def test_pilot_projection_requires_all_probes_and_preserves_legacy_reserve(self):
-        units = ("runtime-venv", "pytest-install", "normal-build", "normal-package",
+        units = ("toolchain", "parser", "runtime-venv", "pytest-install", "normal-build", "normal-package",
                  "ordinary-case", "rust-build", "rust-case", "instrumented-build",
                  "instrumented-package", "python-case",
                  "legacy-venv", "legacy-download", "legacy-install", "legacy-import")
@@ -134,6 +178,11 @@ class AcceptanceGuardTests(unittest.TestCase):
             "  windows-overflow-public:", 1)[0]
         self.assertLess(pilot_job.index("Start bounded pilot clock"),
                         pilot_job.index("actions/checkout@v4"))
+        self.assertLess(pilot_job.index("windows_overflow_acceptance.py prepare"),
+                        pilot_job.index("windows_overflow_acceptance.py toolchain"))
+        self.assertLess(pilot_job.index("windows_overflow_acceptance.py toolchain"),
+                        pilot_job.index("windows_overflow_acceptance.py parser"))
+        self.assertNotIn("uses: ./.github/actions/setup-nim-parser-toolchain", pilot_job)
         self.assertLess(pilot_job.index("windows_overflow_acceptance.py pilot"),
                         pilot_job.index("windows_overflow_acceptance.py cleanup"))
         self.assertEqual(workflow.count("inputs.acceptance_suite == 'full'"), 3)
@@ -143,6 +192,11 @@ class AcceptanceGuardTests(unittest.TestCase):
                         job.index("actions/checkout@v4"))
         self.assertLess(job.index("windows_pilot_attestation.py"),
                         job.index("windows_overflow_acceptance.py prepare"))
+        self.assertLess(job.index("windows_overflow_acceptance.py prepare"),
+                        job.index("windows_overflow_acceptance.py toolchain"))
+        self.assertLess(job.index("windows_overflow_acceptance.py toolchain"),
+                        job.index("windows_overflow_acceptance.py parser"))
+        self.assertNotIn("uses: ./.github/actions/setup-nim-parser-toolchain", job)
         upload = job.split("      - name: Upload encrypted diagnostics and validated public result", 1)[1]
         self.assertIn("artifacts/windows-overflow-public/public.json", upload)
         self.assertIn("artifacts/windows-overflow-public/private-evidence.cms", upload)
