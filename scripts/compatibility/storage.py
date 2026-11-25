@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import stat
 import subprocess
@@ -20,6 +21,73 @@ import time
 REPO = Path(__file__).resolve().parents[2]
 STOP_BYTES = 40_000_000_000
 WINDOWS = os.name == "nt"
+
+
+class VolumeCoverageError(RuntimeError):
+    """A planned write volume could not be measured."""
+
+
+class PhysicalSpaceError(RuntimeError):
+    """A measured volume lacks the required free bytes."""
+
+
+def physical_volumes(roots):
+    """Measure each distinct volume containing a planned absolute write root.
+
+    A future root is measured at its nearest existing directory. Existing
+    components must not be symlinks or Windows reparse points. Records are
+    private diagnostics; callers must not copy them to public output.
+    """
+    roots = list(roots)
+    if not roots:
+        raise VolumeCoverageError("no planned write roots")
+    volumes = {}
+    for value in roots:
+        root = Path(value)
+        if not root.is_absolute() or ".." in root.parts:
+            raise VolumeCoverageError(f"write root is not absolute: {root}")
+        parent = root
+        while True:
+            try:
+                info = parent.lstat()
+            except FileNotFoundError:
+                if parent == parent.parent:
+                    raise VolumeCoverageError(f"no existing parent: {root}")
+                parent = parent.parent
+                continue
+            if (stat.S_ISLNK(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & 0x400):
+                raise VolumeCoverageError(f"symlink or reparse component: {parent}")
+            if not stat.S_ISDIR(info.st_mode):
+                raise VolumeCoverageError(f"write root parent is not a directory: {parent}")
+            existing = parent
+            # Inspect every existing ancestor, including a drive or POSIX root.
+            ancestor = parent.parent
+            while ancestor != parent:
+                ancestor_info = ancestor.lstat()
+                if (stat.S_ISLNK(ancestor_info.st_mode)
+                        or getattr(ancestor_info, "st_file_attributes", 0) & 0x400
+                        or not stat.S_ISDIR(ancestor_info.st_mode)):
+                    raise VolumeCoverageError(f"unsafe ancestor: {ancestor}")
+                parent, ancestor = ancestor, ancestor.parent
+            break
+        volume_id = info.st_dev
+        if (isinstance(volume_id, bool) or not isinstance(volume_id, int)
+                or volume_id < 0):
+            raise VolumeCoverageError(f"invalid volume identity: {root}")
+        if volume_id not in volumes:
+            usage = shutil.disk_usage(existing)
+            total, free = usage.total, usage.free
+            if (not isinstance(total, int) or isinstance(total, bool) or total <= 0
+                    or not isinstance(free, int) or isinstance(free, bool)
+                    or free < 0 or free > total):
+                raise VolumeCoverageError(f"invalid physical capacity: {root}")
+            volumes[volume_id] = {
+                "volume_id": volume_id, "roots": [],
+                "total_bytes": total, "free_bytes": free,
+            }
+        volumes[volume_id]["roots"].append(str(root))
+    return list(volumes.values())
 
 
 def worktree_paths(repo):
@@ -174,11 +242,27 @@ def inventory(extra=()):
     }
 
 
-def check(log=None, extra=(), limit=STOP_BYTES):
+def check(log=None, extra=(), limit=STOP_BYTES, physical_min_free_bytes=None,
+          volume_roots=()):
     result = inventory(extra)
     if log:
         with Path(log).open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(result) + "\n")
+    if physical_min_free_bytes is not None:
+        try:
+            if physical_min_free_bytes < 0:
+                raise VolumeCoverageError("negative physical free-space requirement")
+            volumes = physical_volumes(volume_roots)
+        except (OSError, ValueError, TypeError, VolumeCoverageError) as exc:
+            if log:
+                with Path(log).open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"physical_error": repr(exc)}) + "\n")
+            raise VolumeCoverageError("VOLUME_COVERAGE") from None
+        if log:
+            with Path(log).open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"physical_volumes": volumes}) + "\n")
+        if any(volume["free_bytes"] < physical_min_free_bytes for volume in volumes):
+            raise PhysicalSpaceError("PHYSICAL_SPACE")
     if result["allocated_bytes"] >= limit:
         raise RuntimeError(
             f"Alopex host storage {result['allocated_bytes']} reached stop {limit}"
@@ -191,10 +275,22 @@ def main():
     parser.add_argument("--log", type=Path, required=True)
     parser.add_argument("--root", action="append", default=[])
     parser.add_argument("--additional-bytes", type=int, default=20_000_000_000)
+    parser.add_argument("--physical-min-free-bytes", type=int)
+    parser.add_argument("--volume-root", action="append", default=[])
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     args.log.parent.mkdir(parents=True, exist_ok=True)
-    initial = check(args.log, args.root)["allocated_bytes"]
+    try:
+        _main_with_args(args)
+    except (VolumeCoverageError, PhysicalSpaceError) as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+
+
+def _main_with_args(args):
+    physical = {"physical_min_free_bytes": args.physical_min_free_bytes,
+                "volume_roots": args.volume_root}
+    initial = check(args.log, args.root, **physical)["allocated_bytes"]
     limit = min(STOP_BYTES, initial + args.additional_bytes)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
@@ -216,8 +312,8 @@ def main():
             try:
                 child.wait(timeout=15)
             except subprocess.TimeoutExpired:
-                check(args.log, args.root, limit)
-        check(args.log, args.root, limit)
+                check(args.log, args.root, limit, **physical)
+        check(args.log, args.root, limit, **physical)
     except BaseException:
         if child.poll() is None:
             if os.name == "nt":
