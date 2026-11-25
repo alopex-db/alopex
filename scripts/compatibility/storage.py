@@ -31,6 +31,10 @@ class PhysicalSpaceError(RuntimeError):
     """A measured volume lacks the required free bytes."""
 
 
+class StopFailureError(RuntimeError):
+    """The owned command tree could not be stopped after a failed sample."""
+
+
 def physical_volumes(roots):
     """Measure each distinct volume containing a planned absolute write root.
 
@@ -282,7 +286,7 @@ def main():
     args.log.parent.mkdir(parents=True, exist_ok=True)
     try:
         _main_with_args(args)
-    except (VolumeCoverageError, PhysicalSpaceError) as exc:
+    except (VolumeCoverageError, PhysicalSpaceError, StopFailureError) as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
 
@@ -316,10 +320,14 @@ def _main_with_args(args):
         check(args.log, args.root, limit, **physical)
     except BaseException:
         if child.poll() is None:
-            if os.name == "nt":
+            if WINDOWS:
                 # Stop the owned Cargo/rustc tree, not just its parent process.
-                subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"], check=True)
-                child.wait(timeout=20)
+                try:
+                    subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"],
+                                   check=True, timeout=30)
+                    child.wait(timeout=20)
+                except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                    raise StopFailureError("STOP_FAILURE") from None
             else:
                 os.killpg(child.pid, signal.SIGTERM)
                 try:

@@ -25,6 +25,90 @@ from windows_overflow_acceptance import (
 
 
 class AcceptanceGuardTests(unittest.TestCase):
+    def test_pilot_and_full_gate_physical_volumes_before_acquisition(self):
+        workflow = (acceptance.REPO / ".github/workflows/compatibility.yml").read_text()
+        pilot = workflow.split("  windows-overflow-pilot:\n", 1)[1].split(
+            "  windows-overflow-public:\n", 1)[0]
+        full = workflow.split("  windows-overflow-public:\n", 1)[1].split(
+            "  historical-parser:\n", 1)[0]
+        for job in (pilot, full):
+            gate = job.index("- name: Admit physical volumes before checkout and tool setup")
+            checkout = job.index("- uses: actions/checkout@v4")
+            python_setup = job.index("- uses: actions/setup-python@v5")
+            prepare = job.index("windows_overflow_acceptance.py prepare")
+            rust_setup = job.index("- uses: dtolnay/rust-toolchain@1.96.0")
+            nim_setup = job.index("windows_overflow_acceptance.py toolchain")
+            self.assertLess(gate, checkout)
+            self.assertLess(checkout, python_setup)
+            self.assertLess(python_setup, prepare)
+            self.assertLess(prepare, rust_setup)
+            self.assertLess(rust_setup, nim_setup)
+            self.assertIn("$free -lt 8000000000", job[gate:checkout])
+            self.assertIn("timeout-minutes: 5", job[rust_setup:nim_setup])
+            self.assertIn("id: checkout", job[checkout:python_setup])
+            self.assertIn("id: python_setup", job[python_setup:prepare])
+            guarded_tail = job[nim_setup:]
+            guard = "if: always() && steps.checkout.outcome == 'success' && steps.python_setup.outcome == 'success'"
+            self.assertEqual(guarded_tail.count(guard), 3)
+
+    def test_physical_admission_records_private_volumes_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            owner = object.__new__(acceptance.Acceptance)
+            owner.output = Path(directory)
+            volumes = [{"volume_id": 1, "roots": ["private-root"],
+                        "total_bytes": 12, "free_bytes": 8}]
+            with mock.patch.object(owner, "volume_roots", return_value=[Path(directory)]), \
+                 mock.patch.object(acceptance.storage, "physical_volumes",
+                                   return_value=volumes):
+                owner.check_physical(8, "admission.private.json")
+                self.assertEqual(json.loads((owner.output / "admission.private.json").read_text())
+                                 ["volumes"], volumes)
+                with self.assertRaises(EvidenceError) as caught:
+                    owner.check_physical(9, "refusal.private.json")
+                self.assertEqual(caught.exception.code, "PHYSICAL_SPACE")
+            with mock.patch.object(owner, "volume_roots", return_value=[Path(directory)]), \
+                 mock.patch.object(acceptance.storage, "physical_volumes",
+                                   side_effect=PermissionError("private-root")):
+                with self.assertRaises(EvidenceError) as caught:
+                    owner.check_physical(8, "missing.private.json")
+                self.assertEqual(caught.exception.code, "VOLUME_COVERAGE")
+
+    def test_command_watchdog_maps_physical_refusal_to_fixed_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "plan.json").write_text(json.dumps({
+                "initial_allocated_bytes": 0, "estimated_peak_additional_bytes": 500_000_000,
+                "job_started_unix": 0}))
+            owner = object.__new__(acceptance.Acceptance)
+            owner.suite = "windows-overflow-pilot"
+            owner.phase = "pilot"
+            owner.phase_started = 0
+            owner.output = root
+            owner.work = root / "work"
+            owner.target = root / "target"
+            owner.env = {"RUSTFLAGS": "-D warnings"}
+            process = mock.Mock()
+            process.wait.return_value = 1
+
+            marker = "PHYSICAL_SPACE"
+
+            def refusal(command, **kwargs):
+                self.assertIn("--physical-min-free-bytes", command)
+                self.assertIn("--volume-root", command)
+                kwargs["stdout"].write(marker + "\n")
+                kwargs["stdout"].flush()
+                return process
+
+            for marker in ("PHYSICAL_SPACE", "STOP_FAILURE"):
+                with mock.patch.object(acceptance.storage, "check",
+                                       return_value={"allocated_bytes": 0}), \
+                     mock.patch.object(acceptance.subprocess, "Popen", side_effect=refusal), \
+                     mock.patch.object(owner, "check_physical"), \
+                     mock.patch.object(owner, "check_time_budget"):
+                    with self.assertRaises(EvidenceError) as caught:
+                        owner.run("physical-stop", ["pilot-command"])
+                self.assertEqual(caught.exception.code, marker)
+
     def test_evidence_certificate_has_exact_cross_platform_checkout_bytes(self):
         attributes = (acceptance.REPO / ".gitattributes").read_text(encoding="utf-8")
         self.assertIn("/.github/ops/native-evidence-cert.pem text eol=lf", attributes.splitlines())
@@ -64,12 +148,14 @@ class AcceptanceGuardTests(unittest.TestCase):
             owner.phase_started = 0
             owner.output = root
             owner.work = root / "work"
+            owner.target = root / "target"
             owner.env = {"RUSTFLAGS": "-D warnings"}
             process = mock.Mock()
             process.wait.side_effect = subprocess.TimeoutExpired("pilot", 0.1)
             with (mock.patch.object(acceptance.storage, "check",
                                     return_value={"allocated_bytes": 0}),
                   mock.patch.object(acceptance.subprocess, "Popen", return_value=process),
+                  mock.patch.object(owner, "check_physical"),
                   mock.patch.object(acceptance.time, "time", side_effect=[0, 0, 1200, 1200, 1200]),
                   mock.patch.object(owner, "stop_process_tree") as stop):
                 with self.assertRaises(EvidenceError) as caught:
@@ -89,6 +175,7 @@ class AcceptanceGuardTests(unittest.TestCase):
             owner.phase_started = time.time()
             owner.output = root
             owner.work = root / "work"
+            owner.target = root / "target"
             owner.env = {"RUSTFLAGS": "-D warnings"}
             process = mock.Mock()
             def overflow(timeout=None):
@@ -99,6 +186,7 @@ class AcceptanceGuardTests(unittest.TestCase):
             with (mock.patch.object(acceptance.storage, "check",
                                     return_value={"allocated_bytes": 0}),
                   mock.patch.object(acceptance.subprocess, "Popen", return_value=process),
+                  mock.patch.object(owner, "check_physical"),
                   mock.patch.object(owner, "stop_process_tree") as stop):
                 with self.assertRaises(EvidenceError) as caught:
                     owner.run("nim-toolchain", ["toolchain-command"],
@@ -228,6 +316,17 @@ class AcceptanceGuardTests(unittest.TestCase):
             self.assertEqual(stderr.getvalue().strip(), "WINDOWS_OVERFLOW_NORMAL")
             private = Path(directory) / "artifacts/windows-overflow-public/phase-normal.private.log"
             self.assertIn("C:\\secret", private.read_text())
+
+    def test_public_result_preserves_distinct_physical_failure_codes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            for code in ("PHYSICAL_SPACE", "VOLUME_COVERAGE"):
+                (output / "phase-prepare.json").write_text(json.dumps({
+                    "phase": "prepare", "status": "failed", "error_code": code}))
+                public = public_result(output, "a" * 40, "windows-overflow-pilot")
+                self.assertEqual(public["error_code"], code)
+                self.assertEqual(set(public), {"schema", "case", "outcome",
+                                               "error_code", "source_sha"})
 
     def test_public_result_allowlists_success_and_fixed_failure_codes(self):
         sha = "a" * 40

@@ -142,6 +142,23 @@ class StorageTest(unittest.TestCase):
             self.assertEqual(call.kwargs["physical_min_free_bytes"], 5)
             self.assertEqual(call.kwargs["volume_roots"], ["planned"])
 
+    def test_failed_windows_tree_stop_has_distinct_fixed_code(self):
+        args = SimpleNamespace(log=Path("private.jsonl"), root=[],
+                               additional_bytes=100, command=["--", "child"],
+                               physical_min_free_bytes=5, volume_root=["planned"])
+        child = SimpleNamespace(pid=123)
+        child.poll = lambda: None
+        child.wait = lambda timeout: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired("child", timeout))
+        with patch.object(storage, "WINDOWS", True), patch.object(
+            storage, "check", side_effect=[{"allocated_bytes": 1},
+                                           storage.PhysicalSpaceError("PHYSICAL_SPACE")]
+        ), patch.object(storage.subprocess, "Popen", return_value=child), patch.object(
+            storage.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "taskkill")
+        ):
+            with self.assertRaisesRegex(storage.StopFailureError, "STOP_FAILURE"):
+                storage._main_with_args(args)
+
     def test_unique_files_nested_roots_and_hard_links(self):
         with tempfile.TemporaryDirectory(prefix="alopex-storage-test-") as name:
             root = Path(name)

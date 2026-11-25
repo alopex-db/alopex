@@ -71,13 +71,35 @@ jobs:
       - name: Start bounded pilot clock
         shell: pwsh
         run: '"ALOPEX_JOB_STARTED_UNIX=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" >> $env:GITHUB_ENV'
+      - name: Admit physical volumes before checkout and tool setup
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          foreach ($path in @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:USERPROFILE, $env:LOCALAPPDATA, $env:RUNNER_TOOL_CACHE)) {
+            try {
+              if (-not [IO.Path]::IsPathRooted($path)) { throw 'root' }
+              $volume = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($path))
+              if (-not $volume.IsReady) { throw 'volume' }
+              $free = $volume.AvailableFreeSpace
+            } catch {
+              [Console]::Error.WriteLine('WINDOWS_OVERFLOW_VOLUME_COVERAGE')
+              exit 1
+            }
+            if ($free -lt 8000000000) {
+              [Console]::Error.WriteLine('WINDOWS_OVERFLOW_PHYSICAL_SPACE')
+              exit 1
+            }
+          }
       - uses: actions/checkout@v4
+        id: checkout
       - uses: actions/setup-python@v5
+        id: python_setup
         with:
           python-version: '3.11'
       - name: Admit bounded hosted pilot and record source
         run: python scripts/compatibility/windows_overflow_acceptance.py prepare
       - uses: dtolnay/rust-toolchain@1.96.0
+        timeout-minutes: 5
       - name: Prepare exact Nim parser toolchain privately
         timeout-minutes: 13
         run: python scripts/compatibility/windows_overflow_acceptance.py toolchain
@@ -87,13 +109,13 @@ jobs:
         timeout-minutes: 22
         run: python scripts/compatibility/windows_overflow_acceptance.py pilot
       - name: Remove owned pilot binaries and fixtures
-        if: always()
+        if: always() && steps.checkout.outcome == 'success' && steps.python_setup.outcome == 'success'
         run: python scripts/compatibility/windows_overflow_acceptance.py cleanup
       - name: Seal pilot diagnostics and publish fixed status
-        if: always()
+        if: always() && steps.checkout.outcome == 'success' && steps.python_setup.outcome == 'success'
         run: python scripts/compatibility/windows_overflow_acceptance.py publish
       - name: Upload exact pilot evidence files
-        if: always()
+        if: always() && steps.checkout.outcome == 'success' && steps.python_setup.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: windows-overflow-pilot-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -123,8 +145,29 @@ jobs:
       - name: Start full-job clock before checkout
         shell: pwsh
         run: '"ALOPEX_JOB_STARTED_UNIX=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" >> $env:GITHUB_ENV'
+      - name: Admit physical volumes before checkout and tool setup
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          foreach ($path in @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:USERPROFILE, $env:LOCALAPPDATA, $env:RUNNER_TOOL_CACHE)) {
+            try {
+              if (-not [IO.Path]::IsPathRooted($path)) { throw 'root' }
+              $volume = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($path))
+              if (-not $volume.IsReady) { throw 'volume' }
+              $free = $volume.AvailableFreeSpace
+            } catch {
+              [Console]::Error.WriteLine('WINDOWS_OVERFLOW_VOLUME_COVERAGE')
+              exit 1
+            }
+            if ($free -lt 8000000000) {
+              [Console]::Error.WriteLine('WINDOWS_OVERFLOW_PHYSICAL_SPACE')
+              exit 1
+            }
+          }
       - uses: actions/checkout@v4
+        id: checkout
       - uses: actions/setup-python@v5
+        id: python_setup
         with:
           python-version: '3.11'
       - name: Verify exact-source pilot artifact before full construction
@@ -144,6 +187,7 @@ jobs:
           ALOPEX_PILOT_ADMISSION_PATH: ${{ runner.temp }}/alopex-pilot-admission.json
         run: python scripts/compatibility/windows_overflow_acceptance.py prepare
       - uses: dtolnay/rust-toolchain@1.96.0
+        timeout-minutes: 5
       - name: Prepare exact Nim parser toolchain privately
         timeout-minutes: 13
         run: python scripts/compatibility/windows_overflow_acceptance.py toolchain
@@ -161,13 +205,13 @@ jobs:
       - name: Reconcile all source-bound acceptance receipts
         run: python scripts/compatibility/windows_overflow_acceptance.py verify
       - name: Remove owned binaries and fixtures, record final storage
-        if: always()
+        if: always() && steps.checkout.outcome == 'success' && steps.python_setup.outcome == 'success'
         run: python scripts/compatibility/windows_overflow_acceptance.py cleanup
       - name: Validate fixed public Windows acceptance result
-        if: always()
+        if: always() && steps.checkout.outcome == 'success' && steps.python_setup.outcome == 'success'
         run: python scripts/compatibility/windows_overflow_acceptance.py publish
       - name: Upload encrypted diagnostics and validated public result
-        if: always()
+        if: always() && steps.checkout.outcome == 'success' && steps.python_setup.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: windows-overflow-public-${{ github.sha }}

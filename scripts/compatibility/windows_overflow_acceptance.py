@@ -43,6 +43,8 @@ PILOT_JOB_EARLY_STOP_SECONDS = 1_500
 TOOLCHAIN_MAX_SECONDS = 720
 FULL_EARLY_STOP_SECONDS = 6_600
 FULL_CLEANUP_RESERVE_SECONDS = 600
+PHYSICAL_START_FREE_BYTES = 8_000_000_000
+PHYSICAL_CLEANUP_RESERVE_BYTES = 2_000_000_000
 EXPECTED_STAGE_SECONDS = {"toolchain": 600, "parser": 240, "normal": 960, "instrumented": 1_920,
                           "legacy": 1_200, "verify": 240}
 
@@ -136,7 +138,7 @@ def public_result(output, source_sha, suite="windows-overflow"):
         if receipt != {"phase": phase, "status": "passed"}:
             code = receipt.get("error_code") if isinstance(receipt, dict) else None
             allowed = {"OLD_WHEEL", "STORAGE", "SOURCE", "CASE", "TIME_BUDGET",
-                       "PILOT", "STOP_FAILURE"}
+                       "PILOT", "STOP_FAILURE", "PHYSICAL_SPACE", "VOLUME_COVERAGE"}
             return dict(result, error_code=code if isinstance(code, str) and code in allowed
                         else PHASE_CODES[phase])
     try:
@@ -332,6 +334,27 @@ class Acceptance:
         self.env.pop("CARGO_ENCODED_RUSTFLAGS", None)
         self.env["PATH"] = str(self.parser) + os.pathsep + self.env["PATH"]
 
+    def volume_roots(self):
+        home = Path.home()
+        roots = [self.output, self.target, self.work, home / ".cargo",
+                 home / ".rustup", home / ".nimble", home / ".cache"]
+        for name in ("RUNNER_TEMP", "GITHUB_WORKSPACE", "RUNNER_TOOL_CACHE",
+                     "LOCALAPPDATA", "CARGO_HOME", "RUSTUP_HOME", "NIMBLE_DIR",
+                     "UV_CACHE_DIR"):
+            if os.environ.get(name):
+                roots.append(Path(os.environ[name]))
+        return roots
+
+    def check_physical(self, minimum, receipt):
+        try:
+            volumes = storage.physical_volumes(self.volume_roots())
+        except (OSError, ValueError, TypeError, storage.VolumeCoverageError):
+            raise EvidenceError("VOLUME_COVERAGE") from None
+        write(self.output / receipt, {"minimum_free_bytes": minimum,
+                                      "volumes": volumes})
+        if any(volume["free_bytes"] < minimum for volume in volumes):
+            raise EvidenceError("PHYSICAL_SPACE")
+
     def run(self, name, command, *, env=None, additional=500_000_000,
             read_output=True):
         log = self.output / f"{name}.log"
@@ -341,11 +364,17 @@ class Acceptance:
         ceiling = plan["initial_allocated_bytes"] + plan["estimated_peak_additional_bytes"]
         additional = min(additional, ceiling - current)
         require(additional > 0, "suite growth allowance exhausted before starting command")
+        self.check_physical(PHYSICAL_CLEANUP_RESERVE_BYTES + additional,
+                            f"{name}-physical-before.private.json")
         # A single watchdog owns the command tree and stops on measurement errors,
         # the declared per-command growth, or the 40 GB host stop threshold.
         wrapper = [sys.executable, str(HERE / "storage.py"), "--log",
                    str(self.output / "storage.jsonl"), "--root", str(self.work),
-                   "--additional-bytes", str(additional), "--", *map(str, command)]
+                   "--additional-bytes", str(additional), "--physical-min-free-bytes",
+                   str(PHYSICAL_CLEANUP_RESERVE_BYTES)]
+        for root in self.volume_roots():
+            wrapper.extend(("--volume-root", str(root)))
+        wrapper.extend(("--", *map(str, command)))
         write(self.output / f"{name}-command.json", {
             "command": list(map(str, command)), "additional_bytes": additional,
             "output": log.name, "cleanup": "workflow always cleanup phase",
@@ -379,6 +408,12 @@ class Acceptance:
         if log.stat().st_size > MAX_PRIVATE_BYTES:
             raise EvidenceError("EVIDENCE")
         contents = log.read_text(encoding="utf-8", errors="replace") if read_output or returncode else ""
+        if returncode and "STOP_FAILURE" in contents:
+            raise EvidenceError("STOP_FAILURE")
+        if returncode and "VOLUME_COVERAGE" in contents:
+            raise EvidenceError("VOLUME_COVERAGE")
+        if returncode and "PHYSICAL_SPACE" in contents:
+            raise EvidenceError("PHYSICAL_SPACE")
         if returncode and ("Alopex host storage" in contents
                                   or "declared additional storage" in contents):
             raise EvidenceError("STORAGE")
@@ -428,6 +463,8 @@ class Acceptance:
         if not 0 <= time.time() - job_started < 600:
             raise EvidenceError("TIME_BUDGET")
         initial = storage.check(self.output / "storage.jsonl", [self.work])
+        self.check_physical(PHYSICAL_START_FREE_BYTES,
+                            "physical-admission.private.json")
         require(initial["allocated_bytes"] + 28_000_000_000 < storage.STOP_BYTES,
                 "28 GB suite growth allowance does not fit below the host stop")
         self.work.mkdir(exist_ok=False)
@@ -474,6 +511,8 @@ class Acceptance:
 
     def toolchain(self):
         started = time.monotonic()
+        self.check_physical(PHYSICAL_START_FREE_BYTES,
+                            "physical-after-rust.private.json")
         bash = native_git_bash(shutil.which("git"))
         (self.work / "nim-bootstrap").mkdir(exist_ok=False)
         self.run("nim-toolchain", [sys.executable, HERE / "windows_nim_toolchain.py",
