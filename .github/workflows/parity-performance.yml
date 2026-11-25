@@ -56,7 +56,7 @@ jobs:
         run: python3 -B scripts/performance/parity_hosted_capability.py
 
   selected-inventory:
-    if: ${{ inputs.selected_inventory && !inputs.hosted_capability && inputs.issue_number == '712' && inputs.expected_inventory_sha == github.sha }}
+    if: ${{ github.event.repository.private == true && inputs.selected_inventory && !inputs.hosted_capability && inputs.issue_number == '712' && inputs.expected_inventory_sha == github.sha }}
     name: Inspect selected parity runner read-only
     runs-on: [self-hosted, Linux, X64, alopex-performance]
     timeout-minutes: 10
@@ -92,7 +92,7 @@ jobs:
           retention-days: 7
 
   performance:
-    if: ${{ !inputs.hosted_capability && !inputs.selected_inventory }}
+    if: ${{ github.event.repository.private == true && !inputs.hosted_capability && !inputs.selected_inventory }}
     name: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }} parity performance
     runs-on: [self-hosted, Linux, X64, alopex-performance]
     timeout-minutes: 360
@@ -342,7 +342,7 @@ jobs:
   retain-run-outcome:
     name: retain immutable performance run outcome
     needs: performance
-    if: ${{ always() && !inputs.hosted_capability && !inputs.selected_inventory }}
+    if: ${{ always() && github.event.repository.private == true && !inputs.hosted_capability && !inputs.selected_inventory }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

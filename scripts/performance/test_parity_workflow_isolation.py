@@ -30,10 +30,20 @@ class ParityWorkflowIsolationTest(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-24.04", selected["hosted-capability"])
         self.assertNotIn("services:", selected["hosted-capability"])
         self.assertNotIn("upload-artifact", selected["hosted-capability"])
-        self.assertIn("if: ${{ !inputs.hosted_capability && !inputs.selected_inventory }}", selected["performance"])
+        self.assertIn("if: ${{ github.event.repository.private == true && !inputs.hosted_capability && !inputs.selected_inventory }}", selected["performance"])
         self.assertNotIn("services:", selected["performance"])
-        self.assertIn("if: ${{ always() && !inputs.hosted_capability && !inputs.selected_inventory }}",
+        self.assertIn("if: ${{ always() && github.event.repository.private == true && !inputs.hosted_capability && !inputs.selected_inventory }}",
                       selected["retain-run-outcome"])
+
+    def test_selected_jobs_have_job_level_private_repository_guard(self):
+        selected = jobs(WORKFLOW.read_text(encoding="utf-8"))
+        for name in ("selected-inventory", "performance"):
+            job = selected[name]
+            first_line = job.strip().splitlines()[0]
+            self.assertIn("github.event.repository.private == true", first_line)
+            self.assertIn("runs-on: [self-hosted, Linux, X64, alopex-performance]", job)
+        self.assertIn("github.event.repository.private == true",
+                      selected["retain-run-outcome"].strip().splitlines()[2])
 
     def test_capability_and_measurement_have_distinct_concurrency_groups(self):
         source = WORKFLOW.read_text(encoding="utf-8")

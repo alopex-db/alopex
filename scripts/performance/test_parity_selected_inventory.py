@@ -32,7 +32,7 @@ class SelectedInventoryTests(unittest.TestCase):
     def test_workflow_is_opt_in_and_does_not_construct(self):
         workflow = (HERE.parents[1] / ".github/workflows/parity-performance.yml").read_text()
         inventory = workflow.split("  selected-inventory:\n", 1)[1].split("  performance:\n", 1)[0]
-        self.assertIn("inputs.selected_inventory && !inputs.hosted_capability", inventory)
+        self.assertIn("if: ${{ github.event.repository.private == true && inputs.selected_inventory && !inputs.hosted_capability", inventory)
         self.assertIn("inputs.issue_number == '712'", inventory)
         self.assertIn("inputs.expected_inventory_sha == github.sha", inventory)
         self.assertIn("timeout-minutes: 10", inventory)
@@ -41,7 +41,7 @@ class SelectedInventoryTests(unittest.TestCase):
         self.assertIn("if: always() && steps.seal.outcome == 'success'", inventory)
         for forbidden in ("services:", "docker run", "podman run", "docker pull", "podman pull", "cargo build"):
             self.assertNotIn(forbidden, inventory)
-        self.assertIn("if: ${{ !inputs.hosted_capability && !inputs.selected_inventory }}", workflow)
+        self.assertIn("if: ${{ github.event.repository.private == true && !inputs.hosted_capability && !inputs.selected_inventory }}", workflow)
 
     def test_missing_profile_fails_closed(self):
         source = "a" * 40
