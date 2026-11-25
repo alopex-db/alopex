@@ -10,6 +10,9 @@ from dataclasses import dataclass
 import math
 
 
+RELEASE_STOP_BYTES = 40_000_000_000
+
+
 @dataclass(frozen=True)
 class Stage:
     name: str
@@ -146,3 +149,29 @@ def evaluate(budget: Budget) -> Decision:
     if not math.isfinite(projected_finish) or projected_finish >= budget.deadline_seconds:
         return _stop("TIME_BUDGET", **detail)
     return Decision(True, "READY", detail)
+
+
+def evaluate_release(budget: Budget, *, physical_free_bytes: int,
+                     physical_reserve_bytes: int) -> Decision:
+    """Recheck a selected host's complete plan before construction or a phase.
+
+    The caller measures complete same-host Alopex allocation and physical free
+    space, supplies a conservative additional peak, and stops the actual work.
+    """
+    if (not isinstance(budget, Budget)
+            or budget.storage_cap_bytes != RELEASE_STOP_BYTES
+            or not _nonnegative_int(physical_free_bytes)
+            or not _positive_int(physical_reserve_bytes)):
+        return _stop("INVALID_PLAN")
+    result = evaluate(budget)
+    if not result.proceed:
+        if result.code in {"INVALID_PLAN", "STORAGE_BUDGET", "TIME_BUDGET"}:
+            return result
+        return _stop("INVALID_PLAN", planner_code=result.code)
+    if (physical_free_bytes <= physical_reserve_bytes
+            + budget.storage_remaining_peak_bytes):
+        return _stop("PHYSICAL_BUDGET",
+                     free_bytes=physical_free_bytes,
+                     reserve_bytes=physical_reserve_bytes,
+                     remaining_peak_bytes=budget.storage_remaining_peak_bytes)
+    return result

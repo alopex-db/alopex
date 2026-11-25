@@ -2,7 +2,8 @@
 
 import unittest
 
-from scripts.ops.throughput_budget import Budget, Stage, evaluate
+from scripts.ops.throughput_budget import (Budget, Stage, evaluate,
+                                           evaluate_release, RELEASE_STOP_BYTES)
 
 
 def plan(**overrides):
@@ -100,6 +101,48 @@ class ThroughputBudgetTests(unittest.TestCase):
         self.assertEqual(evaluate(plan(stages=(huge,))).code, "RATE_MISSING")
         tiny = Stage("overflow", 2, 0, 1, 1e-320)
         self.assertEqual(evaluate(plan(stages=(tiny,))).code, "RATE_MISSING")
+
+    def test_release_host_checks_fixed_stop_and_physical_reserve(self):
+        budget = plan(storage_cap_bytes=RELEASE_STOP_BYTES)
+        self.assertEqual(evaluate_release(budget, physical_free_bytes=152,
+                                          physical_reserve_bytes=100).code,
+                         "READY")
+        self.assertEqual(evaluate_release(budget, physical_free_bytes=150,
+                                          physical_reserve_bytes=100).code,
+                         "PHYSICAL_BUDGET")
+        stop = plan(storage_cap_bytes=RELEASE_STOP_BYTES,
+                    storage_used_bytes=RELEASE_STOP_BYTES - 50)
+        self.assertEqual(evaluate_release(stop, physical_free_bytes=1000,
+                                          physical_reserve_bytes=100).code,
+                         "STORAGE_BUDGET")
+        wrong_cap = plan(storage_cap_bytes=50_000_000_000)
+        self.assertEqual(evaluate_release(wrong_cap, physical_free_bytes=1000,
+                                          physical_reserve_bytes=100).code,
+                         "INVALID_PLAN")
+
+    def test_release_host_rejects_unmeasured_and_slow_plans(self):
+        budget = plan(storage_cap_bytes=RELEASE_STOP_BYTES)
+        for free, reserve in ((None, 100), (True, 100), (1000, 0),
+                              (1000, False)):
+            with self.subTest(free=free, reserve=reserve):
+                self.assertEqual(evaluate_release(
+                    budget, physical_free_bytes=free,
+                    physical_reserve_bytes=reserve).code, "INVALID_PLAN")
+        slow = plan(storage_cap_bytes=RELEASE_STOP_BYTES,
+                    deadline_seconds=280.0)
+        self.assertEqual(evaluate_release(slow, physical_free_bytes=1000,
+                                          physical_reserve_bytes=100).code,
+                         "TIME_BUDGET")
+        missing_rate = plan(storage_cap_bytes=RELEASE_STOP_BYTES,
+                            stages=(Stage("test", 1, 0, 0, 10.0),))
+        self.assertEqual(evaluate_release(missing_rate, physical_free_bytes=1000,
+                                          physical_reserve_bytes=100).code,
+                         "INVALID_PLAN")
+        incomplete = plan(storage_cap_bytes=RELEASE_STOP_BYTES,
+                          stages=(Stage("pair", 2, 1, 2, 10.0, 2),))
+        self.assertEqual(evaluate_release(incomplete, physical_free_bytes=1000,
+                                          physical_reserve_bytes=100).code,
+                         "INVALID_PLAN")
 
 
 if __name__ == "__main__":
