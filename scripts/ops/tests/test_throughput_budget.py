@@ -44,15 +44,26 @@ class ThroughputBudgetTests(unittest.TestCase):
         self.assertEqual(result.code, "INCOMPLETE_GROUP")
         self.assertFalse(result.proceed)
 
-    def test_perf_two_tests_are_one_acceptance_group(self):
-        group = Stage("perf-baseline-pair", 2, 1, 2, 20.0, 2)
+    def test_homogeneous_partial_group_checkpoint(self):
+        group = Stage("paired-batch", 2, 1, 2, 20.0, 2)
         self.assertEqual(evaluate(plan(stages=(group,))).code, "INCOMPLETE_GROUP")
-        checkpoint = Stage("perf-baseline-pair", 2, 1, 2, 20.0, 2, 1)
+        checkpoint = Stage("paired-batch", 2, 1, 2, 20.0, 2, 1)
         self.assertEqual(evaluate(plan(stages=(checkpoint,))).code, "READY")
-        slow = Stage("perf-baseline-pair", 2, 1, 2, 1000.0, 2, 1)
+        slow = Stage("paired-batch", 2, 1, 2, 1000.0, 2, 1)
         self.assertEqual(evaluate(plan(stages=(slow,))).code, "TIME_BUDGET")
-        completed = Stage("perf-baseline-pair", 2, 2, 2, 20.0, 2)
+        completed = Stage("paired-batch", 2, 2, 2, 20.0, 2)
         self.assertTrue(evaluate(plan(stages=(completed,))).proceed)
+
+    def test_distinct_perf_test_rates_do_not_average(self):
+        first = Stage("perf_mixed_point_latency", 1, 1, 1, 10.0)
+        slow_second = Stage("perf_sequential_throughput_and_amplification",
+                            1, 0, 1, 1000.0)
+        self.assertEqual(evaluate(plan(stages=(first, slow_second))).code,
+                         "TIME_BUDGET")
+        fast_second = Stage("perf_sequential_throughput_and_amplification",
+                            1, 0, 1, 10.0)
+        self.assertEqual(evaluate(plan(stages=(first, fast_second))).code,
+                         "READY")
 
     def test_missing_or_zero_rate_fails_closed(self):
         for units, seconds in ((0, 10.0), (2, 0.0), (2, float("nan"))):
