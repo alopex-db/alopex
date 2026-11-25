@@ -102,12 +102,19 @@ jobs:
           private_log="$(mktemp)"
           trap 'rm -f "${private_log}"' EXIT
           if python3 -B -m unittest discover -s scripts/performance/tests \
+              -p 'test_hnsw_ci_failure_code.py' >"${private_log}" 2>&1 && \
+             python3 -B -m unittest discover -s scripts/performance/tests \
               -p 'test_issue681_*.py' >"${private_log}" 2>&1 && \
              python3 -B -m unittest discover -s scripts/performance/tests \
               -p 'test_phase_rss.py' >>"${private_log}" 2>&1; then
             echo '{"case":"HNSW_CI_CONTRACT","outcome":"passed"}'
           else
-            echo '{"case":"HNSW_CI_CONTRACT","outcome":"failed","error_code":"TEST"}'
+            diagnostic="$(python3 -B scripts/performance/hnsw_ci_failure_code.py "${private_log}" 2>/dev/null)" || diagnostic=""
+            if [[ "${diagnostic}" =~ ^TEST_[A-Z0-9_]{1,80}$ ]]; then
+              printf '{"case":"HNSW_CI_CONTRACT","outcome":"failed","error_code":"%s"}\n' "${diagnostic}"
+            else
+              echo '{"case":"HNSW_CI_CONTRACT","outcome":"failed","error_code":"TEST_UNCLASSIFIED"}'
+            fi
             exit 1
           fi
 
