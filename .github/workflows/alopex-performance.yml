@@ -236,14 +236,24 @@ jobs:
                   fixed += (local,)
               fixed += tuple(path for path in (home / '.cargo', home / '.cache',
                                                home / '.rustup', *installs) if path.exists())
+              if any(path.is_symlink() for path in fixed):
+                  code = 'STORAGE_LINK'
+                  assert False
+              code = 'STORAGE_ROOT_IDENTITY'
               anchors = tuple((path, root_identity(path, scratch_parent=path == scratch.parent))
                               for path in dict.fromkeys(fixed))
+              code = 'STORAGE_MOUNT'
               mounts = mount_topology(anchors, roots, mount_text())
               def check_anchors():
                   assert all(root_identity(path, scratch_parent=path == scratch.parent) == identity
                              for path, identity in anchors)
+              def check_mounts():
                   assert mount_topology(anchors, roots, mount_text()) == mounts
+              code = 'STORAGE_ROOT_IDENTITY'
               check_anchors()
+              code = 'STORAGE_MOUNT'
+              check_mounts()
+              code = 'STORAGE_TREE'
               seen = set()
               baseline = entries = 0
               deadline = time.monotonic() + 90
@@ -253,13 +263,17 @@ jobs:
                       continue
                   pending = [(root, 0)]
                   while pending:
+                      code = 'STORAGE_BOUNDS'
                       assert time.monotonic() <= deadline and entries < 200000
                       path, depth = pending.pop()
                       assert depth <= 64
+                      code = 'STORAGE_TREE'
                       info = path.lstat()
+                      if stat.S_ISLNK(info.st_mode):
+                          code = 'STORAGE_LINK'
+                          assert False
                       assert (info.st_uid == os.geteuid() and
                               info.st_dev in free_by_device and info.st_blocks >= 0 and
-                              not stat.S_ISLNK(info.st_mode) and
                               (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)))
                       if path in (scratch, pathlib.Path(str(scratch) + '.lock')):
                           assert (stat.S_ISDIR(info.st_mode) and
@@ -270,12 +284,17 @@ jobs:
                       seen.add(identity)
                       entries += 1
                       baseline += info.st_blocks * 512
+                      code = 'STORAGE_BOUNDS'
                       assert baseline < 50_000_000_000
+                      code = 'STORAGE_TREE'
                       if stat.S_ISDIR(info.st_mode):
                           with os.scandir(path) as children:
                               pending.extend((pathlib.Path(child.path), depth + 1)
                                              for child in children)
+              code = 'STORAGE_ROOT_IDENTITY'
               check_anchors()
+              code = 'STORAGE_MOUNT'
+              check_mounts()
               code = 'STORAGE_BUDGET'
               assert baseline + 10_000_000_000 < 40_000_000_000
               code = 'STORAGE_FREE'

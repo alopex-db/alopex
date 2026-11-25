@@ -334,7 +334,7 @@ class HostedStorageTests(unittest.TestCase):
                                               text=True, capture_output=True, timeout=10)
             self.assertEqual(json.loads(ambiguous_inline.stdout),
                              {"case": "HNSW_HOSTED_PRECHECK", "outcome": "failed",
-                              "error_code": "STORAGE_ROOTS"})
+                              "error_code": "STORAGE_MOUNT"})
             unrelated_map = (self.mount_text +
                              f"7 1 {prefix} / /unrelated\\134name rw - ext4 synthetic rw\n"
                              f"8 7 {prefix} /next /unrelated\\134name rw - ext4 synthetic rw\n")
@@ -376,7 +376,7 @@ class HostedStorageTests(unittest.TestCase):
                                            timeout=10)
             self.assertEqual(json.loads(nested_inline.stdout),
                              {"case": "HNSW_HOSTED_PRECHECK", "outcome": "failed",
-                              "error_code": "STORAGE_ROOTS"})
+                              "error_code": "STORAGE_MOUNT"})
             self.assertNotIn(str(checkout), nested_inline.stdout)
             drift_source = source.replace(
                 mount_stub,
@@ -388,7 +388,7 @@ class HostedStorageTests(unittest.TestCase):
                                           timeout=10)
             self.assertEqual(json.loads(drift_inline.stdout),
                              {"case": "HNSW_HOSTED_PRECHECK", "outcome": "failed",
-                              "error_code": "STORAGE_ROOTS"})
+                              "error_code": "STORAGE_MOUNT"})
             sticky_source = source.replace(
                 "    def root_identity(path, scratch_parent=False):",
                 "    original_lstat = pathlib.Path.lstat\n"
@@ -459,20 +459,51 @@ class HostedStorageTests(unittest.TestCase):
                                     timeout=10)
             self.assertEqual(json.loads(failed.stdout),
                              {"case": "HNSW_HOSTED_PRECHECK", "outcome": "failed",
-                              "error_code": "STORAGE_ROOTS"})
+                              "error_code": "STORAGE_LINK"})
             self.assertNotIn(str(home), failed.stdout)
             (temp / "leak").unlink()
+            (home / ".cargo").symlink_to(temp, target_is_directory=True)
+            cache_link = subprocess.run([sys.executable, "-B", "-c", source],
+                                        env=env, text=True, capture_output=True,
+                                        timeout=10)
+            self.assertEqual(json.loads(cache_link.stdout)["error_code"],
+                             "STORAGE_LINK")
+            self.assertNotIn(str(temp), cache_link.stdout)
+            (home / ".cargo").unlink()
             changed_source = source.replace(
-                "    check_anchors()\n    code = 'STORAGE_BUDGET'",
+                "    code = 'STORAGE_ROOT_IDENTITY'\n"
+                "    check_anchors()\n    code = 'STORAGE_MOUNT'\n"
+                "    check_mounts()\n    code = 'STORAGE_BUDGET'",
                 "    temporary.chmod(0o755)\n"
-                "    check_anchors()\n    code = 'STORAGE_BUDGET'")
+                "    code = 'STORAGE_ROOT_IDENTITY'\n"
+                "    check_anchors()\n    code = 'STORAGE_MOUNT'\n"
+                "    check_mounts()\n    code = 'STORAGE_BUDGET'")
             drift = subprocess.run([sys.executable, "-B", "-c", changed_source],
                                    env=env, text=True, capture_output=True,
                                    timeout=10)
             self.assertEqual(json.loads(drift.stdout),
                              {"case": "HNSW_HOSTED_PRECHECK", "outcome": "failed",
-                              "error_code": "STORAGE_ROOTS"})
+                              "error_code": "STORAGE_ROOT_IDENTITY"})
             self.assertNotIn(str(temp), drift.stdout)
+            bounded_source = source.replace("    deadline = time.monotonic() + 90",
+                                            "    deadline = 0")
+            bounded = subprocess.run([sys.executable, "-B", "-c", bounded_source],
+                                     env=env, text=True, capture_output=True,
+                                     timeout=10)
+            self.assertEqual(json.loads(bounded.stdout)["error_code"],
+                             "STORAGE_BOUNDS")
+            tree_source = source.replace(
+                "    seen = set()\n    baseline = entries = 0",
+                "    def unreadable(_path):\n"
+                "        raise PermissionError('private path')\n"
+                "    os.scandir = unreadable\n"
+                "    seen = set()\n    baseline = entries = 0")
+            unreadable = subprocess.run([sys.executable, "-B", "-c", tree_source],
+                                        env=env, text=True, capture_output=True,
+                                        timeout=10)
+            self.assertEqual(json.loads(unreadable.stdout)["error_code"],
+                             "STORAGE_TREE")
+            self.assertNotIn("private path", unreadable.stdout)
 
 
 if __name__ == "__main__":
