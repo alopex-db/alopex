@@ -25,6 +25,12 @@ from windows_overflow_acceptance import (
 
 
 class AcceptanceGuardTests(unittest.TestCase):
+    def test_evidence_certificate_has_exact_cross_platform_checkout_bytes(self):
+        attributes = (acceptance.REPO / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn("/.github/ops/native-evidence-cert.pem text eol=lf", attributes.splitlines())
+        self.assertEqual(acceptance.digest(acceptance.EVIDENCE_CERT),
+                         acceptance.EVIDENCE_CERT_SHA256)
+
     def test_full_prepare_rejects_missing_or_stale_pilot_admission(self):
         source = {"sha": "a" * 40, "tree": "b" * 40,
                   "workflow_sha256": "c" * 64, "driver_sha256": "d" * 64}
@@ -183,6 +189,8 @@ class AcceptanceGuardTests(unittest.TestCase):
         self.assertLess(pilot_job.index("windows_overflow_acceptance.py toolchain"),
                         pilot_job.index("windows_overflow_acceptance.py parser"))
         self.assertNotIn("uses: ./.github/actions/setup-nim-parser-toolchain", pilot_job)
+        self.assertNotIn("-m unittest", pilot_job)
+        self.assertNotIn("CARGO_TARGET_DIR:", pilot_job)
         self.assertLess(pilot_job.index("windows_overflow_acceptance.py pilot"),
                         pilot_job.index("windows_overflow_acceptance.py cleanup"))
         self.assertEqual(workflow.count("inputs.acceptance_suite == 'full'"), 3)
@@ -197,6 +205,8 @@ class AcceptanceGuardTests(unittest.TestCase):
         self.assertLess(job.index("windows_overflow_acceptance.py toolchain"),
                         job.index("windows_overflow_acceptance.py parser"))
         self.assertNotIn("uses: ./.github/actions/setup-nim-parser-toolchain", job)
+        self.assertNotIn("-m unittest", job)
+        self.assertNotIn("CARGO_TARGET_DIR:", job)
         upload = job.split("      - name: Upload encrypted diagnostics and validated public result", 1)[1]
         self.assertIn("artifacts/windows-overflow-public/public.json", upload)
         self.assertIn("artifacts/windows-overflow-public/private-evidence.cms", upload)

@@ -457,6 +457,9 @@ class Acceptance:
             "stop_bytes": storage.STOP_BYTES, "cleanup": "always, after compact receipts",
             "scope": "24 Rust + 24 Python boundaries, 15 ordinary cases, old container/live WAL",
             "excluded": "load/performance, hardware power loss, release-wheel qualification"})
+        self.run("contract-tests", [sys.executable, "-m", "unittest", "discover",
+                                    "-s", "scripts/compatibility", "-p", "test_windows_*.py",
+                                    "-q"], additional=100_000_000, read_output=False)
 
     def build_parser(self):
         started = time.monotonic()
