@@ -145,6 +145,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--child", nargs=4, metavar=("PATH", "SURFACE", "MODE", "STAGE"))
+    parser.add_argument("--pilot-case", action="store_true",
+                        help="run only kv-error-spool_write for bounded timing calibration")
     args = parser.parse_args()
     if sys.flags.optimize:
         parser.error("assertions must be enabled; do not use Python -O")
@@ -157,15 +159,19 @@ def main():
     if args.output is None:
         parser.error("--output is required")
     args.output.mkdir(parents=True, exist_ok=False)
+    selected = (("kv", "error", 1),) if args.pilot_case else (
+        (surface, mode, stage) for surface in ("kv", "sql")
+        for stage in STAGES for mode in ("error", "exit"))
     results = [case(args.output, surface, mode, stage)
-               for surface in ("kv", "sql") for stage in STAGES for mode in ("error", "exit")]
+               for surface, mode, stage in selected]
     passed = all(r["status"] == "passed" for r in results)
     report = {
         "status": "passed" if passed else "failed", "cases": results,
         "native_sha256": hashlib.sha256(Path(_alopex.__file__).read_bytes()).hexdigest(),
         "driver_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "python": sys.version,
-        "scope": "instrumented process exit/error boundaries, not power-loss or release-wheel qualification",
+        "scope": ("one-case timing pilot" if args.pilot_case else
+                  "instrumented process exit/error boundaries, not power-loss or release-wheel qualification"),
     }
     (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     sys.exit(0 if passed else 1)
