@@ -313,7 +313,7 @@ class HostedIdentityTests(unittest.TestCase):
                               token="tok")
         self.assertEqual(
             [accept for _, accept in seen_headers],
-            ["application/json; api-version=2.0",
+            ["application/json",
              "application/json",
              "application/vnd.github+json"],
         )

@@ -139,17 +139,33 @@ class RustPreflightTest(unittest.TestCase):
                 self.assertNotIn("RUSTUP_TOOLCHAIN", env)
                 if argv[0].endswith("rustup"):
                     out = b"rustup 1.28.2 (e4f3ad6f8 2025-04-28)\n"
+                    err = (b"info: This is the version for the rustup toolchain manager, "
+                           b"not the rustc compiler.\n"
+                           b"info: the currently active `rustc` version is `rustc 1.92.0`\n")
                 elif argv[0].endswith("rustc"):
                     out = (b"rustc 1.92.0\nbinary: rustc\nrelease: 1.92.0\n"
                            b"host: x86_64-unknown-linux-gnu\n")
+                    err = b""
                 else:
                     out = b"cargo 1.92.0 (123456789 2026-01-15)\n"
-                return subprocess.CompletedProcess(argv, 0, out, b"")
+                    err = b""
+                return subprocess.CompletedProcess(argv, 0, out, err)
 
             with mock.patch.object(rust.Path, "home", return_value=home), \
                  mock.patch.object(rust.shutil, "which", side_effect=which), \
                  mock.patch.object(rust.subprocess, "run", side_effect=command):
                 rust.check_admission()
+            # Non-info stderr on rustup -V must still fail.
+            with mock.patch.object(rust.Path, "home", return_value=home), \
+                 mock.patch.object(rust.shutil, "which", side_effect=which), \
+                 mock.patch.object(
+                     rust.subprocess, "run",
+                     return_value=subprocess.CompletedProcess(
+                         ["rustup", "-V"], 0,
+                         b"rustup 1.28.2 (e4f3ad6f8 2025-04-28)\n",
+                         b"error: unexpected warning\n")):
+                with self.assertRaises(ValueError):
+                    rust.check_admission()
             with mock.patch.object(rust.Path, "home", return_value=home), \
                  mock.patch.object(rust.shutil, "which",
                                    side_effect=lambda n, path: None if n == "rustup" else str(binary / n)), \

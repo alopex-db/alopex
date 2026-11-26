@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -153,13 +154,11 @@ def _request(url, *, token=None, limit=65536, accept=None):
     if accept is None:
         if parsed.hostname == "api.github.com":
             accept = "application/vnd.github+json"
-        elif parsed.hostname == "token.actions.githubusercontent.com":
-            accept = "application/json"
         else:
-            accept = "application/json; api-version=2.0"
+            accept = "application/json"
     headers = {"Accept": accept, "User-Agent": "alopex-681-admission"}
     if token is not None:
-        require(type(token) is str and 0 < len(token) <= 4096)
+        require(type(token) is str and 0 < len(token) <= 16384)
         headers["Authorization"] = "Bearer " + token
     opener = urllib.request.build_opener(_NoRedirect)
     with opener.open(urllib.request.Request(url, headers=headers), timeout=10) as response:
@@ -227,9 +226,22 @@ def _identity(env, fetch=_request, now=None, *, failed_subchecks=None,
                 parsed.password is None)
         sub = "identity_oidc_fetch"
         separator = "&" if parsed.query else "?"
-        token_response = fetch(request_url + separator + "audience=" +
-                               urllib.parse.quote(AUDIENCE, safe=""),
-                               token=env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"], limit=20000)
+        try:
+            token_response = fetch(request_url + separator + "audience=" +
+                                   urllib.parse.quote(AUDIENCE, safe=""),
+                                   token=env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"], limit=20000)
+        except urllib.error.HTTPError as exc:
+            status = getattr(exc, "code", 0)
+            if status in (400, 401, 403, 404, 406, 429):
+                sub = f"identity_oidc_http_{status}"
+            elif 400 <= status < 500:
+                sub = "identity_oidc_http_4xx"
+            elif 500 <= status < 600:
+                sub = "identity_oidc_http_5xx"
+            raise
+        except urllib.error.URLError:
+            sub = "identity_oidc_network"
+            raise
         require(type(token_response) is dict and type(token_response.get("value")) is str)
         sub = "identity_jwks_fetch"
         jwks = fetch(JWKS, limit=65536)
@@ -384,7 +396,8 @@ def _classify_toolchain_failure():
         failures.append("toolchain_cargo_bin")
     if rustup is not None:
         try:
-            manager = rust_preflight._run(rustup, environment, "-V").strip()
+            manager = rust_preflight._run(rustup, environment, "-V",
+                                          allow_info_stderr=True).strip()
             if not re.fullmatch(
                     r"rustup [0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)? \([^)]+\)",
                     manager):
