@@ -141,6 +141,21 @@ class HostedBuildJoinTest(unittest.TestCase):
                 join.build(acquired, workspace, build_parent)
             self.assertEqual(len(seen), 1)
 
+    def test_build_substage_callback_reports_admit_failure_and_forwards_to_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, build_parent, acquired = self.layout(Path(tmp))
+            events = []
+
+            def on_substage(name, status, detail, elapsed):
+                events.append((name, status, detail))
+
+            acquired["vendor"]["vendor_mode_sha256"] = "bad"
+            with mock.patch.object(join.capacity, "HostStorageGuard", Guard):
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_BUILD$"):
+                    join.build(acquired, workspace, build_parent,
+                               on_substage=on_substage)
+            self.assertEqual(events, [("admit", "failed", "BUILD_ADMIT")])
+
 
 if __name__ == "__main__":
     unittest.main()

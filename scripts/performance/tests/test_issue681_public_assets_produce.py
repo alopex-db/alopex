@@ -40,6 +40,19 @@ class SourceBuildAdmissionTests(unittest.TestCase):
                              str(root / "cargo-home"))
             self.assertEqual(popen.call_args.kwargs["env"]["CARGO_NET_OFFLINE"],
                              "true")
+            self.assertEqual(
+                popen.call_args.kwargs["env"]["CARGO_PROFILE_RELEASE_STRIP"],
+                "symbols")
+            rustflags = popen.call_args.kwargs["env"]["RUSTFLAGS"]
+            cflags = popen.call_args.kwargs["env"]["CFLAGS"]
+            self.assertIn(f"--remap-path-prefix={root / 'cargo-home'}=/alopex-build/cargo",
+                          rustflags)
+            self.assertLess(rustflags.index("=/alopex-build/home"),
+                            rustflags.index("=/alopex-build/control"))
+            self.assertIn(f"-ffile-prefix-map={root / 'cargo-home'}=/alopex-build/cargo",
+                          cflags)
+            self.assertIn(f"-ffile-prefix-map={root}=/alopex-build/control",
+                          cflags)
 
     def test_only_exact_private_vendor_config_is_admitted(self):
         with tempfile.TemporaryDirectory() as tmp:

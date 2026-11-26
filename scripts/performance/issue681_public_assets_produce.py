@@ -29,6 +29,33 @@ EXAMPLE = "crates/alopex-embedded/examples/issue681_hnsw_first_write.rs"
 CONTRACT = "crates/alopex-sql/nim-sql-parser/PARSER_CONTRACT_VERSION"
 HOST = "x86_64-unknown-linux-gnu"
 LIMIT_SECONDS = 7_200
+BUILD_DIAG_CODES = frozenset({
+    "BUILD_ADMIT",
+    "BUILD_RUSTC",
+    "BUILD_SOURCE_PRE",
+    "BUILD_PARSER",
+    "BUILD_STORAGE_PRE",
+    "BUILD_VENDOR_PRE",
+    "BUILD_CARGO_EXIT",
+    "BUILD_CARGO_TIMEOUT",
+    "BUILD_CARGO_CAPACITY",
+    "BUILD_VENDOR_POST",
+    "BUILD_SOURCE_POST",
+    "BUILD_BINARY_MISSING",
+    "BUILD_SMOKE_COMMIT",
+    "BUILD_SMOKE_ROLLBACK",
+    "BUILD_ASSETS_VERIFY",
+    "BUILD_ASSETS_PREFIX_BINARY",
+    "BUILD_ASSETS_PREFIX_LIBRARY",
+    "BUILD_ASSETS_PREFIX_EXAMPLE",
+    "BUILD_ASSETS_PREFIX_RECEIPT",
+    "BUILD_PAIR_VERIFY",
+})
+
+
+def _set_diag(diag, code):
+    if isinstance(diag, dict) and code in BUILD_DIAG_CODES:
+        diag["code"] = code
 
 
 def require(value):
@@ -140,40 +167,60 @@ def _storage(extra, additional):
 
 
 def _build(source, target, work, parser_library, inventory_roots, limit,
-           rust_version, env, host_guard, cargo_home):
+           rust_version, env, host_guard, cargo_home, *, diag=None):
     log = work / "cargo-build.private.log"
+    remap_pairs = (
+        (Path.home(), "home"),
+        (cargo_home, "cargo"),
+        (source, "control"),
+        (work, "work"),
+        (target, "target"),
+        (parser_library.parent, "parser"),
+    )
     flags = " ".join(
         f"--remap-path-prefix={path}=/alopex-build/{label}"
-        for path, label in ((source, "control"), (work, "work"),
-                            (target, "target"),
-                            (parser_library.parent, "parser"),
-                            (Path.home(), "home")))
+        for path, label in remap_pairs)
+    cflags = " ".join(
+        f"-ffile-prefix-map={path}=/alopex-build/{label}"
+        for path, label in remap_pairs)
+    existing_cflags = env.get("CFLAGS", "").strip()
+    if existing_cflags:
+        cflags = f"{existing_cflags} {cflags}"
     build_env = dict(env, CARGO_HOME=str(cargo_home),
                      CARGO_INCREMENTAL="0", CARGO_NET_OFFLINE="true",
                      CARGO_PROFILE_RELEASE_DEBUG="0",
+                     CARGO_PROFILE_RELEASE_STRIP="symbols",
                      CARGO_BUILD_JOBS="2", CARGO_TARGET_DIR=str(target),
                      RUSTUP_TOOLCHAIN=rust_version,
                      NIM_SQL_PARSER_LIB_DIR=str(parser_library.parent),
-                     ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD="1", RUSTFLAGS=flags)
+                     ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD="1",
+                     RUSTFLAGS=flags, CFLAGS=cflags)
     build_env.pop("CARGO_ENCODED_RUSTFLAGS", None)
+    _set_diag(diag, "BUILD_CARGO_CAPACITY")
     host_guard()
     with log.open("xb") as output:
         os.chmod(log, 0o600)
+        _set_diag(diag, "BUILD_CARGO_EXIT")
         process = subprocess.Popen(assets.COMMAND, cwd=source, env=build_env,
                                    stdin=subprocess.DEVNULL, stdout=output,
                                    stderr=subprocess.STDOUT, start_new_session=True)
         deadline = time.monotonic() + LIMIT_SECONDS
         try:
             while process.poll() is None:
-                require(time.monotonic() < deadline)
+                if time.monotonic() >= deadline:
+                    _set_diag(diag, "BUILD_CARGO_TIMEOUT")
+                    require(False)
                 try:
                     process.wait(timeout=15)
                 except subprocess.TimeoutExpired:
                     pass
+                _set_diag(diag, "BUILD_CARGO_CAPACITY")
                 used = case.storage.inventory(inventory_roots)["allocated_bytes"]
                 require(used < case.STOP_BYTES and used <= limit)
                 host_guard()
+            _set_diag(diag, "BUILD_CARGO_EXIT")
             require(process.returncode == 0)
+            _set_diag(diag, "BUILD_CARGO_CAPACITY")
             host_guard()
         except BaseException:
             if process.poll() is None:
@@ -210,9 +257,10 @@ def produce(*, source, target, work, output, parser_record, parser_root,
             parser_record_sha256, parser_sha256, rust_version,
             additional_storage_bytes, private_roots, build_lock, host_guard,
             git_binary, git_env, cargo_home, vendor_mode_sha256,
-            vendor_tree_sha256=None):
+            vendor_tree_sha256=None, diag=None):
     """Return exact public pins, or one fixed failure without a promoted bundle."""
     try:
+        _set_diag(diag, "BUILD_ADMIT")
         require(sys.platform == "linux" and platform.machine() == "x86_64")
         require(callable(host_guard))
         for path in (source, target, work, output.parent, build_lock.parent,
@@ -229,15 +277,19 @@ def produce(*, source, target, work, output, parser_record, parser_root,
         require(re.fullmatch(r"1\.[0-9]{1,3}\.[0-9]{1,3}", rust_version) and
                 re.fullmatch(r"[0-9a-f]{64}", parser_record_sha256) and
                 re.fullmatch(r"[0-9a-f]{64}", parser_sha256))
+        _set_diag(diag, "BUILD_RUSTC")
         compiler_env = dict(os.environ, RUSTUP_TOOLCHAIN=rust_version,
                             RUSTUP_AUTO_INSTALL="0")
         compiler = _run(["rustc", "-Vv"], env=compiler_env)
         require("release: " + rust_version in compiler.splitlines() and
                 "host: " + HOST in compiler.splitlines())
+        _set_diag(diag, "BUILD_SOURCE_PRE")
         verify_source(source, source_commit, source_tree, example_sha256,
                       cargo_lock_sha256, git_binary=git_binary, git_env=git_env)
+        _set_diag(diag, "BUILD_PARSER")
         require(verify_parser(parser_record, parser_root, parser_library) ==
                 parser_record_sha256 and digest(parser_library) == parser_sha256)
+        _set_diag(diag, "BUILD_STORAGE_PRE")
         inventory_roots = [source, target, work, parser_root, cargo_home,
                            parser_record.parent, output.parent]
         _storage(inventory_roots, additional_storage_bytes)
@@ -249,6 +301,7 @@ def produce(*, source, target, work, output, parser_record, parser_root,
                     stat.S_IMODE(info.st_mode) == 0o600)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             baseline = _storage(inventory_roots, additional_storage_bytes)
+            _set_diag(diag, "BUILD_VENDOR_PRE")
             if vendor_tree_sha256 is None:
                 vendor_tree.verify_tree(cargo_home / "vendor", host_guard,
                                         vendor_mode_sha256)
@@ -256,9 +309,15 @@ def produce(*, source, target, work, output, parser_record, parser_root,
                 vendor_tree.verify_tree(
                     cargo_home / "vendor", host_guard, vendor_mode_sha256,
                     expected_tree_sha256=vendor_tree_sha256)
-            _build(source, target, work, parser_library, inventory_roots,
-                   baseline + additional_storage_bytes, rust_version, os.environ,
-                   host_guard, cargo_home)
+            if diag is not None:
+                _build(source, target, work, parser_library, inventory_roots,
+                       baseline + additional_storage_bytes, rust_version,
+                       os.environ, host_guard, cargo_home, diag=diag)
+            else:
+                _build(source, target, work, parser_library, inventory_roots,
+                       baseline + additional_storage_bytes, rust_version,
+                       os.environ, host_guard, cargo_home)
+            _set_diag(diag, "BUILD_VENDOR_POST")
             if vendor_tree_sha256 is None:
                 vendor_tree.verify_tree(cargo_home / "vendor", host_guard,
                                         vendor_mode_sha256)
@@ -266,9 +325,11 @@ def produce(*, source, target, work, output, parser_record, parser_root,
                 vendor_tree.verify_tree(
                     cargo_home / "vendor", host_guard, vendor_mode_sha256,
                     expected_tree_sha256=vendor_tree_sha256)
+            _set_diag(diag, "BUILD_SOURCE_POST")
             verify_source(source, source_commit, source_tree, example_sha256,
                           cargo_lock_sha256, git_binary=git_binary,
                           git_env=git_env)
+            _set_diag(diag, "BUILD_BINARY_MISSING")
             binary = target / "release/examples/issue681_hnsw_first_write"
             require(binary.is_file() and not binary.is_symlink() and
                     binary.stat().st_uid == os.geteuid())
@@ -279,14 +340,21 @@ def produce(*, source, target, work, output, parser_record, parser_root,
                                                   str(parser_record.parent),
                                                   str(output.parent),
                                                   str(Path.home()))))
+            pack_kwargs = dict(
+                source_commit=source_commit,
+                source_tree=source_tree,
+                parser_record_sha256=parser_record_sha256,
+                cargo_lock_sha256=cargo_lock_sha256,
+                rust_version=rust_version,
+                private_roots=protected_roots,
+                smoke_runner=pack.smoke,
+            )
+            if diag is not None:
+                pack_kwargs["diag"] = diag
             pin = pack._package(output, binary, parser_library, source / EXAMPLE,
-                                source_commit=source_commit,
-                                source_tree=source_tree,
-                                parser_record_sha256=parser_record_sha256,
-                                cargo_lock_sha256=cargo_lock_sha256,
-                                rust_version=rust_version,
-                                private_roots=protected_roots,
-                                smoke_runner=pack.smoke)
+                                **pack_kwargs)
+            if isinstance(diag, dict):
+                diag.pop("code", None)
             return pin
         finally:
             os.close(fd)

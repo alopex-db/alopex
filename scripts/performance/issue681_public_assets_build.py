@@ -129,7 +129,7 @@ def smoke(binary, mode, *, timeout=30):
 
 def _package(output, binary, library, example, *, source_commit, source_tree,
              parser_record_sha256, cargo_lock_sha256, rust_version,
-             private_roots, smoke_runner):
+             private_roots, smoke_runner, diag=None):
     require(isinstance(output, Path) and output.is_absolute() and
             not output.exists() and output.parent.is_dir() and
             output.parent.stat().st_uid == os.geteuid() and
@@ -142,10 +142,13 @@ def _package(output, binary, library, example, *, source_commit, source_tree,
                 path.stat().st_uid == os.geteuid())
     require(callable(smoke_runner))
     try:
-        results = {mode: smoke_runner(binary, mode)
-                   for mode in ("commit", "rollback")}
-        for mode, result in results.items():
+        results = {}
+        for mode in ("commit", "rollback"):
+            if isinstance(diag, dict):
+                diag["code"] = f"BUILD_SMOKE_{mode.upper()}"
+            result = smoke_runner(binary, mode)
             assets._smoke(result, mode)
+            results[mode] = result
     except Exception:
         raise ValueError("PUBLIC_BUILD") from None
     source = {"commit": source_commit, "tree": source_tree,
@@ -205,10 +208,15 @@ def _package(output, binary, library, example, *, source_commit, source_tree,
             "schema": assets.RESULT_SCHEMA, "status": "passed",
             "source": source, "assets_digest": pin["assets_digest"],
             "performance_qualification": False}))
-        assets.verify(staged, pin, private_roots=private_roots)
+        verify_kwargs = {"private_roots": private_roots}
+        if diag is not None:
+            if isinstance(diag, dict):
+                diag["code"] = "BUILD_ASSETS_VERIFY"
+            verify_kwargs["diag"] = diag
+        assets.verify(staged, pin, **verify_kwargs)
         staged.rename(output)
         promoted = True
-        assets.verify(output, pin, private_roots=private_roots)
+        assets.verify(output, pin, **verify_kwargs)
         return pin
     except Exception:
         if promoted:

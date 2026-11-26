@@ -325,3 +325,45 @@ class HostedFullJobTests(unittest.TestCase):
             self.assertEqual(final["acquire_substages"],
                              {"sources": "passed", "cargo_vendor": "failed"})
             self.assertNotIn(str(root), stdout.getvalue())
+
+    def test_cli_emits_allowlisted_build_substage_detail_on_failure(self):
+        import contextlib
+        import io
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            workspace = directory(root / "checkout")
+            runner_temp = directory(root / "runner-temp")
+            home_base = directory(root / "home")
+            stdout = io.StringIO()
+
+            def fake_exec(env, ws, tp, hp, profile, finish, *,
+                          expected_job, on_stage, on_substage):
+                on_stage("toolchain_install")
+                on_substage("sources", "passed", None, 2)
+                on_stage("acquire")
+                on_substage("before", "failed", "BUILD_ASSETS_PREFIX_BINARY", 120)
+                raise ValueError("PUBLIC_JOB:build")
+
+            env = {
+                "HNSW_FINISH": "commit",
+                "RUNNER_TEMP": str(runner_temp),
+                "GITHUB_WORKSPACE": str(workspace),
+            }
+            with mock.patch.object(job.Path, "home", return_value=home_base), \
+                 mock.patch.object(job.identity_gate, "run",
+                                   return_value=({"case": "HNSW_HOSTED_ADMISSION",
+                                                  "outcome": "passed"}, 0)), \
+                 mock.patch.object(job, "execute_hosted_measure", side_effect=fake_exec), \
+                 contextlib.redirect_stdout(stdout):
+                rc = job.run_hosted_measure_cli(env)
+            self.assertEqual(rc, 1)
+            lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+            final = lines[-1]
+            self.assertEqual(final["outcome"], "failed")
+            self.assertEqual(final["failed_stage"], "build")
+            self.assertEqual(final["failed_substage"], "before")
+            self.assertEqual(final["detail_code"], "BUILD_ASSETS_PREFIX_BINARY")
+            self.assertEqual(final["build_substages"], {"before": "failed"})
+            self.assertNotIn(str(root), stdout.getvalue())

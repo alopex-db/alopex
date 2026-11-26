@@ -102,10 +102,14 @@ def _admit(acquired, workspace, build_parent):
                 acquired["parser"]["parser_root"]))
 
 
-def build(acquired, workspace: Path, build_parent: Path):
+def build(acquired, workspace: Path, build_parent: Path, *,
+          on_substage=None, diag=None):
     """Return only an independently verified private pair on success."""
     owned = None
+    pair_started = False
     try:
+        if isinstance(diag, dict):
+            diag["code"] = "BUILD_ADMIT"
         _admit(acquired, workspace, build_parent)
         guard = acquired["guard"]
         guard()
@@ -144,11 +148,20 @@ def build(acquired, workspace: Path, build_parent: Path):
                 work=owned / (name + "-work"), source_commit=pin["commit"],
                 source_tree=pin["tree"], cargo_lock_sha256=pin["lock"])
         guard()
-        result = build_pair.build_pair(arms, owned / "bundles", guard)
+        pair_kwargs = {}
+        if on_substage is not None:
+            pair_kwargs["on_substage"] = on_substage
+        if diag is not None:
+            pair_kwargs["diag"] = diag
+        pair_started = True
+        result = build_pair.build_pair(arms, owned / "bundles", guard,
+                                       **pair_kwargs)
         guard()
         return {"pair": result, "build_task": owned, "guard": guard,
                 "cargo_home": acquired["cargo_home"]}
     except BaseException:
+        if not pair_started and on_substage is not None:
+            on_substage("admit", "failed", "BUILD_ADMIT", 0)
         if owned is not None:
             try:
                 acquire_all._remove_owned(owned, identity)

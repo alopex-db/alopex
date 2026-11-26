@@ -21,6 +21,7 @@ import issue681_hosted_qualify as qualify
 import issue681_hosted_storage as scoped_storage
 import issue681_hosted_rust_preflight as rust
 import issue681_public_admission as public_admission
+import issue681_public_assets_produce as producer
 import issue681_public_transport as transport
 
 ERROR = "PUBLIC_JOB"
@@ -28,6 +29,12 @@ CASE = "HNSW_PUBLIC_JOB"
 SOFT_BUDGET_SECONDS = 160 * 60
 ACQUIRE_BUDGET_SECONDS = 25 * 60
 HOSTED_RUNNER_KIND = "github_hosted_ubuntu2404"
+ALLOWED_DETAIL_CODES = (
+    acquire.ALLOWED_DETAIL_CODES
+    | producer.BUILD_DIAG_CODES
+    | measure_join.MEASURE_DIAG_CODES
+    | frozenset({build_join.ERROR, measure_join.ERROR})
+)
 
 
 def require(value):
@@ -210,13 +217,17 @@ def execute_hosted_measure(env, workspace: Path, task_parent: Path,
 
         stage = "build"
         check_budget()
-        built = build_join.build(acquired, workspace, task / "build")
+        build_kwargs = {"on_substage": on_substage} if on_substage is not None else {}
+        built = build_join.build(acquired, workspace, task / "build",
+                                 **build_kwargs)
         notify("build")
 
         stage = "measure"
         check_budget()
+        measure_kwargs = {"on_substage": on_substage} if on_substage is not None else {}
         result = measure_join.measure(acquired, built, workspace,
-                                      task / "measure", profile, finish)
+                                      task / "measure", profile, finish,
+                                      **measure_kwargs)
         notify("measure")
 
         stage = "audit"
@@ -287,25 +298,43 @@ def run_hosted_measure_cli(env=None):
     os.chmod(home_parent, 0o700)
 
     acquire_substages = {}
+    build_substages = {}
+    measure_substages = {}
+    active_stage = {"name": "acquire"}
     failure_detail = {"substage": None, "detail_code": None}
 
     def on_stage(name):
         stages[name] = "passed"
+        if name == "toolchain_install":
+            active_stage["name"] = "acquire"
+        elif name == "acquire":
+            active_stage["name"] = "build"
+        elif name == "build":
+            active_stage["name"] = "measure"
         print(json.dumps({"case": CASE, "stage": name, "status": "passed"},
                          sort_keys=True), flush=True)
 
     def on_substage(name, status, detail_code, elapsed_s):
-        acquire_substages[name] = status
+        stage_name = active_stage["name"]
+        if stage_name == "acquire":
+            acquire_substages[name] = status
+            fallback = acquire.ERROR
+        elif stage_name == "build":
+            build_substages[name] = status
+            fallback = build_join.ERROR
+        else:
+            measure_substages[name] = status
+            fallback = measure_join.ERROR
         payload = {
             "case": CASE,
-            "stage": "acquire",
+            "stage": stage_name,
             "substage": name,
             "status": status,
             "elapsed_s": elapsed_s,
         }
         if status == "failed":
-            safe_code = (detail_code if detail_code in acquire.ALLOWED_DETAIL_CODES
-                         else acquire.ERROR)
+            safe_code = (detail_code if detail_code in ALLOWED_DETAIL_CODES
+                         else fallback)
             payload["detail_code"] = safe_code
             failure_detail["substage"] = name
             failure_detail["detail_code"] = safe_code
@@ -358,6 +387,10 @@ def run_hosted_measure_cli(env=None):
         }
         if acquire_substages:
             summary["acquire_substages"] = acquire_substages
+        if build_substages:
+            summary["build_substages"] = build_substages
+        if measure_substages:
+            summary["measure_substages"] = measure_substages
         if failure_detail["substage"] is not None:
             summary["failed_substage"] = failure_detail["substage"]
         if failure_detail["detail_code"] is not None:

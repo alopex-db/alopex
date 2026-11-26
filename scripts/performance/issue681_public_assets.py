@@ -80,7 +80,7 @@ def _smoke(value, mode=None):
                 0 < value["elapsed_ns"] <= 3_600_000_000_000)
 
 
-def _verify(root, pin, private_roots):
+def _verify(root, pin, private_roots, *, diag=None):
     pair._pin(pin)
     require(isinstance(root, Path) and root.is_absolute() and
             root.is_dir() and not root.is_symlink() and
@@ -136,9 +136,12 @@ def _verify(root, pin, private_roots):
                 for value in private_roots))
     forbidden = (*FIXED_PRIVATE_PREFIXES,
                  *(value.encode() for value in private_roots))
-    for path, _ in selected.values():
+    for role, (path, _) in selected.items():
         data = _read_file(path, manifest["expanded_limit_bytes"])
-        require(not any(prefix in data for prefix in forbidden))
+        if any(prefix in data for prefix in forbidden):
+            if isinstance(diag, dict):
+                diag["code"] = f"BUILD_ASSETS_PREFIX_{role.upper()}"
+            require(False)
     result, _ = _json(root / "result.json", 4_096)
     require(set(result) == {"schema", "status", "source", "assets_digest",
                             "performance_qualification"} and
@@ -176,9 +179,9 @@ def _verify(root, pin, private_roots):
     return {role: path for role, (path, _) in selected.items()}
 
 
-def verify(root, pin, *, private_roots):
+def verify(root, pin, *, private_roots, diag=None):
     """Return four exact local member paths or one fixed asset failure."""
     try:
-        return _verify(root, pin, private_roots)
+        return _verify(root, pin, private_roots, diag=diag)
     except Exception:
         raise ValueError("PUBLIC_ASSET") from None
