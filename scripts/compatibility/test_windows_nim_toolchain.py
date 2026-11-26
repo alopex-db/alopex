@@ -17,7 +17,10 @@ import windows_nim_toolchain as toolchain
 def archive(path: Path, members: list[tuple[str, bytes, int | None]]) -> None:
     with zipfile.ZipFile(path, "w") as output:
         for name, contents, mode in members:
-            info = zipfile.ZipInfo(name)
+            # Preserve raw member names (including backslashes) on Windows where
+            # zipfile.ZipInfo.__init__ normalizes os.sep to '/'.
+            info = zipfile.ZipInfo("placeholder")
+            info.filename = name
             if mode is not None:
                 info.create_system = 3
                 info.external_attr = mode << 16
