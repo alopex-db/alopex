@@ -31,7 +31,7 @@ ALLOWED_DETAIL_CODES = frozenset({
     "PUBLIC_PARSER_INPUT",
     "PUBLIC_VENDOR",
     "TIME_BUDGET",
-}) | cargo_fetch.DIAG_CODES
+}) | cargo_fetch.DIAG_CODES | parser_tools.NIMBLE_DIAG_CODES
 
 
 def require(value):
@@ -46,11 +46,12 @@ def _force_guard(guard):
         guard()
 
 
-def _detail_code(exc, cargo_diag=None):
-    if isinstance(cargo_diag, dict):
-        code = cargo_diag.get("code")
-        if isinstance(code, str) and code in ALLOWED_DETAIL_CODES:
-            return code
+def _detail_code(exc, *diags):
+    for diag in diags:
+        if isinstance(diag, dict):
+            code = diag.get("code")
+            if isinstance(code, str) and code in ALLOWED_DETAIL_CODES:
+                return code
     if isinstance(exc, ValueError) and exc.args:
         token = exc.args[0]
         if isinstance(token, str) and token in ALLOWED_DETAIL_CODES:
@@ -93,6 +94,7 @@ def acquire_all(workspace: Path, task_parent: Path, home_parent: Path, *,
     substage = "init"
     substage_started = started
     cargo_diag = {}
+    nimble_diag = {}
 
     def emit(name, status, detail=None):
         if on_substage is not None:
@@ -162,11 +164,12 @@ def acquire_all(workspace: Path, task_parent: Path, home_parent: Path, *,
         except ValueError:
             if vendor_mode != "cargo_vendor_locked":
                 raise
-            begin("nimble_build")
-            parser_tools.build_pinned_nimble(extracted, guard,
-                                             acquired["git_env"])
+            begin("nimble_install")
+            nimble_diag.clear()
+            parser_tools.install_pinned_nimble(extracted, guard,
+                                               diag=nimble_diag)
             _force_guard(guard)
-            emit("nimble_build", "passed")
+            emit("nimble_install", "passed")
             begin("parser_tools")
             tools = parser_tools.verify_tools(extracted, guard)
         require(type(tools) is dict and set(tools) == {"nim", "nimble"})
@@ -220,7 +223,7 @@ def acquire_all(workspace: Path, task_parent: Path, home_parent: Path, *,
                 "git_env": acquired["git_env"], "task": task,
                 "cargo_home": cargo_home}
     except BaseException as exc:
-        emit(substage, "failed", _detail_code(exc, cargo_diag))
+        emit(substage, "failed", _detail_code(exc, cargo_diag, nimble_diag))
         for path, identity in reversed(owned):
             try:
                 _remove_owned(path, identity)

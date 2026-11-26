@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 from pathlib import Path
 import re
@@ -9,20 +11,46 @@ import selectors
 import signal
 import stat
 import subprocess
+import tarfile
 import time
 
-import issue681_hosted_acquire_source as acquire_source
 import issue681_hosted_nim_archive as archive
 
 
 NIM_VERSION = "2.2.10"
 NIMBLE_VERSION = "0.22.3"
 NIMBLE_TAG = "v0.22.3"
-NIMBLE_REPO = "https://github.com/nim-lang/nimble.git"
 NIMBLE_SHA = "42ef70c2102a942c46f13eb76872326edd525cec"
+NIMBLE_ARCHIVE_NAME = "nimble-linux_x64.tar.gz"
+NIMBLE_DOWNLOAD_PATH = (
+    f"/nim-lang/nimble/releases/download/{NIMBLE_TAG}/{NIMBLE_ARCHIVE_NAME}"
+)
+NIMBLE_ARCHIVE_BYTES = 1_576_268
+NIMBLE_ARCHIVE_SHA256 = (
+    "0cf3f7b2b0a1cd3e3c459f73f46936cd84a93c1b98ef07ff43d050a0ef948911"
+)
+NIMBLE_BIN_BYTES = 4_288_104
+NIMBLE_BIN_SHA256 = (
+    "674b21cbf1d9de73d34c7477459b5ef62c70c2980eb8db79c909cfb411674bc9"
+)
+NIMBLE_FETCH_TIME_LIMIT = 120
 OUTPUT_LIMIT = 4096
 TIME_LIMIT = 10
-BUILD_TIME_LIMIT = 300
+NIMBLE_DIAG_CODES = frozenset({
+    "NIMBLE_ADMISSION",
+    "NIMBLE_REDIRECT",
+    "NIMBLE_TRANSFER",
+    "NIMBLE_ARCHIVE_DIGEST",
+    "NIMBLE_EXTRACT",
+    "NIMBLE_BIN_DIGEST",
+    "NIMBLE_INSTALL",
+    "NIMBLE_CAPACITY",
+})
+
+
+def _set_diag(diag, code):
+    if isinstance(diag, dict) and code in NIMBLE_DIAG_CODES:
+        diag["code"] = code
 
 
 def require(value):
@@ -157,18 +185,31 @@ def verify_tools(extracted, guard):
         raise ValueError("PUBLIC_PARSER_INPUT") from None
 
 
-def build_pinned_nimble(extracted, guard, git_env):
-    """Build exact Nimble 0.22.3 (42ef70c2) using verified extracted Nim 2.2.10."""
-    scratch = None
-    identity = None
-    stage = "nimble-build-admission"
+def install_pinned_nimble(extracted, guard, *, diag=None):
+    """Install cryptographically pinned Nimble 0.22.3 (42ef70c2) release binary."""
+    first = second = None
+    partial = None
+    created_partial = False
+    stage = "nimble-install-admission"
+
+    def run_guard():
+        try:
+            guard()
+        except BaseException:
+            _set_diag(diag, "NIMBLE_CAPACITY")
+            raise
+
     try:
+        _set_diag(diag, "NIMBLE_ADMISSION")
         require(isinstance(extracted, Path) and extracted.is_absolute() and
                 extracted.name == archive.EXTRACTED_NAME)
         archive._owned_directory(extracted.parent)
         archive._owned_directory(extracted)
-        require(callable(guard))
-        acquire_source._trusted_git()
+        require(callable(guard) and
+                re.fullmatch(r"[0-9a-f]{64}", NIMBLE_ARCHIVE_SHA256) and
+                re.fullmatch(r"[0-9a-f]{64}", NIMBLE_BIN_SHA256) and
+                0 < NIMBLE_ARCHIVE_BYTES <= 20_000_000 and
+                0 < NIMBLE_BIN_BYTES <= 50_000_000)
         roots = [path for path in extracted.iterdir() if path.is_dir()]
         require(len(roots) == 1 and roots[0].name in archive.ARCHIVE_ROOTS and
                 not roots[0].is_symlink())
@@ -179,109 +220,97 @@ def build_pinned_nimble(extracted, guard, git_env):
         nimble = bin_dir / "nimble"
         _tool(nim)
         require(not nimble.is_symlink())
-        scratch = extracted.parent / "nimble-build.partial"
-        require(not scratch.exists() and not scratch.is_symlink())
-        scratch.mkdir(mode=0o700)
-        info = scratch.lstat()
-        identity = (info.st_dev, info.st_ino)
+        partial = bin_dir / "nimble.partial"
+        require(not partial.exists() and not partial.is_symlink())
+        run_guard()
 
-        stage = "nimble-build-nim-check"
-        nim_output = _run_tool([nim, "--version"], scratch, "nim", guard)
-        versions = re.findall(r"(?m)^Nim Compiler Version "
-                              r"([0-9]+\.[0-9]+\.[0-9]+)(?:\s|$)", nim_output)
-        require(versions == [NIM_VERSION])
+        deadline = time.monotonic() + NIMBLE_FETCH_TIME_LIMIT
+        stage = "nimble-install-redirect"
+        _set_diag(diag, "NIMBLE_REDIRECT")
+        first, response = archive._request(archive.FIRST_HOST,
+                                           NIMBLE_DOWNLOAD_PATH)
+        require(response.status in (302, 307, 308))
+        target = archive._redirect_target(response.getheader("Location"))
+        response.close()
+        first.close()
+        first = None
+        require(time.monotonic() < deadline)
 
-        stage = "nimble-build-clone"
-        src_dir = scratch / "src"
-        clone_home = scratch / "git-home"
-        clone_home.mkdir(mode=0o700)
-        clone_env = dict(git_env, HOME=str(clone_home),
-                         XDG_CONFIG_HOME=str(clone_home))
-        log_path = scratch / "nimble-build.private.log"
-        fd = os.open(log_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY |
-                     getattr(os, "O_NOFOLLOW", 0), 0o600)
-        with os.fdopen(fd, "wb") as log:
-            acquire_source._git(
-                ["clone", "--quiet", "--branch", NIMBLE_TAG, "--depth", "1",
-                 "--recurse-submodules", "--shallow-submodules",
-                 NIMBLE_REPO, str(src_dir)],
-                scratch, guard, log, clone_env)
-            stage = "nimble-build-verify-src"
-            head = subprocess.run(
-                [str(acquire_source.GIT), "-C", str(src_dir),
-                 "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null",
-                 "rev-parse", "HEAD"],
-                env=clone_env, stdin=subprocess.DEVNULL, capture_output=True,
-                timeout=15, check=False)
-            require(head.returncode == 0 and
-                    head.stdout.decode("ascii", errors="ignore").strip() == NIMBLE_SHA)
-            clean = subprocess.run(
-                [str(acquire_source.GIT), "-C", str(src_dir),
-                 "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null",
-                 "status", "--porcelain", "--ignore-submodules=none"],
-                env=clone_env, stdin=subprocess.DEVNULL, capture_output=True,
-                timeout=15, check=False)
-            require(clean.returncode == 0 and clean.stdout == b"")
-            sub = subprocess.run(
-                [str(acquire_source.GIT), "-C", str(src_dir),
-                 "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null",
-                 "submodule", "status", "--recursive"],
-                env=clone_env, stdin=subprocess.DEVNULL, capture_output=True,
-                timeout=15, check=False)
-            require(sub.returncode == 0 and not any(
-                line[:1] in ("+", "U", "-")
-                for line in sub.stdout.decode("utf-8", errors="replace").splitlines()))
+        stage = "nimble-install-transfer"
+        _set_diag(diag, "NIMBLE_TRANSFER")
+        second, response = archive._request(archive.ASSET_HOST, target)
+        require(response.status == 200)
+        content_length = response.getheader("Content-Length")
+        if content_length is not None:
+            require(content_length.isdecimal() and
+                    int(content_length) == NIMBLE_ARCHIVE_BYTES)
+        raw = bytearray()
+        digest = hashlib.sha256()
+        while block := response.read(archive.CHUNK):
+            require(time.monotonic() < deadline)
+            require(len(raw) + len(block) <= NIMBLE_ARCHIVE_BYTES)
+            raw.extend(block)
+            digest.update(block)
+            run_guard()
+        response.close()
+        second.close()
+        second = None
 
-            stage = "nimble-build-compile"
-            nimcache = scratch / "nimcache"
-            nimcache.mkdir(mode=0o700)
-            built_bin = scratch / "nimble.built"
-            build_env = {
-                "HOME": str(scratch), "XDG_CONFIG_HOME": str(scratch),
-                "XDG_CACHE_HOME": str(scratch), "TMPDIR": str(scratch),
-                "PATH": str(bin_dir) + ":/usr/bin:/bin",
-                "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
-                "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/false",
-                "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
-            }
-            guard()
-            process = subprocess.Popen(
-                [str(nim), "c", "-d:release", f"--nimcache:{nimcache}",
-                 f"-o:{built_bin}", "src/nimble.nim"],
-                cwd=src_dir, env=build_env, stdin=subprocess.DEVNULL,
-                stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-                umask=0o077)
-            deadline = time.monotonic() + BUILD_TIME_LIMIT
-            try:
-                while process.poll() is None:
-                    require(time.monotonic() < deadline)
-                    try:
-                        process.wait(timeout=1)
-                    except subprocess.TimeoutExpired:
-                        pass
-                    guard()
-                require(process.returncode == 0)
-            except BaseException:
-                if process.poll() is None:
-                    _stop_group(process)
-                raise
+        stage = "nimble-install-archive-digest"
+        _set_diag(diag, "NIMBLE_ARCHIVE_DIGEST")
+        require(len(raw) == NIMBLE_ARCHIVE_BYTES and
+                digest.hexdigest() == NIMBLE_ARCHIVE_SHA256)
 
-        stage = "nimble-build-install"
-        require(built_bin.is_file() and not built_bin.is_symlink())
-        os.chmod(built_bin, 0o700)
-        os.replace(built_bin, nimble)
+        stage = "nimble-install-extract"
+        _set_diag(diag, "NIMBLE_EXTRACT")
+        with tarfile.open(fileobj=io.BytesIO(bytes(raw)), mode="r:gz") as tf:
+            members = tf.getmembers()
+            require(len(members) == 1)
+            member = members[0]
+            require(member.name == "nimble" and member.isfile() and
+                    not (member.mode & ~0o777) and bool(member.mode & 0o111) and
+                    member.size == NIMBLE_BIN_BYTES)
+            source_file = tf.extractfile(member)
+            require(source_file is not None)
+            binary = source_file.read(NIMBLE_BIN_BYTES + 1)
+            require(len(binary) == NIMBLE_BIN_BYTES)
+
+        stage = "nimble-install-bin-digest"
+        _set_diag(diag, "NIMBLE_BIN_DIGEST")
+        require(hashlib.sha256(binary).hexdigest() == NIMBLE_BIN_SHA256)
+
+        stage = "nimble-install-replace"
+        _set_diag(diag, "NIMBLE_INSTALL")
+        fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY |
+                     getattr(os, "O_NOFOLLOW", 0), 0o700)
+        created_partial = True
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(binary)
+        os.chmod(partial, 0o700)
+        os.replace(partial, nimble)
+        created_partial = False
         _tool(nimble)
-        archive._remove_owned_tree(scratch, identity)
-        scratch = None
-        identity = None
-        guard()
+        run_guard()
+        if isinstance(diag, dict):
+            diag.pop("code", None)
         return nimble
     except BaseException as error:
         if isinstance(extracted, Path):
             archive._private_reason(extracted.parent, stage, error)
-        if scratch is not None and identity is not None:
+        if created_partial and partial is not None:
             try:
-                archive._remove_owned_tree(scratch, identity)
+                partial.unlink(missing_ok=True)
             except Exception:
                 pass
         raise ValueError("PUBLIC_PARSER_INPUT") from None
+    finally:
+        if first is not None:
+            try:
+                first.close()
+            except Exception:
+                pass
+        if second is not None:
+            try:
+                second.close()
+            except Exception:
+                pass

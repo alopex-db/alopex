@@ -163,6 +163,61 @@ class HostedAcquireAllTest(unittest.TestCase):
             self.assertEqual(recorded[-1][:3],
                              ("cargo_vendor", "failed", "FETCH_NORMALIZE_TIMEOUT"))
 
+    def test_nimble_install_fallback_reports_allowlisted_detail_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, task_parent, home_parent = self.layout(Path(tmp))
+            self.components()
+            recorded = []
+
+            def fail_install(_extracted, _guard, *, diag):
+                diag["code"] = "NIMBLE_ARCHIVE_DIGEST"
+                raise ValueError("PUBLIC_PARSER_INPUT")
+
+            with mock.patch.object(acquire.parser_tools, "verify_tools",
+                                   side_effect=ValueError("PUBLIC_PARSER_INPUT")), \
+                 mock.patch.object(acquire.parser_tools, "install_pinned_nimble",
+                                   side_effect=fail_install):
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_ACQUIRE$"):
+                    acquire.acquire_all(
+                        workspace, task_parent, home_parent,
+                        manifest=self.manifest(workspace, task_parent, home_parent),
+                        vendor_mode="cargo_vendor_locked",
+                        on_substage=lambda *row: recorded.append(row),
+                        stage_budget_seconds=120)
+            self.assertEqual(recorded[-1][:3],
+                             ("nimble_install", "failed", "NIMBLE_ARCHIVE_DIGEST"))
+
+    def test_nimble_install_fallback_succeeds_and_rechecks_verify_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, task_parent, home_parent = self.layout(Path(tmp))
+            self.components()
+            recorded = []
+            verify_calls = {"n": 0}
+
+            def verify_twice(_extracted, _guard):
+                verify_calls["n"] += 1
+                if verify_calls["n"] == 1:
+                    raise ValueError("PUBLIC_PARSER_INPUT")
+                return {"nim": Path("/private/nim"), "nimble": Path("/private/nimble")}
+
+            with mock.patch.object(acquire.parser_tools, "verify_tools",
+                                   side_effect=verify_twice), \
+                 mock.patch.object(acquire.parser_tools, "install_pinned_nimble",
+                                   return_value=Path("/private/nimble")) as inst, \
+                 mock.patch.object(acquire.cargo_fetch, "fetch_and_stage_vendor",
+                                   return_value={"cargo_home": Path("/private/cargo")}):
+                result = acquire.acquire_all(
+                    workspace, task_parent, home_parent,
+                    manifest=self.manifest(workspace, task_parent, home_parent),
+                    vendor_mode="cargo_vendor_locked",
+                    on_substage=lambda *row: recorded.append(row),
+                    stage_budget_seconds=120)
+            inst.assert_called_once()
+            self.assertEqual(verify_calls["n"], 2)
+            self.assertIn(("nimble_install", "passed"), [(r[0], r[1]) for r in recorded])
+            self.assertIn(("parser_tools", "passed"), [(r[0], r[1]) for r in recorded])
+            self.assertEqual(result["vendor"], {"cargo_home": Path("/private/cargo")})
+
 
 if __name__ == "__main__":
     unittest.main()
