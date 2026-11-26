@@ -24,8 +24,8 @@ PINS = {
         "lock": "007e0f00d2652cec726fd0f1cd364945ed6ed8c7901fb03c195c1ce8bc1b6658",
     },
     "candidate": {
-        "commit": "426418099c4337e73f5ced4444215a640898ed5a",
-        "tree": "84f2b38c5a1e0aa9becd1527a2de9cb5356e4b93",
+        "commit": "a2b15a9cb4ec80c7686c40f679038901d4b51347",
+        "tree": "cbed275910e40155c4a3abd16dbf8bb7f4777dc1",
         "example": "a41bcaccd6143d942bd7064afa444f388d1bcb5788cd8f458737fddf7aed6758",
         "lock": "c1a1abdd274a633f7ff1f8e47eed70fdc05a032c745ba1645bf000df711b6103",
     },
