@@ -321,6 +321,11 @@ class HostedStorageTests(unittest.TestCase):
         build_script = (workflow.parents[2] / "scripts/build-nim-parser.sh").read_text()
         self.assertIn('mkdir -m 700 "${build_lock}"', build_script)
         self.assertIn('mkdir -m 700 "${build_root}"', build_script)
+        self.assertIn('if [[ "${RUNNER_IS_WINDOWS}" == "1" ]]; then\n'
+                      '    if ! mkdir "${build_lock}" 2>/dev/null; then',
+                      build_script)
+        self.assertIn('if [[ "${RUNNER_IS_WINDOWS}" == "1" ]]; then\n'
+                      '    mkdir "${build_root}"', build_script)
 
     def test_precheckout_and_checked_out_scanner_agree_on_fixture(self):
         workflow = Path(__file__).resolve().parents[3] / ".github/workflows/alopex-performance.yml"
