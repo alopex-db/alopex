@@ -13,6 +13,7 @@ import issue681_hosted_acquire_all as acquire
 import issue681_hosted_build_join as build_join
 import issue681_hosted_measure_join as measure_join
 import issue681_hosted_qualify as qualify
+import issue681_hosted_storage as scoped_storage
 import issue681_hosted_rust_preflight as rust
 import issue681_public_transport as transport
 
@@ -71,6 +72,9 @@ def _execute(env, workspace: Path, task_parent: Path, home_parent: Path,
                 Path.home() in home_parent.parents)
         _empty_private(task_parent)
         _empty_private(home_parent)
+        manifest = scoped_storage.make_manifest(
+            workspace, Path(os.environ.get("RUNNER_TEMP", str(task_parent))),
+            task_parent=task_parent, home_parent=home_parent)
         outcome, status = qualify_job(env)
         require(status == 0 and outcome ==
                 {"case": qualify.CASE, "outcome": "passed"})
@@ -87,7 +91,8 @@ def _execute(env, workspace: Path, task_parent: Path, home_parent: Path,
         for name in ("acquire", "build", "measure"):
             (task / name).mkdir(mode=0o700)
             _empty_private(task / name)
-        acquired = acquire.acquire_all(workspace, task / "acquire", home)
+        acquired = acquire.acquire_all(workspace, task / "acquire", home,
+                                       manifest=manifest)
         built = build_join.build(acquired, workspace, task / "build")
         result = measure_join.measure(acquired, built, workspace,
                                       task / "measure", profile, finish)

@@ -419,7 +419,7 @@ build_host() (
     exit "${cleanup_status}"
   }
 
-  if ! mkdir "${build_lock}" 2>/dev/null; then
+  if ! mkdir -m 700 "${build_lock}" 2>/dev/null; then
     echo "canonical parser build root is already locked: ${build_lock}" >&2
     exit 2
   fi
@@ -429,7 +429,7 @@ build_host() (
     echo "canonical parser build root already exists: ${build_root}" >&2
     exit 2
   fi
-  mkdir "${build_root}"
+  mkdir -m 700 "${build_root}"
   build_root_created=1
 
   nimble_dir_owned="${build_root}/nimble-dir"
