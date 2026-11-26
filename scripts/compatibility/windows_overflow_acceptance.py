@@ -282,6 +282,40 @@ def validate_pytest(path):
             "expected 15 successful ordinary Python overflow cases, no skips")
 
 
+def pilot_peak_allocated_bytes(path):
+    """Parse storage.jsonl and return peak allocated_bytes, failing closed on errors."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        raise EvidenceError("STORAGE") from None
+    allocated = []
+    for line in lines:
+        if not line.strip():
+            raise EvidenceError("STORAGE")
+        try:
+            sample = json.loads(line)
+        except ValueError:
+            raise EvidenceError("STORAGE") from None
+        if not isinstance(sample, dict) or "physical_error" in sample:
+            raise EvidenceError("STORAGE")
+        if "allocated_bytes" in sample:
+            value = sample["allocated_bytes"]
+            if type(value) is not int or value < 0:
+                raise EvidenceError("STORAGE")
+            allocated.append(value)
+        elif "physical_volumes" in sample:
+            if not isinstance(sample["physical_volumes"], list):
+                raise EvidenceError("STORAGE")
+        else:
+            raise EvidenceError("STORAGE")
+    if not allocated:
+        raise EvidenceError("STORAGE")
+    peak = max(allocated)
+    if peak >= storage.STOP_BYTES:
+        raise EvidenceError("STORAGE")
+    return peak
+
+
 def pilot_projected_seconds(timings):
     """Conservative full-workload forecast; unmeasured legacy work keeps its reserve."""
     required = ("toolchain", "parser", "runtime-venv", "pytest-install", "normal-build", "normal-package",
@@ -669,13 +703,7 @@ class Acceptance:
         projected = pilot_projected_seconds(timings)
         if projected + FULL_CLEANUP_RESERVE_SECONDS >= FULL_EARLY_STOP_SECONDS:
             raise EvidenceError("TIME_BUDGET")
-        samples = [json.loads(line) for line in (self.output / "storage.jsonl").read_text().splitlines()]
-        if not samples or any(not isinstance(sample.get("allocated_bytes"), int)
-                              for sample in samples):
-            raise EvidenceError("STORAGE")
-        peak_allocated = max(sample["allocated_bytes"] for sample in samples)
-        if peak_allocated >= storage.STOP_BYTES:
-            raise EvidenceError("STORAGE")
+        peak_allocated = pilot_peak_allocated_bytes(self.output / "storage.jsonl")
         write(self.output / "pilot.json", {
             "source": json.loads((self.output / "source.json").read_text()),
             "probe_counts": {"ordinary": 1, "rust": 1, "python": 1, "old_wheel": 1},

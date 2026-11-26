@@ -16,7 +16,7 @@ import windows_overflow_acceptance as acceptance
 
 from windows_overflow_acceptance import (
     STAGES, PHASES, PILOT_PHASES, OLD_WHEEL_NAME, OLD_WHEEL_SHA256, EvidenceError,
-    pilot_projected_seconds, projected_full_time, validate_pilot_admission,
+    pilot_peak_allocated_bytes, pilot_projected_seconds, projected_full_time, validate_pilot_admission,
     public_result, publish,
     require_runner, validate_python_report,
     validate_pytest, validate_rust_log,
@@ -554,6 +554,34 @@ class AcceptanceGuardTests(unittest.TestCase):
                 owner.run("pilot-ordinary-case", ["pytest"], timing_output=timing)
             self.assertIn("--timing-output", seen[0])
             self.assertIn(str(timing), seen[0])
+
+    def test_pilot_peak_allocated_bytes_accepts_physical_volumes_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "storage.jsonl"
+            records = [
+                {"allocated_bytes": 1_000_000, "roots": []},
+                {"physical_volumes": [{"volume_id": 1, "free_bytes": 10_000_000_000}]},
+                {"allocated_bytes": 3_276_000_000, "roots": []},
+                {"physical_volumes": [{"volume_id": 2, "free_bytes": 9_000_000_000}]},
+            ]
+            log.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+            self.assertEqual(pilot_peak_allocated_bytes(log), 3_276_000_000)
+
+            for bad_lines in (
+                [],
+                [json.dumps({"physical_volumes": []})],
+                [json.dumps({"allocated_bytes": True})],
+                [json.dumps({"allocated_bytes": -1})],
+                [json.dumps({"allocated_bytes": acceptance.storage.STOP_BYTES})],
+                [json.dumps({"allocated_bytes": 100}), json.dumps({"physical_error": "boom"})],
+                [json.dumps({"allocated_bytes": 100}), json.dumps({"physical_volumes": "bad"})],
+                [json.dumps({"allocated_bytes": 100}), json.dumps({"unexpected": 1})],
+                [json.dumps({"allocated_bytes": 100}), "not-json"],
+            ):
+                log.write_text("\n".join(bad_lines) + ("\n" if bad_lines else ""), encoding="utf-8")
+                with self.subTest(bad_lines=bad_lines), self.assertRaises(EvidenceError) as caught:
+                    pilot_peak_allocated_bytes(log)
+                self.assertEqual(caught.exception.code, "STORAGE")
 
 
 if __name__ == "__main__":
