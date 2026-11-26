@@ -16,6 +16,7 @@ import issue681_hosted_parser_seed as parser_seed
 import issue681_hosted_parser_tools as parser_tools
 import issue681_hosted_vendor_consume as vendor_consume
 import issue681_hosted_vendor_fetch as vendor_fetch
+import issue681_hosted_storage as scoped_storage
 
 
 ERROR = "PUBLIC_ACQUIRE"
@@ -52,7 +53,8 @@ def _remove_owned(path, identity):
     shutil.rmtree(path)
 
 
-def acquire_all(workspace: Path, task_parent: Path, home_parent: Path):
+def acquire_all(workspace: Path, task_parent: Path, home_parent: Path, *,
+                manifest: scoped_storage.Manifest):
     """Return one complete private input set or a fixed public failure."""
     owned = []
     try:
@@ -62,6 +64,10 @@ def acquire_all(workspace: Path, task_parent: Path, home_parent: Path):
         _owned_empty(task_parent)
         _owned_empty(home_parent)
         require(Path.home() in home_parent.parents and
+                type(manifest) is scoped_storage.Manifest and
+                manifest.workspace == workspace and
+                task_parent.is_relative_to(manifest.task_parent) and
+                home_parent.is_relative_to(manifest.home_parent) and
                 all(left != right and left not in right.parents and
                     right not in left.parents
                     for index, left in enumerate((workspace, task_parent,
@@ -80,7 +86,8 @@ def acquire_all(workspace: Path, task_parent: Path, home_parent: Path):
             _owned_empty(path)
             dirs[name] = path
 
-        acquired = source.acquire_sources(workspace, dirs["sources"])
+        acquired = source.acquire_sources(workspace, dirs["sources"],
+                                          manifest=manifest)
         guard = acquired["guard"]
         require(type(guard) is capacity.HostStorageGuard)
         guard()

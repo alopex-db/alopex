@@ -118,6 +118,8 @@ class PrivateReleaseTests(unittest.TestCase):
                 return {"public": output, "guard": guard, "finish": finish}
 
             with mock.patch.object(release.job.Path, "home", return_value=home_base), \
+                 mock.patch.object(release.qualify.scoped_storage,
+                                   "make_manifest", return_value=object()), \
                  mock.patch.object(release.qualify, "REPO", workspace), \
                  mock.patch.object(release, "_source",
                                    side_effect=lambda *_: calls.append("source")), \
@@ -131,7 +133,7 @@ class PrivateReleaseTests(unittest.TestCase):
                                        ({"case": release.job.rust.CASE,
                                          "outcome": "passed"}, 0))), \
                  mock.patch.object(release.job.acquire, "acquire_all",
-                                   side_effect=lambda *_: (calls.append("acquire") or
+                                   side_effect=lambda *_, **__: (calls.append("acquire") or
                                                           {"guard": guard})), \
                  mock.patch.object(release.job.build_join, "build",
                                    side_effect=build), \

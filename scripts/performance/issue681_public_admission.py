@@ -138,11 +138,17 @@ def cgroup_allocation(root, relative, selected, *, pid=None):
     require(set(selected).issubset(effective))
     directory = current
     while True:
-        fields = (directory / "cpu.max").read_text().split()
-        require(len(fields) == 2 and fields[1].isdecimal() and int(fields[1]) > 0)
-        if fields[0] != "max":
-            require(fields[0].isdecimal() and
-                    int(fields[0]) >= len(selected) * int(fields[1]))
+        cpu_max = directory / "cpu.max"
+        if cpu_max.is_file():
+            fields = cpu_max.read_text().split()
+            require(len(fields) == 2 and fields[1].isdecimal() and int(fields[1]) > 0)
+            if fields[0] != "max":
+                require(fields[0].isdecimal() and
+                        int(fields[0]) >= len(selected) * int(fields[1]))
+        elif directory != root:
+            parent_control = directory.parent / "cgroup.subtree_control"
+            require(parent_control.is_file() and
+                    "cpu" not in parent_control.read_text().split())
         if directory == root:
             break
         directory = directory.parent
@@ -153,9 +159,14 @@ def cgroup_allocation(root, relative, selected, *, pid=None):
         require(len(parts) == 2 and parts[0] not in counters and
                 parts[1].isdecimal())
         counters[parts[0]] = int(parts[1])
-    require("nr_throttled" in counters)
+    if (current / "cpu.max").is_file():
+        require("nr_throttled" in counters)
+        throttled = counters["nr_throttled"]
+    else:
+        require("usage_usec" in counters)
+        throttled = counters.get("nr_throttled", 0)
     mapped = current.relative_to(root)
-    return "/" + ("/".join(mapped.parts) if mapped.parts else ""), counters["nr_throttled"]
+    return "/" + ("/".join(mapped.parts) if mapped.parts else ""), throttled
 
 
 def current_allocation(selected):

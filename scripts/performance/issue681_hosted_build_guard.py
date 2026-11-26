@@ -14,24 +14,27 @@ def require(value):
 
 
 class HostStorageGuard:
-    """Reopen all visible mounts on each call; expose no host diagnostics."""
+    """Recount admitted Alopex roots on each call; expose no host diagnostics."""
 
-    def __init__(self, workspace, *, scanner=None, stat_fn=os.stat):
+    def __init__(self, workspace, *, manifest=None, scanner=None,
+                 stat_fn=os.stat):
         try:
             require(isinstance(workspace, Path) and workspace.is_absolute() and
                     workspace.is_dir() and not workspace.is_symlink() and
                     workspace.resolve(strict=True) == workspace and
                     workspace.stat().st_uid == os.geteuid())
             self.device = stat_fn(workspace).st_dev
-            self.scanner = scanner or qualify.mounted_allocation
+            require(manifest is not None or scanner is not None)
+            self.manifest = manifest
+            self.scanner = scanner or (lambda: qualify.mounted_allocation(manifest))
             baseline, available = self._sample()
             self.devices = frozenset(available)
             require(baseline + qualify.BUILD_BYTES + qualify.RESERVE_BYTES <
                     qualify.STOP_BYTES and
                     baseline + qualify.BUILD_BYTES + qualify.RESERVE_BYTES <
                     qualify.CEILING_BYTES and
-                    available[self.device] >
-                    qualify.BUILD_BYTES + qualify.RESERVE_BYTES)
+                    all(free > qualify.BUILD_BYTES + qualify.RESERVE_BYTES
+                        for free in available.values()))
             self.baseline = baseline
         except Exception:
             raise ValueError("PUBLIC_CAPACITY") from None
@@ -52,6 +55,7 @@ class HostStorageGuard:
                     used < self.baseline + qualify.BUILD_BYTES and
                     used + qualify.RESERVE_BYTES < qualify.STOP_BYTES and
                     used + qualify.RESERVE_BYTES < qualify.CEILING_BYTES and
-                    available[self.device] > qualify.RESERVE_BYTES)
+                    all(free > qualify.RESERVE_BYTES
+                        for free in available.values()))
         except Exception:
             raise ValueError("PUBLIC_CAPACITY") from None

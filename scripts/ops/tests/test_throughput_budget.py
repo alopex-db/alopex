@@ -1,0 +1,149 @@
+"""Focused checks for private complete-workload checkpoint decisions."""
+
+import unittest
+
+from scripts.ops.throughput_budget import (Budget, Stage, evaluate,
+                                           evaluate_release, RELEASE_STOP_BYTES)
+
+
+def plan(**overrides):
+    values = dict(
+        stages=(Stage("paired-sql", 12, 4, 4, 40.0, 2),
+                Stage("audit-cases", 2, 0, 2, 10.0)),
+        elapsed_seconds=50.0,
+        deadline_seconds=300.0,
+        setup_remaining_seconds=10.0,
+        audit_seconds=10.0,
+        cleanup_seconds=10.0,
+        margin_seconds=20.0,
+        conservative_fraction=0.5,
+        storage_used_bytes=100,
+        storage_remaining_peak_bytes=50,
+        storage_cap_bytes=1000,
+    )
+    values.update(overrides)
+    return Budget(**values)
+
+
+class ThroughputBudgetTests(unittest.TestCase):
+    def test_complete_remaining_work_fits_with_margin(self):
+        result = evaluate(plan())
+        self.assertTrue(result.proceed)
+        self.assertEqual(result.code, "READY")
+        self.assertEqual(result.private_diagnostics["projected_finish_seconds"], 280.0)
+
+    def test_slower_observed_rate_stops_before_next_group(self):
+        stages = (Stage("paired-sql", 12, 4, 2, 40.0, 2),
+                  Stage("audit-cases", 2, 0, 2, 10.0))
+        result = evaluate(plan(stages=stages))
+        self.assertFalse(result.proceed)
+        self.assertEqual(result.code, "TIME_BUDGET")
+
+    def test_incomplete_pair_fails_closed_even_when_time_fits(self):
+        stages = (Stage("paired-sql", 12, 3, 4, 40.0, 2),)
+        result = evaluate(plan(stages=stages))
+        self.assertEqual(result.code, "INCOMPLETE_GROUP")
+        self.assertFalse(result.proceed)
+
+    def test_homogeneous_partial_group_checkpoint(self):
+        group = Stage("paired-batch", 2, 1, 2, 20.0, 2)
+        self.assertEqual(evaluate(plan(stages=(group,))).code, "INCOMPLETE_GROUP")
+        checkpoint = Stage("paired-batch", 2, 1, 2, 20.0, 2, 1)
+        self.assertEqual(evaluate(plan(stages=(checkpoint,))).code, "READY")
+        slow = Stage("paired-batch", 2, 1, 2, 1000.0, 2, 1)
+        self.assertEqual(evaluate(plan(stages=(slow,))).code, "TIME_BUDGET")
+        completed = Stage("paired-batch", 2, 2, 2, 20.0, 2)
+        self.assertTrue(evaluate(plan(stages=(completed,))).proceed)
+
+    def test_distinct_perf_test_rates_do_not_average(self):
+        first = Stage("perf_mixed_point_latency", 1, 1, 1, 10.0)
+        slow_second = Stage("perf_sequential_throughput_and_amplification",
+                            1, 0, 1, 1000.0)
+        self.assertEqual(evaluate(plan(stages=(first, slow_second))).code,
+                         "TIME_BUDGET")
+        fast_second = Stage("perf_sequential_throughput_and_amplification",
+                            1, 0, 1, 10.0)
+        self.assertEqual(evaluate(plan(stages=(first, fast_second))).code,
+                         "READY")
+
+    def test_missing_or_zero_rate_fails_closed(self):
+        for units, seconds in ((0, 10.0), (2, 0.0), (2, float("nan"))):
+            with self.subTest(units=units, seconds=seconds):
+                stages = (Stage("paired-sql", 12, 0, units, seconds, 2),)
+                self.assertEqual(evaluate(plan(stages=stages)).code, "RATE_MISSING")
+
+    def test_storage_and_deadline_edges_stop(self):
+        self.assertEqual(evaluate(plan(storage_remaining_peak_bytes=900)).code,
+                         "STORAGE_BUDGET")
+        self.assertEqual(evaluate(plan(storage_used_bytes=1100)).code,
+                         "STORAGE_BUDGET")
+        self.assertEqual(evaluate(plan(deadline_seconds=280.0)).code,
+                         "TIME_BUDGET")
+
+    def test_invalid_manifest_or_margin_is_rejected(self):
+        self.assertEqual(evaluate(plan(margin_seconds=0.0)).code, "INVALID_PLAN")
+        self.assertEqual(evaluate(plan(stages=(Stage("x", 3, 0, 2, 1.0, 2),))).code,
+                         "INVALID_PLAN")
+        self.assertEqual(evaluate(plan(stages=(Stage("x", 2, 0, 2, 1.0),
+                                               Stage("x", 2, 0, 2, 1.0)))).code,
+                         "INVALID_PLAN")
+        self.assertEqual(evaluate(plan(stages=42)).code, "INVALID_PLAN")
+        self.assertEqual(evaluate(plan(deadline_seconds=10**1000)).code,
+                         "INVALID_PLAN")
+        for checkpoint_size in (0, -1, 3, 4, True):
+            with self.subTest(checkpoint_size=checkpoint_size):
+                stage = Stage("pair", 2, 0, 2, 10.0, 2, checkpoint_size)
+                self.assertEqual(evaluate(plan(stages=(stage,))).code,
+                                 "INVALID_PLAN")
+
+    def test_observation_overflow_fails_closed(self):
+        huge = Stage("overflow", 2, 0, 10**1000, 1.0)
+        self.assertEqual(evaluate(plan(stages=(huge,))).code, "RATE_MISSING")
+        tiny = Stage("overflow", 2, 0, 1, 1e-320)
+        self.assertEqual(evaluate(plan(stages=(tiny,))).code, "RATE_MISSING")
+
+    def test_release_host_checks_fixed_stop_and_physical_reserve(self):
+        budget = plan(storage_cap_bytes=RELEASE_STOP_BYTES)
+        self.assertEqual(evaluate_release(budget, physical_free_bytes=152,
+                                          physical_reserve_bytes=100).code,
+                         "READY")
+        self.assertEqual(evaluate_release(budget, physical_free_bytes=150,
+                                          physical_reserve_bytes=100).code,
+                         "PHYSICAL_BUDGET")
+        stop = plan(storage_cap_bytes=RELEASE_STOP_BYTES,
+                    storage_used_bytes=RELEASE_STOP_BYTES - 50)
+        self.assertEqual(evaluate_release(stop, physical_free_bytes=1000,
+                                          physical_reserve_bytes=100).code,
+                         "STORAGE_BUDGET")
+        wrong_cap = plan(storage_cap_bytes=50_000_000_000)
+        self.assertEqual(evaluate_release(wrong_cap, physical_free_bytes=1000,
+                                          physical_reserve_bytes=100).code,
+                         "INVALID_PLAN")
+
+    def test_release_host_rejects_unmeasured_and_slow_plans(self):
+        budget = plan(storage_cap_bytes=RELEASE_STOP_BYTES)
+        for free, reserve in ((None, 100), (True, 100), (1000, 0),
+                              (1000, False)):
+            with self.subTest(free=free, reserve=reserve):
+                self.assertEqual(evaluate_release(
+                    budget, physical_free_bytes=free,
+                    physical_reserve_bytes=reserve).code, "INVALID_PLAN")
+        slow = plan(storage_cap_bytes=RELEASE_STOP_BYTES,
+                    deadline_seconds=280.0)
+        self.assertEqual(evaluate_release(slow, physical_free_bytes=1000,
+                                          physical_reserve_bytes=100).code,
+                         "TIME_BUDGET")
+        missing_rate = plan(storage_cap_bytes=RELEASE_STOP_BYTES,
+                            stages=(Stage("test", 1, 0, 0, 10.0),))
+        self.assertEqual(evaluate_release(missing_rate, physical_free_bytes=1000,
+                                          physical_reserve_bytes=100).code,
+                         "INVALID_PLAN")
+        incomplete = plan(storage_cap_bytes=RELEASE_STOP_BYTES,
+                          stages=(Stage("pair", 2, 1, 2, 10.0, 2),))
+        self.assertEqual(evaluate_release(incomplete, physical_free_bytes=1000,
+                                          physical_reserve_bytes=100).code,
+                         "INVALID_PLAN")
+
+
+if __name__ == "__main__":
+    unittest.main()
