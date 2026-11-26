@@ -228,6 +228,25 @@ class WatchedCargoFetchTests(unittest.TestCase):
                         sources, cargo_home2, scratch2, FakeGuard(), diag=fail_diag)
             self.assertEqual(fail_diag.get("code"), "FETCH_VENDOR_EXIT")
 
+    def test_normalize_prunes_empty_dirs_and_matches_verify_tree(self):
+        import issue681_hosted_vendor_tree as vendor_tree
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            vendor = root / "vendor"
+            vendor.mkdir(mode=0o700)
+            crate = vendor / "demo-0.1.0"
+            (crate / "src").mkdir(parents=True, mode=0o755)
+            (crate / "src" / "lib.rs").write_bytes(b"pub fn ok() {}\n")
+            (crate / "empty-dir" / "nested-empty").mkdir(parents=True, mode=0o755)
+            guard = FakeGuard()
+            tree_sha, mode_sha = cargo_fetch._normalize_and_digest(
+                vendor, guard, deadline=cargo_fetch.time.monotonic() + 30)
+            self.assertFalse((crate / "empty-dir").exists())
+            verified = vendor_tree.verify_tree(
+                vendor, guard, mode_sha, expected_tree_sha256=tree_sha)
+            self.assertEqual(verified, tree_sha)
+
 
 if __name__ == "__main__":
     unittest.main()

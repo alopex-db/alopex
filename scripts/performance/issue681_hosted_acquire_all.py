@@ -39,6 +39,13 @@ def require(value):
         raise ValueError(ERROR)
 
 
+def _force_guard(guard):
+    if isinstance(guard, capacity.HostStorageGuard) and hasattr(guard, "min_interval_seconds"):
+        guard(force=True)
+    else:
+        guard()
+
+
 def _detail_code(exc, cargo_diag=None):
     if isinstance(cargo_diag, dict):
         code = cargo_diag.get("code")
@@ -137,12 +144,12 @@ def acquire_all(workspace: Path, task_parent: Path, home_parent: Path, *,
                                           manifest=manifest)
         guard = acquired["guard"]
         require(type(guard) is capacity.HostStorageGuard)
-        guard()
+        _force_guard(guard)
         emit("sources", "passed")
 
         begin("nim_fetch")
         nim_archive.fetch_archive(dirs["nim"], guard)
-        guard()
+        _force_guard(guard)
         emit("nim_fetch", "passed")
 
         begin("nim_extract")
@@ -152,13 +159,13 @@ def acquire_all(workspace: Path, task_parent: Path, home_parent: Path, *,
         begin("parser_tools")
         tools = parser_tools.verify_tools(extracted, guard)
         require(type(tools) is dict and set(tools) == {"nim", "nimble"})
-        guard()
+        _force_guard(guard)
         emit("parser_tools", "passed")
 
         begin("parser_seed")
         seed = parser_seed.acquire_seed(dirs["seed"], guard,
                                         acquired["git_env"])
-        guard()
+        _force_guard(guard)
         emit("parser_seed", "passed")
 
         begin("parser_build")
@@ -167,7 +174,7 @@ def acquire_all(workspace: Path, task_parent: Path, home_parent: Path, *,
             tools["nimble"], seed, dirs["parser-build"],
             dirs["parser-stage"], guard, acquired["git_binary"],
             acquired["git_env"])
-        guard()
+        _force_guard(guard)
         emit("parser_build", "passed")
 
         if vendor_mode == "cargo_vendor_locked":
@@ -182,18 +189,18 @@ def acquire_all(workspace: Path, task_parent: Path, home_parent: Path, *,
             vendor = cargo_fetch.fetch_and_stage_vendor(
                 acquired["sources"], cargo_home, dirs["vendor-zip"], guard,
                 timeout=remaining_timeout, diag=cargo_diag)
-            guard()
+            _force_guard(guard)
             emit("cargo_vendor", "passed")
         else:
             begin("vendor_fetch")
             archive = vendor_fetch.fetch_vendor(dirs["vendor-zip"], guard)
-            guard()
+            _force_guard(guard)
             emit("vendor_fetch", "passed")
 
             begin("vendor_install")
             vendor = vendor_consume.install_vendor(
                 archive, acquired["sources"], cargo_home, guard)
-            guard()
+            _force_guard(guard)
             emit("vendor_install", "passed")
 
         return {"guard": guard, "sources": acquired["sources"],

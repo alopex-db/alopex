@@ -99,6 +99,7 @@ def _normalize_and_digest(vendor_root: Path, guard, *, deadline=None,
             last_guard = time.monotonic()
 
     check_progress(force=True)
+    seen_dirs = []
     pending = [vendor_root]
     while pending:
         current = pending.pop()
@@ -106,6 +107,8 @@ def _normalize_and_digest(vendor_root: Path, guard, *, deadline=None,
         require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode) and
                 info.st_uid == os.geteuid())
         os.chmod(current, 0o700)
+        if current != vendor_root:
+            seen_dirs.append(current)
         visited += 1
         check_progress()
         with os.scandir(current) as entries:
@@ -117,6 +120,7 @@ def _normalize_and_digest(vendor_root: Path, guard, *, deadline=None,
                 if stat.S_ISDIR(einfo.st_mode):
                     pending.append(path)
                 elif stat.S_ISREG(einfo.st_mode):
+                    require(einfo.st_nlink == 1)
                     files += 1
                     visited += 1
                     require(files <= MAX_FILES and 0 <= einfo.st_size <= MAX_FILE_BYTES)
@@ -133,6 +137,13 @@ def _normalize_and_digest(vendor_root: Path, guard, *, deadline=None,
                 else:
                     require(False)
     require(files > 0)
+    # Prune empty directories bottom-up so vendor_root matches verify_tree()'s
+    # directories == expected_dirs invariant even if a crate ships empty subdirs.
+    for directory in sorted(seen_dirs, key=lambda p: len(p.parts), reverse=True):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
     check_progress(force=True)
     tree = hashlib.sha256()
     for name, (size, sha256) in sorted(rows.items()):
