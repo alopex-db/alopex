@@ -36,9 +36,13 @@ class NimToolchainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "nim.zip"
             with (mock.patch.object(toolchain.urllib.request, "urlopen",
-                                    return_value=Response(b"archive")),
+                                    return_value=Response(b"archive")) as urlopen,
                   mock.patch.object(toolchain, "SHA256", hashlib.sha256(b"archive").hexdigest())):
                 toolchain.download(output)
+            request = urlopen.call_args[0][0]
+            self.assertIsInstance(request, toolchain.urllib.request.Request)
+            self.assertEqual(request.full_url, toolchain.URL)
+            self.assertEqual(request.get_header("User-agent"), toolchain.USER_AGENT)
             self.assertEqual(output.read_bytes(), b"archive")
             with mock.patch.object(toolchain.urllib.request, "urlopen",
                                    return_value=Response(b"wrong")):

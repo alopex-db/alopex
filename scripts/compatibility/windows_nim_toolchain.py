@@ -22,6 +22,7 @@ import zipfile
 REPO = Path(__file__).resolve().parents[2]
 SETUP = REPO / ".github/actions/setup-nim-parser-toolchain/setup.sh"
 URL = "https://nim-lang.org/download/nim-2.2.10_x64.zip"
+USER_AGENT = "alopex-windows-nim-bootstrap/1.0"
 SHA256 = "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f"
 MAX_DOWNLOAD = 40_000_000
 MAX_MEMBER = 128_000_000
@@ -42,7 +43,8 @@ def download(archive: Path) -> None:
     digest = hashlib.sha256()
     size = 0
     try:
-        with urllib.request.urlopen(URL, timeout=30) as response, archive.open("xb") as output:
+        request = urllib.request.Request(URL, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(request, timeout=60) as response, archive.open("xb") as output:
             while chunk := response.read(1024 * 1024):
                 size += len(chunk)
                 if size > MAX_DOWNLOAD:
