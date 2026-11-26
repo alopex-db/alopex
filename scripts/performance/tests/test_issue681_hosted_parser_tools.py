@@ -141,6 +141,46 @@ class HostedParserToolsTest(unittest.TestCase):
                     tools.verify_tools(output, lambda: None)
             self.assertFalse((root / "tools-probe.partial").exists())
 
+    def test_build_pinned_nimble_replaces_bundled_tool_and_cleans_scratch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            output = self.fixture(root, nimble_sha="0" * 40)
+            git_env = {"HOME": str(root)}
+
+            def fake_git(args, cwd, guard, log, env):
+                src = Path(args[-1])
+                (src / "src").mkdir(parents=True)
+                (src / "src/nimble.nim").write_text("echo 1\n")
+
+            def fake_run(argv, **kwargs):
+                if "rev-parse" in argv:
+                    return mock.Mock(returncode=0, stdout=(tools.NIMBLE_SHA + "\n").encode())
+                return mock.Mock(returncode=0, stdout=b"")
+
+            real_popen = tools.subprocess.Popen
+
+            def fake_popen(argv, **kwargs):
+                if "--version" in argv:
+                    return real_popen(argv, **kwargs)
+                out_arg = next(a for a in argv if a.startswith("-o:"))
+                out_path = Path(out_arg[3:])
+                out_path.write_text(
+                    "#!/bin/sh\nprintf 'nimble v0.22.3 compiled\\ngit hash: " +
+                    tools.NIMBLE_SHA + "\\n'\n")
+                proc = mock.Mock(pid=9999, returncode=0)
+                proc.poll.return_value = 0
+                return proc
+
+            with mock.patch.object(tools.acquire_source, "_trusted_git"), \
+                 mock.patch.object(tools.acquire_source, "_git", side_effect=fake_git), \
+                 mock.patch.object(tools.subprocess, "run", side_effect=fake_run), \
+                 mock.patch.object(tools.subprocess, "Popen", side_effect=fake_popen):
+                nimble = tools.build_pinned_nimble(output, lambda: None, git_env)
+            self.assertEqual(nimble, output / "nim-2.2.10/bin/nimble")
+            self.assertFalse((root / "nimble-build.partial").exists())
+            verified = tools.verify_tools(output, lambda: None)
+            self.assertEqual(verified["nimble"], nimble)
+
 
 if __name__ == "__main__":
     unittest.main()

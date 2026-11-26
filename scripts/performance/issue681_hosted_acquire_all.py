@@ -157,7 +157,18 @@ def acquire_all(workspace: Path, task_parent: Path, home_parent: Path, *,
         emit("nim_extract", "passed")
 
         begin("parser_tools")
-        tools = parser_tools.verify_tools(extracted, guard)
+        try:
+            tools = parser_tools.verify_tools(extracted, guard)
+        except ValueError:
+            if vendor_mode != "cargo_vendor_locked":
+                raise
+            begin("nimble_build")
+            parser_tools.build_pinned_nimble(extracted, guard,
+                                             acquired["git_env"])
+            _force_guard(guard)
+            emit("nimble_build", "passed")
+            begin("parser_tools")
+            tools = parser_tools.verify_tools(extracted, guard)
         require(type(tools) is dict and set(tools) == {"nim", "nimble"})
         _force_guard(guard)
         emit("parser_tools", "passed")
