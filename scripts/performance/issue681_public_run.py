@@ -38,8 +38,13 @@ def _run_mode(*, pins, asset_locations, work, export, finish, private_roots,
               admission_dir, additional_bytes, admit_stage, admit_case,
               complete_case,
               inventory_roots=(), case_runner=case.run_case,
-              host_guard=None):
+              host_guard=None, diag=None):
     """Collect, audit and export exactly one completion mode in this job."""
+    def mark(code):
+        if isinstance(diag, dict):
+            diag["code"] = code
+
+    mark("MEASURE_ASSETS")
     pair._pins(pins)
     require(finish in ("commit", "rollback") and
             type(asset_locations) is dict and set(asset_locations) == set(pair.ARMS) and
@@ -63,8 +68,10 @@ def _run_mode(*, pins, asset_locations, work, export, finish, private_roots,
     stage_rows = None
     for position, (rows, trial, arm) in enumerate(pair._order()):
         if rows != stage_rows:
+            mark("MEASURE_STAGE_ADMIT")
             require(admit_stage(rows) is True)
             stage_rows = rows
+        mark("MEASURE_CASE_ADMIT")
         require(admit_case(rows, trial, arm) is True)
         root = work / f"case-{position:02d}"
         root.mkdir(mode=0o700)
@@ -81,14 +88,18 @@ def _run_mode(*, pins, asset_locations, work, export, finish, private_roots,
             inventory_roots=inventory_roots)
         if host_guard is not None:
             case_inputs["host_guard"] = host_guard
+        mark("MEASURE_CASE_RUN")
         report = case_runner(**case_inputs)
         require(type(report) is dict and report.get("status") == "measured")
+        mark("MEASURE_CASE_COMPLETE")
         require(complete_case(rows, trial, arm) is True)
+        mark("MEASURE_CASE_AUDIT")
         require(audit.audit_case(public, private, admitted[arm]["binary"],
                                  pins[arm], rows, trial, finish) == report)
         reports.append(report)
         locations.append({"arm": arm, "rows": rows, "trial": trial,
                           "public": public, "private": private})
+    mark("MEASURE_PAIR_WRITE")
     def independent_audit(value):
         return stage_audit.audit_stage(
             value, case_locations=locations, asset_locations=asset_locations,

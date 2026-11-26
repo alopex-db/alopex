@@ -28,10 +28,11 @@ def require(value):
         raise ValueError("PUBLIC_BUILD")
 
 
-def _write(path, content):
+def _write(path, content, *, mode=0o600):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                 getattr(os, "O_NOFOLLOW", 0), 0o600)
+                 getattr(os, "O_NOFOLLOW", 0), mode)
     with os.fdopen(fd, "wb") as stream:
+        os.fchmod(stream.fileno(), mode)
         stream.write(content)
         stream.flush()
         os.fsync(stream.fileno())
@@ -151,6 +152,8 @@ def _package(output, binary, library, example, *, source_commit, source_tree,
             results[mode] = result
     except Exception:
         raise ValueError("PUBLIC_BUILD") from None
+    if isinstance(diag, dict):
+        diag["code"] = "BUILD_PACKAGE_STAGE"
     source = {"commit": source_commit, "tree": source_tree,
               "profile": "release"}
     staged = Path(tempfile.mkdtemp(prefix=".hnsw-public-", dir=output.parent))
@@ -163,8 +166,9 @@ def _package(output, binary, library, example, *, source_commit, source_tree,
                                ("example", example)):
             target = destination / assets.FILES[role]
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            content = assets._read_file(original, 268_435_456)
-            _write(target, content)
+            content = assets._read_file(original, 268_435_456,
+                                        allow_hardlinks=(role == "binary"))
+            _write(target, content, mode=0o700 if role == "binary" else 0o600)
             copied[role] = _sha(content)
         receipt = {"schema": assets.RECEIPT_SCHEMA, "source": source,
                    "version": "0.8.17", "binary_sha256": copied["binary"],

@@ -38,11 +38,12 @@ def _unique(pairs):
     return result
 
 
-def _read_file(path, maximum):
+def _read_file(path, maximum, *, allow_hardlinks=False):
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
-        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+        require(stat.S_ISREG(info.st_mode) and
+                (allow_hardlinks or info.st_nlink == 1) and
                 info.st_uid == os.geteuid() and 0 < info.st_size <= maximum)
         raw = stream.read(maximum + 1)
         require(len(raw) == info.st_size)

@@ -21,6 +21,13 @@ MEASURE_DIAG_CODES = frozenset({
     "MEASURE_ADMIT",
     "MEASURE_ADMISSION_GATE",
     "MEASURE_RUN_CASES",
+    "MEASURE_ASSETS",
+    "MEASURE_STAGE_ADMIT",
+    "MEASURE_CASE_ADMIT",
+    "MEASURE_CASE_RUN",
+    "MEASURE_CASE_COMPLETE",
+    "MEASURE_CASE_AUDIT",
+    "MEASURE_PAIR_WRITE",
     "MEASURE_VERIFY_EXPORT",
 })
 
@@ -133,7 +140,7 @@ def measure(acquired, built, workspace: Path, measure_parent: Path,
             substage = "cases"
             substage_started = time.monotonic()
             _set_diag(measure_diag, "MEASURE_RUN_CASES")
-            result = run._run_mode_fixed(
+            run_kwargs = dict(
                 pins=built["pair"]["pins"], asset_locations=assets,
                 work=work, export=export, finish=finish,
                 private_roots=protected, admission_dir=admitted,
@@ -142,6 +149,9 @@ def measure(acquired, built, workspace: Path, measure_parent: Path,
                 admit_case=_guarded(guard, gate.admit_case),
                 complete_case=_guarded(guard, gate.complete_case),
                 inventory_roots=roots, host_guard=guard)
+            if measure_diag is not None:
+                run_kwargs["diag"] = measure_diag
+            result = run._run_mode_fixed(**run_kwargs)
             emit("cases", "passed")
             guard()
             substage = "verify_export"
