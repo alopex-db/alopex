@@ -713,6 +713,38 @@ class HostedStorageTests(unittest.TestCase):
                              "STORAGE_LINK_ROOT_HOME")
             self.assertEqual(output.read_text(), prior_env)
 
+    def test_snapshot_tolerates_vanished_ephemeral_child_and_scratch_not_anchors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            home, checkout, temp = self.layout(root)
+            scratch = root / "scratch"
+            manifest = storage.make_manifest(checkout, temp, home=home,
+                                             scratch=scratch)
+            ephemeral = temp / "ephemeral.o"
+            ephemeral.write_bytes(b"a" * 4096)
+            scratch.mkdir(mode=0o700)
+            original_lstat = Path.lstat
+
+            def vanish_ephemeral(path):
+                if path == ephemeral:
+                    ephemeral.unlink(missing_ok=True)
+                    raise FileNotFoundError(str(path))
+                return original_lstat(path)
+
+            with mock.patch.object(Path, "lstat", vanish_ephemeral):
+                total, _ = storage.snapshot(manifest)
+            self.assertGreaterEqual(total, 0)
+
+            def vanish_scratch(path):
+                if path == scratch:
+                    scratch.rmdir()
+                    raise FileNotFoundError(str(path))
+                return original_lstat(path)
+
+            with mock.patch.object(Path, "lstat", vanish_scratch):
+                total, _ = storage.snapshot(manifest)
+            self.assertGreaterEqual(total, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

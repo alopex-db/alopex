@@ -31,7 +31,8 @@ ALLOWED_DETAIL_CODES = frozenset({
     "PUBLIC_PARSER_INPUT",
     "PUBLIC_VENDOR",
     "TIME_BUDGET",
-}) | cargo_fetch.DIAG_CODES | parser_tools.NIMBLE_DIAG_CODES
+}) | (cargo_fetch.DIAG_CODES | parser_tools.NIMBLE_DIAG_CODES |
+      parser_seed.SEED_DIAG_CODES | parser_build.PARSER_DIAG_CODES)
 
 
 def require(value):
@@ -95,6 +96,8 @@ def acquire_all(workspace: Path, task_parent: Path, home_parent: Path, *,
     substage_started = started
     cargo_diag = {}
     nimble_diag = {}
+    seed_diag = {}
+    parser_diag = {}
 
     def emit(name, status, detail=None):
         if on_substage is not None:
@@ -177,17 +180,31 @@ def acquire_all(workspace: Path, task_parent: Path, home_parent: Path, *,
         emit("parser_tools", "passed")
 
         begin("parser_seed")
-        seed = parser_seed.acquire_seed(dirs["seed"], guard,
-                                        acquired["git_env"])
+        seed_diag.clear()
+        if on_substage is not None:
+            seed = parser_seed.acquire_seed(dirs["seed"], guard,
+                                            acquired["git_env"],
+                                            diag=seed_diag)
+        else:
+            seed = parser_seed.acquire_seed(dirs["seed"], guard,
+                                            acquired["git_env"])
         _force_guard(guard)
         emit("parser_seed", "passed")
 
         begin("parser_build")
-        parser = parser_build.build_parser(
-            acquired["sources"]["candidate"], tools["nim"],
-            tools["nimble"], seed, dirs["parser-build"],
-            dirs["parser-stage"], guard, acquired["git_binary"],
-            acquired["git_env"])
+        parser_diag.clear()
+        if on_substage is not None:
+            parser = parser_build.build_parser(
+                acquired["sources"]["candidate"], tools["nim"],
+                tools["nimble"], seed, dirs["parser-build"],
+                dirs["parser-stage"], guard, acquired["git_binary"],
+                acquired["git_env"], diag=parser_diag)
+        else:
+            parser = parser_build.build_parser(
+                acquired["sources"]["candidate"], tools["nim"],
+                tools["nimble"], seed, dirs["parser-build"],
+                dirs["parser-stage"], guard, acquired["git_binary"],
+                acquired["git_env"])
         _force_guard(guard)
         emit("parser_build", "passed")
 
@@ -223,7 +240,8 @@ def acquire_all(workspace: Path, task_parent: Path, home_parent: Path, *,
                 "git_env": acquired["git_env"], "task": task,
                 "cargo_home": cargo_home}
     except BaseException as exc:
-        emit(substage, "failed", _detail_code(exc, cargo_diag, nimble_diag))
+        emit(substage, "failed",
+             _detail_code(exc, cargo_diag, nimble_diag, seed_diag, parser_diag))
         for path, identity in reversed(owned):
             try:
                 _remove_owned(path, identity)

@@ -265,6 +265,48 @@ class HostedParserBuildTests(unittest.TestCase):
             self.assertFalse((paths["build"] / "lib").exists())
             self.assertFalse((paths["build"] / "archive").exists())
 
+    def test_verify_seed_uses_full_40_char_package_dirname_and_diag_codes(self):
+        seen_packages = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            seed_dir = root / "seed"
+            with mock.patch.object(builder.stage.manifest, "package_identities",
+                                   side_effect=lambda pkgs: seen_packages.extend(pkgs) or [1, 2]), \
+                 mock.patch.object(builder.stage.manifest, "metadata_identities",
+                                   return_value=[1, 2]):
+                builder._verify_seed(seed_dir, lambda: None)
+            self.assertEqual(
+                seen_packages,
+                [
+                    f"npeg=1.3.0={seed_dir}/pkgs2/npeg-1.3.0-{builder.seed_input.PINS['npeg']['commit']}",
+                    f"msgpack4nim=0.4.4={seed_dir}/pkgs2/msgpack4nim-0.4.4-{builder.seed_input.PINS['msgpack4nim']['commit']}",
+                ],
+            )
+            paths = self.fixture(root)
+            diag = {}
+            with mock.patch.object(builder.sys, "platform", "linux"), \
+                 mock.patch.object(builder.os, "uname",
+                                   return_value=mock.Mock(machine="x86_64")), \
+                 mock.patch.object(builder, "SCRATCH", root / "scratch"), \
+                 mock.patch.object(builder, "_trusted_executable"), \
+                 mock.patch.object(builder.capacity.HostStorageGuard,
+                                   "__call__", return_value=None), \
+                 mock.patch.object(builder.tools, "verify_tools",
+                                   return_value={"nim": paths["nim"],
+                                                 "nimble": paths["nimble"]}), \
+                 mock.patch.object(builder, "_verify_seed"), \
+                 mock.patch.object(builder.producer, "verify_source"), \
+                 mock.patch.object(builder, "_run",
+                                   side_effect=ValueError("PUBLIC_PARSER_INPUT")):
+                paths["guard"].manifest.scratch = root / "scratch"
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_PARSER_INPUT$"):
+                    builder.build_parser(
+                        paths["source"], paths["nim"], paths["nimble"],
+                        paths["seed"], paths["build"], paths["stage"],
+                        paths["guard"], builder.acquire.GIT, paths["git_env"],
+                        diag=diag)
+            self.assertEqual(diag, {"code": "PARSER_PROCESS"})
+
 
 if __name__ == "__main__":
     unittest.main()

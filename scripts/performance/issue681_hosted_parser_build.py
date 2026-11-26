@@ -28,6 +28,17 @@ SCRATCH = Path("/tmp/alopex-nim-parser-v0.8.17-contract-0.28.0-" + TARGET)
 BASH = Path("/usr/bin/bash")
 PYTHON = Path("/usr/bin/python3")
 READELF = Path("/usr/bin/readelf")
+PARSER_DIAG_CODES = frozenset({
+    "PARSER_ADMISSION",
+    "PARSER_PROCESS",
+    "PARSER_VERIFY",
+    "PARSER_STAGE",
+})
+
+
+def _set_diag(diag, code):
+    if isinstance(diag, dict) and code in PARSER_DIAG_CODES:
+        diag["code"] = code
 
 
 def require(value):
@@ -109,8 +120,7 @@ def _verify_seed(seed, guard):
     packages = []
     for name in ("npeg", "msgpack4nim"):
         pin = seed_input.PINS[name]
-        package = seed / "pkgs2" / (name + "-" + pin["version"] + "-" +
-                                    pin["commit"][:12])
+        package = seed / "pkgs2" / seed_input.package_dirname(name, pin)
         packages.append(name + "=" + pin["version"] + "=" + str(package))
     metadata = [name + "=" + str(seed / name)
                 for name in seed_input.PACKAGE_FILES]
@@ -141,12 +151,13 @@ def _private_failure(root, phase, error):
 
 
 def build_parser(source, nim, nimble, seed, build_parent, stage_parent,
-                 guard, git_binary, git_env):
+                 guard, git_binary, git_env, *, diag=None):
     """Return verified parser inputs for both arms, or fixed failure."""
     owned = []
     admitted = False
     phase = "parser-build-admission"
     try:
+        _set_diag(diag, "PARSER_ADMISSION")
         require(sys.platform == "linux" and os.uname().machine == "x86_64")
         require(type(guard) is capacity.HostStorageGuard)
         require(guard.manifest is not None and
@@ -208,20 +219,26 @@ def build_parser(source, nim, nimble, seed, build_parent, stage_parent,
             "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
         }
         phase = "parser-build-process"
+        _set_diag(diag, "PARSER_PROCESS")
         _run(argv, source, environment, build_parent / "build.private.log", guard)
         require(not SCRATCH.exists() and
                 not Path(str(SCRATCH) + ".lock").exists())
         guard()
         phase = "parser-build-verification"
+        _set_diag(diag, "PARSER_VERIFY")
         producer.verify_source(source, pin["commit"], pin["tree"],
                                pin["example"], pin["lock"],
                                git_binary=git_binary, git_env=git_env)
+        _set_diag(diag, "PARSER_STAGE")
         result = stage.stage_parser(archive_dir, stage_parent, guard)
         owned.append((result["parser_root"], _identity(result["parser_root"])))
         guard()
+        _set_diag(diag, "PARSER_VERIFY")
         require(producer.verify_parser(
             result["parser_record"], result["parser_root"],
             result["parser_library"]) == result["parser_record_sha256"])
+        if isinstance(diag, dict):
+            diag.pop("code", None)
         return result
     except BaseException as error:
         if admitted:

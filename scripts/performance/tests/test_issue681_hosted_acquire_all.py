@@ -54,7 +54,7 @@ class HostedAcquireAllTest(unittest.TestCase):
                 "git_binary": Path("/usr/bin/git"), "git_env": {"HOME": "sealed"}}
 
         def step(name, result):
-            def call(*args):
+            def call(*args, **_kwargs):
                 events.append(name)
                 self.assertIn(guard, args)
                 if name == fail:
@@ -217,6 +217,35 @@ class HostedAcquireAllTest(unittest.TestCase):
             self.assertIn(("nimble_install", "passed"), [(r[0], r[1]) for r in recorded])
             self.assertIn(("parser_tools", "passed"), [(r[0], r[1]) for r in recorded])
             self.assertEqual(result["vendor"], {"cargo_home": Path("/private/cargo")})
+
+    def test_seed_and_parser_build_report_allowlisted_detail_codes(self):
+        for target_step, expected_substage, expected_code in (
+            ("seed", "parser_seed", "SEED_VERIFY"),
+            ("parser", "parser_build", "PARSER_PROCESS"),
+        ):
+            with self.subTest(target=target_step), tempfile.TemporaryDirectory() as tmp:
+                workspace, task_parent, home_parent = self.layout(Path(tmp))
+                self.components()
+                recorded = []
+
+                def fail_with_diag(*_args, diag=None, code=expected_code):
+                    if isinstance(diag, dict):
+                        diag["code"] = code
+                    raise ValueError("PUBLIC_PARSER_INPUT")
+
+                patch_obj = (acquire.parser_seed if target_step == "seed"
+                             else acquire.parser_build)
+                patch_fn = "acquire_seed" if target_step == "seed" else "build_parser"
+                with mock.patch.object(patch_obj, patch_fn, side_effect=fail_with_diag):
+                    with self.assertRaisesRegex(ValueError, "^PUBLIC_ACQUIRE$"):
+                        acquire.acquire_all(
+                            workspace, task_parent, home_parent,
+                            manifest=self.manifest(workspace, task_parent, home_parent),
+                            vendor_mode="cargo_vendor_locked",
+                            on_substage=lambda *row: recorded.append(row),
+                            stage_budget_seconds=120)
+                self.assertEqual(recorded[-1][:3],
+                                 (expected_substage, "failed", expected_code))
 
 
 if __name__ == "__main__":

@@ -40,14 +40,18 @@ class HostedParserSeedTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             checkout, output, pin = self.fixture(Path(tmp))
             package = seed._copy_package(checkout, output, "npeg", pin)
+            self.assertEqual(
+                package.name,
+                f"npeg-1.3.0-{seed.PINS['npeg']['commit']}",
+            )
             files = sorted(p.relative_to(package).as_posix()
                            for p in package.rglob("*") if p.is_file())
-            self.assertEqual(files, ["nimblemeta.json", "npeg.nimble",
-                                     "src/nested/extra.nim", "src/npeg.nim"])
+            self.assertEqual(files, ["nested/extra.nim", "nimblemeta.json",
+                                     "npeg.nim", "npeg.nimble"])
             metadata = json.loads((package / "nimblemeta.json").read_bytes())
             self.assertEqual(metadata["metaData"]["files"],
-                             ["/npeg.nimble", "/src/nested/extra.nim",
-                              "/src/npeg.nim"])
+                             ["/nested/extra.nim", "/npeg.nim",
+                              "/npeg.nimble"])
             self.assertEqual(metadata["metaData"]["vcsRevision"],
                              seed.PINS["npeg"]["commit"])
 
@@ -127,7 +131,7 @@ class HostedParserSeedTest(unittest.TestCase):
                                    metadata):
                 self.assertEqual(len(manifest.package_identities(package_args)), 2)
                 self.assertEqual(len(manifest.metadata_identities(metadata_args)), 2)
-                source_file = npeg / "src/npeg.nim"
+                source_file = npeg / "npeg.nim"
                 source_file.write_text("changed\n")
                 with self.assertRaises(manifest.ParserAssetError):
                     manifest.package_identities(package_args)
@@ -176,8 +180,10 @@ class HostedParserSeedTest(unittest.TestCase):
 
             with mock.patch.object(seed.source, "_trusted_git"), \
                  mock.patch.object(seed, "_checkout", side_effect=fail_checkout):
+                diag = {}
                 with self.assertRaisesRegex(ValueError, "^PUBLIC_PARSER_INPUT$"):
-                    seed.acquire_seed(parent, lambda: None, git_env)
+                    seed.acquire_seed(parent, lambda: None, git_env, diag=diag)
+            self.assertEqual(diag, {"code": "SEED_GIT"})
             self.assertFalse((parent / "seed").exists())
             self.assertFalse((parent / "checkouts").exists())
             self.assertEqual((parent / "seed.private.log").read_text(),
