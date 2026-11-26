@@ -11,12 +11,26 @@ on:
         type: choice
         options: [curated, full]
         default: curated
+      hosted_capability:
+        description: 'Read-only hosted capability check for #712; no benchmark or peer'
+        required: false
+        type: boolean
+        default: false
+      selected_inventory:
+        description: 'Read-only selected runner diagnostic for #712; no peer or benchmark'
+        required: false
+        type: boolean
+        default: false
+      expected_inventory_sha:
+        description: 'Exact source SHA for one selected runner inventory'
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: parity-performance-${{ github.sha }}
+  group: parity-performance-${{ github.sha }}-${{ inputs.selected_inventory && 'inventory' || inputs.hosted_capability && 'capability' || 'measurement' }}
   cancel-in-progress: true
 
 env:
@@ -28,25 +42,79 @@ env:
   ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
 
 jobs:
+  hosted-capability:
+    if: ${{ inputs.hosted_capability && !inputs.selected_inventory }}
+    name: Inspect hosted parity capabilities
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check current-job kernel, counters and local container runtime
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          PARITY_ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: python3 -B scripts/performance/parity_hosted_capability.py
+
+  selected-inventory:
+    if: ${{ github.event.repository.private == true && inputs.selected_inventory && !inputs.hosted_capability && inputs.issue_number == '712' && inputs.expected_inventory_sha == github.sha }}
+    name: Inspect selected parity runner read-only
+    runs-on: [self-hosted, Linux, X64, alopex-performance]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_inventory_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Collect bounded owner-only inventory
+        id: collect
+        env:
+          EXPECTED_INVENTORY_SHA: ${{ inputs.expected_inventory_sha }}
+          PARITY_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 -B scripts/performance/parity_selected_inventory.py
+      - name: Seal private inventory and fixed status
+        id: seal
+        if: always()
+        env:
+          COLLECT_OUTCOME: ${{ steps.collect.outcome }}
+        run: python3 -B scripts/performance/parity_selected_inventory_seal.py
+      - name: Upload encrypted inventory and fixed status
+        if: always() && steps.seal.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-selected-runner-inventory
+          path: |
+            parity-selected-inventory-export/private-evidence.cms
+            parity-selected-inventory-export/public.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
   performance:
+    if: ${{ github.event.repository.private == true && !inputs.hosted_capability && !inputs.selected_inventory }}
     name: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }} parity performance
     runs-on: [self-hosted, Linux, X64, alopex-performance]
     timeout-minutes: 360
-    services:
-      postgres:
-        image: postgres:16.14
-        env:
-          POSTGRES_PASSWORD: alopex
-          POSTGRES_DB: alopex_perf
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d alopex_perf"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      - name: Admit selected parity run before construction
+        id: admission
+        env:
+          PARITY_SUITE: ${{ github.event_name == 'schedule' && 'full' || inputs.suite || 'curated' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ALOPEX_PARITY_PROFILE:-}" ]]; then
+            printf '::error::PARITY_ADMISSION_PROFILE_MISSING\n'
+            exit 1
+          fi
+          install -d -m 700 "$RUNNER_TEMP/parity-admission-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          python3 -B scripts/performance/parity_storage_reservation.py \
+            --profile "$ALOPEX_PARITY_PROFILE" \
+            --receipt "$RUNNER_TEMP/parity-admission-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/reservation.json"
+          # Storage reservation alone does not qualify the selected runtime or peer.
+          printf '::error::PARITY_ADMISSION_SECURITY_PEER_UNQUALIFIED\n'
+          exit 1
       - name: Prepare owner-only local diagnostics
         run: |
           if ! install -d -m 700 performance-debug performance-debug/sql performance-debug/hnsw >/dev/null 2>&1; then
@@ -274,7 +342,7 @@ jobs:
   retain-run-outcome:
     name: retain immutable performance run outcome
     needs: performance
-    if: ${{ always() }}
+    if: ${{ always() && github.event.repository.private == true && !inputs.hosted_capability && !inputs.selected_inventory }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

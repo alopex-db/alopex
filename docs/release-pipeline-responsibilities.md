@@ -84,6 +84,8 @@ job's owner.
 | `compatibility.yml:wasm` | Development CI | exact-SHA WASM compatibility result |
 | `issue681-hosted-qualify.yml:qualify` | Extended Verification | #681 Draft PR head and selected Linux host admission with a fixed qualification result, without performance measurement |
 | `parity-harness.yml:contract` | Development CI | benchmark harness contract result |
+| `parity-performance.yml:hosted-capability` | Extended Verification | read-only hosted kernel, counter and local runtime capability outcome with fixed failure codes |
+| `parity-performance.yml:selected-inventory` | Extended Verification | private-repository-only read-only selected runner inventory, encrypted private evidence and fixed public outcome; no performance acceptance |
 | `parity-performance.yml:performance` | Extended Verification | exact-SHA public v4 numeric JSON/Markdown and fixed run-status pair; private debug remains on the runner |
 | `parity-performance.yml:retain-run-outcome` | Extended Verification | runner-independent exact-SHA terminal run outcome |
 | `native-evidence-expiry.yml:recipients` | Extended Verification | scheduled read-only recipient certificate renewal-deadline check for candidate and frozen comparator |
