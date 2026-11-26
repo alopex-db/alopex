@@ -373,7 +373,6 @@ fn bulk_batches_find_periodic_cosine_nearest_neighbor() {
 #[cfg_attr(not(feature = "lane_ci"), ignore)]
 #[test]
 fn bulk_batch_restores_hnsw_degree_limits() {
-    let mut index = HnswIndex::create("test_index", base_config()).unwrap();
     let keys: Vec<Vec<u8>> = (0_u32..300).map(|id| id.to_be_bytes().to_vec()).collect();
     let vectors: Vec<[f32; 2]> = (0_u32..300)
         .map(|id| [id as f32 + 1.0, (id % 17) as f32 + 1.0])
@@ -384,17 +383,78 @@ fn bulk_batch_restores_hnsw_degree_limits() {
         .map(|(key, vector)| (key.as_slice(), vector.as_slice(), &[][..]))
         .collect();
 
-    index.upsert_batch(&entries).unwrap();
+    for staged in [false, true] {
+        let mut index = HnswIndex::create("test_index", base_config()).unwrap();
+        if staged {
+            let mut state = HnswTransactionState::default();
+            index.upsert_staged_batch(&entries, &mut state).unwrap();
+        } else {
+            index.upsert_batch(&entries).unwrap();
+        }
 
-    let graph = index.graph.read().unwrap();
-    for node in graph.nodes.iter().flatten() {
-        for (level, neighbors) in node.neighbors.iter().enumerate() {
-            let limit = if level == 0 {
-                graph.config.m * 2
-            } else {
-                graph.config.m
-            };
-            assert!(neighbors.len() <= limit);
+        let graph = index.graph.read().unwrap();
+        for node in graph.nodes.iter().flatten() {
+            for (level, neighbors) in node.neighbors.iter().enumerate() {
+                let limit = if level == 0 {
+                    graph.config.m * 2
+                } else {
+                    graph.config.m
+                };
+                assert!(neighbors.len() <= limit, "staged={staged}");
+            }
+        }
+    }
+}
+
+#[cfg_attr(not(feature = "lane_ci"), ignore)]
+#[test]
+fn bulk_batch_matches_full_scan_reference_across_chunks() {
+    let config = base_config().with_dimension(16);
+    let keys: Vec<_> = (0_u64..600).map(|id| id.to_be_bytes()).collect();
+    let vectors: Vec<Vec<f32>> = (0..600)
+        .map(|id| {
+            (0..16)
+                .map(|dimension| ((id * (dimension + 17) + dimension * 31) % 997) as f32)
+                .collect()
+        })
+        .collect();
+    let entries: Vec<_> = keys
+        .iter()
+        .zip(&vectors)
+        .map(|(key, vector)| (key.as_slice(), vector.as_slice(), &[][..]))
+        .collect();
+
+    let mut reference = HnswGraph::new(config.clone()).unwrap();
+    let mut previous = None;
+    for (position, (key, vector, metadata)) in entries.iter().enumerate() {
+        previous = Some(
+            reference
+                .insert_unpruned(key, vector, metadata, previous)
+                .unwrap(),
+        );
+        if (position + 1) % 256 == 0 {
+            reference.prune_overfull_neighbors();
+        }
+    }
+    reference.prune_overfull_neighbors();
+
+    for staged in [false, true] {
+        let mut index = HnswIndex::create("test_index", config.clone()).unwrap();
+        if staged {
+            let mut state = HnswTransactionState::default();
+            index.upsert_staged_batch(&entries, &mut state).unwrap();
+        } else {
+            index.upsert_batch(&entries).unwrap();
+        }
+        let actual = index.graph.read().unwrap();
+        assert_eq!(actual.nodes.len(), reference.nodes.len());
+        for node_id in 0..reference.nodes.len() {
+            let expected = reference.nodes[node_id].as_ref().unwrap();
+            let observed = actual.nodes[node_id].as_ref().unwrap();
+            assert_eq!(
+                observed.neighbors, expected.neighbors,
+                "staged={staged}, node={node_id}"
+            );
         }
     }
 }
