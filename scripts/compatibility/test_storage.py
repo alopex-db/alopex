@@ -159,6 +159,31 @@ class StorageTest(unittest.TestCase):
             with self.assertRaisesRegex(storage.StopFailureError, "STOP_FAILURE"):
                 storage._main_with_args(args)
 
+    def test_windows_tree_stop_tolerates_taskkill_128_when_child_exits(self):
+        args = SimpleNamespace(log=Path("private.jsonl"), root=[],
+                               additional_bytes=100, command=["--", "child"],
+                               physical_min_free_bytes=5, volume_root=["planned"],
+                               timing_output=None)
+        child = SimpleNamespace(pid=123)
+        child.poll = lambda: None
+        waits = iter([subprocess.TimeoutExpired("child", 15), 1])
+
+        def fake_wait(timeout):
+            value = next(waits)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        child.wait = fake_wait
+        with patch.object(storage, "WINDOWS", True), patch.object(
+            storage, "check", side_effect=[{"allocated_bytes": 1},
+                                           storage.PhysicalSpaceError("PHYSICAL_SPACE")]
+        ), patch.object(storage.subprocess, "Popen", return_value=child), patch.object(
+            storage.subprocess, "run", return_value=SimpleNamespace(returncode=128)
+        ):
+            with self.assertRaisesRegex(storage.PhysicalSpaceError, "PHYSICAL_SPACE"):
+                storage._main_with_args(args)
+
     def test_unique_files_nested_roots_and_hard_links(self):
         with tempfile.TemporaryDirectory(prefix="alopex-storage-test-") as name:
             root = Path(name)

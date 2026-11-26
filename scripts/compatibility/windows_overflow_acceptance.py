@@ -324,6 +324,7 @@ class Acceptance:
         self.python = self.work / "runtime/Scripts/python.exe"
         self.env = dict(os.environ, CARGO_TARGET_DIR=str(self.target), CARGO_INCREMENTAL="0",
                         CARGO_PROFILE_DEV_DEBUG="0", CARGO_PROFILE_TEST_DEBUG="0",
+                        CARGO_PROFILE_TEST_OPT_LEVEL="0",
                         CARGO_BUILD_JOBS="2", RUSTFLAGS="-D warnings", CARGO_TERM_COLOR="never",
                         ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD="1",
                         NIM_SQL_PARSER_LIB_DIR=str(self.parser), PYTHONUTF8="1",
@@ -356,7 +357,7 @@ class Acceptance:
             raise EvidenceError("PHYSICAL_SPACE")
 
     def run(self, name, command, *, env=None, additional=500_000_000,
-            read_output=True):
+            read_output=True, timing_output=None):
         log = self.output / f"{name}.log"
         plan = json.loads((self.output / "plan.json").read_text())
         self.check_time_budget(plan)
@@ -374,6 +375,8 @@ class Acceptance:
                    str(PHYSICAL_CLEANUP_RESERVE_BYTES)]
         for root in self.volume_roots():
             wrapper.extend(("--volume-root", str(root)))
+        if timing_output is not None:
+            wrapper.extend(("--timing-output", str(timing_output)))
         wrapper.extend(("--", *map(str, command)))
         write(self.output / f"{name}-command.json", {
             "command": list(map(str, command)), "additional_bytes": additional,
@@ -444,11 +447,16 @@ class Acceptance:
     def stop_process_tree(process):
         if process.poll() is not None:
             return
-        result = subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                                stdin=subprocess.DEVNULL, capture_output=True,
-                                timeout=30, check=False)
-        if result.returncode:
-            raise EvidenceError("STOP_FAILURE")
+        # taskkill /T /F returns exit code 128 if any descendant exited between
+        # tree enumeration and termination; verify termination via process.wait().
+        try:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                           stdin=subprocess.DEVNULL, capture_output=True,
+                           timeout=30, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            if process.poll() is None:
+                raise EvidenceError("STOP_FAILURE") from None
+            return
         try:
             process.wait(timeout=20)
         except subprocess.TimeoutExpired:
@@ -578,10 +586,25 @@ class Acceptance:
                    for phase in ("toolchain", "parser")}
         started = time.monotonic()
 
-        def timed(name, command, *, env=None, additional=500_000_000):
+        def timed(name, command, *, env=None, additional=500_000_000,
+                  measure_child=False):
             before = time.monotonic()
-            contents = self.run("pilot-" + name, command, env=env, additional=additional)
-            timings[name] = max(time.monotonic() - before, 0.001)
+            timing_file = (self.output / f"pilot-{name}-timing.private.json"
+                           if measure_child else None)
+            contents = self.run("pilot-" + name, command, env=env,
+                                additional=additional,
+                                timing_output=timing_file)
+            elapsed = max(time.monotonic() - before, 0.001)
+            if timing_file is not None and timing_file.is_file():
+                try:
+                    child_secs = json.loads(
+                        timing_file.read_text(encoding="utf-8")
+                    )["child_seconds"]
+                    if isinstance(child_secs, (int, float)) and child_secs > 0:
+                        elapsed = float(child_secs)
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+            timings[name] = elapsed
             if time.monotonic() - started >= PILOT_MAX_SECONDS:
                 raise EvidenceError("TIME_BUDGET")
             return contents
@@ -597,7 +620,7 @@ class Acceptance:
         timed("ordinary-case", [self.python, "-m", "pytest", "-q",
             "crates/alopex-py/tests/test_wal_overflow.py::test_sql_transaction_larger_than_ring_reopens_atomically",
             "--basetemp", self.work / "pilot-pytest", "--junitxml", self.output / "pilot-ordinary.xml"],
-            env=normal_env)
+            env=normal_env, measure_child=True)
         ordinary = list(ET.parse(self.output / "pilot-ordinary.xml").getroot().iter("testcase"))
         if len(ordinary) != 1 or list(ordinary[0]):
             raise EvidenceError("CASE")
@@ -607,7 +630,8 @@ class Acceptance:
         timed("rust-build", [*rust, "--no-run"], env=instrumented_env,
               additional=10_000_000_000)
         rust_log = timed("rust-case", [*rust, "kv::error_spool_write", "--", "--exact",
-                                       "--test-threads=1"], env=instrumented_env)
+                                       "--test-threads=1"], env=instrumented_env,
+                         measure_child=True)
         if (re.findall(r"^test (\S+) \.\.\. ok\s*$", rust_log, re.MULTILINE)
                 != ["kv::error_spool_write"] or "1 passed; 0 failed" not in rust_log):
             raise EvidenceError("CASE")
@@ -617,7 +641,8 @@ class Acceptance:
         python_env = self.package("pilot-instrumented")
         timings["instrumented-package"] = max(time.monotonic() - before, 0.001)
         timed("python-case", [self.python, HERE / "publication_python.py", "--output",
-                              self.output / "pilot-python", "--pilot-case"], env=python_env)
+                              self.output / "pilot-python", "--pilot-case"],
+              env=python_env, measure_child=True)
         python_report = json.loads((self.output / "pilot-python/report.json").read_text())
         python_identity = json.loads((self.output / "pilot-instrumented-identity.json").read_text())
         if (python_report["status"] != "passed" or len(python_report["cases"]) != 1

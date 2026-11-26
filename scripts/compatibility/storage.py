@@ -281,6 +281,7 @@ def main():
     parser.add_argument("--additional-bytes", type=int, default=20_000_000_000)
     parser.add_argument("--physical-min-free-bytes", type=int)
     parser.add_argument("--volume-root", action="append", default=[])
+    parser.add_argument("--timing-output", type=Path)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     args.log.parent.mkdir(parents=True, exist_ok=True)
@@ -310,6 +311,7 @@ def _main_with_args(args):
         CARGO_BUILD_JOBS="2",
         PIP_NO_CACHE_DIR="1",
     )
+    child_started = time.monotonic()
     child = subprocess.Popen(command, env=env, start_new_session=os.name != "nt")
     try:
         while child.poll() is None:
@@ -317,17 +319,27 @@ def _main_with_args(args):
                 child.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 check(args.log, args.root, limit, **physical)
+        child_seconds = max(0.001, time.monotonic() - child_started)
+        timing_output = getattr(args, "timing_output", None)
+        if timing_output is not None:
+            timing_output.write_text(
+                json.dumps({"child_seconds": child_seconds}) + "\n",
+                encoding="utf-8",
+            )
         check(args.log, args.root, limit, **physical)
     except BaseException:
         if child.poll() is None:
             if WINDOWS:
                 # Stop the owned Cargo/rustc tree, not just its parent process.
+                # taskkill /T /F can return non-zero (e.g. 128) when a descendant
+                # already exited; treat stop as successful only if child exits.
                 try:
                     subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"],
-                                   check=True, timeout=30)
+                                   check=False, timeout=30)
                     child.wait(timeout=20)
                 except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                    raise StopFailureError("STOP_FAILURE") from None
+                    if child.poll() is None:
+                        raise StopFailureError("STOP_FAILURE") from None
             else:
                 os.killpg(child.pid, signal.SIGTERM)
                 try:

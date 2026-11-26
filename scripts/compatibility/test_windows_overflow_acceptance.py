@@ -482,6 +482,79 @@ class AcceptanceGuardTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(local_app_data)}, clear=False):
                 self.assertEqual(owner.parser_temp_dir(), host_temp.resolve())
 
+    def test_windows_jobs_and_driver_keep_test_profile_at_opt_level_zero(self):
+        workflow = (acceptance.REPO / ".github/workflows/compatibility.yml").read_text()
+        pilot = workflow.split("  windows-overflow-pilot:\n", 1)[1].split(
+            "  windows-overflow-public:\n", 1)[0]
+        full = workflow.split("  windows-overflow-public:\n", 1)[1].split(
+            "  historical-parser:\n", 1)[0]
+        self.assertIn("CARGO_PROFILE_TEST_OPT_LEVEL: 0", pilot)
+        self.assertIn("CARGO_PROFILE_TEST_OPT_LEVEL: 0", full)
+        with tempfile.TemporaryDirectory() as directory:
+            env = {
+                "RUNNER_ENVIRONMENT": "github-hosted",
+                "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "ALOPEX_ACCEPTANCE_SUITE": "windows-overflow-pilot",
+                "RUNNER_TEMP": directory,
+                "PATH": "",
+            }
+            with mock.patch.object(acceptance.sys, "platform", "win32"), \
+                 mock.patch.dict(os.environ, env, clear=False):
+                owner = acceptance.Acceptance("pilot")
+            self.assertEqual(owner.env["CARGO_PROFILE_TEST_OPT_LEVEL"], "0")
+
+    def test_stop_process_tree_accepts_taskkill_128_when_process_exited_and_fails_if_alive(self):
+        process = mock.Mock()
+        process.pid = 4321
+        process.poll.return_value = None
+        process.wait.return_value = 1
+        with mock.patch.object(acceptance.subprocess, "run",
+                               return_value=mock.Mock(returncode=128)):
+            acceptance.Acceptance.stop_process_tree(process)
+        process.wait.assert_called_once_with(timeout=20)
+
+        stuck = mock.Mock()
+        stuck.pid = 4322
+        stuck.poll.return_value = None
+        stuck.wait.side_effect = subprocess.TimeoutExpired("stuck", 20)
+        with mock.patch.object(acceptance.subprocess, "run",
+                               return_value=mock.Mock(returncode=128)):
+            with self.assertRaises(EvidenceError) as caught:
+                acceptance.Acceptance.stop_process_tree(stuck)
+        self.assertEqual(caught.exception.code, "STOP_FAILURE")
+
+    def test_run_passes_timing_output_flag_to_storage_wrapper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "plan.json").write_text(json.dumps({
+                "initial_allocated_bytes": 0, "estimated_peak_additional_bytes": 500_000_000,
+                "job_started_unix": 0}))
+            owner = object.__new__(acceptance.Acceptance)
+            owner.suite = "windows-overflow-pilot"
+            owner.phase = "pilot"
+            owner.phase_started = 0
+            owner.output = root
+            owner.work = root / "work"
+            owner.target = root / "target"
+            owner.env = {"RUSTFLAGS": "-D warnings"}
+            seen = []
+            process = mock.Mock()
+            process.wait.return_value = 0
+
+            def capture(command, **kwargs):
+                seen.append(command)
+                return process
+
+            timing = root / "pilot-ordinary-case-timing.private.json"
+            with mock.patch.object(acceptance.storage, "check",
+                                   return_value={"allocated_bytes": 0}), \
+                 mock.patch.object(acceptance.subprocess, "Popen", side_effect=capture), \
+                 mock.patch.object(owner, "check_physical"), \
+                 mock.patch.object(owner, "check_time_budget"):
+                owner.run("pilot-ordinary-case", ["pytest"], timing_output=timing)
+            self.assertIn("--timing-output", seen[0])
+            self.assertIn(str(timing), seen[0])
+
 
 if __name__ == "__main__":
     unittest.main()
