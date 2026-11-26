@@ -70,14 +70,25 @@ class NimToolchainTests(unittest.TestCase):
             self.assertEqual(toolchain.extract(path, root / "safe").read_bytes(), b"nim")
             for index, members in enumerate(invalid):
                 archive(path, members)
-                with self.subTest(index=index), self.assertRaises(toolchain.BootstrapError) as error:
-                    toolchain.extract(path, root / f"unsafe-{index}")
-                self.assertEqual(error.exception.code, "NIM_ARCHIVE")
+                with self.subTest(index=index):
+                    with self.assertRaises(toolchain.BootstrapError) as error:
+                        toolchain.extract(path, root / f"unsafe-{index}")
+                    self.assertEqual(error.exception.code, "NIM_ARCHIVE")
             archive(path, valid)
             with mock.patch.object(toolchain, "MAX_EXTRACTED", 2):
                 with self.assertRaises(toolchain.BootstrapError) as error:
                     toolchain.extract(path, root / "large")
             self.assertEqual(error.exception.code, "NIM_ARCHIVE")
+
+    def test_rejects_windows_normalized_backslash_orig_filename(self):
+        # On Windows, zipfile.ZipFile._RealGetContents() constructs ZipInfo(name)
+        # which normalizes os.sep ('\\') to '/' in info.filename while retaining
+        # the raw archive member name in info.orig_filename.
+        info = zipfile.ZipInfo("nim-2.2.10/bin/nim.exe")
+        info.orig_filename = "nim-2.2.10\\bin\\nim.exe"
+        with self.assertRaises(toolchain.BootstrapError) as error:
+            toolchain._parts(info)
+        self.assertEqual(error.exception.code, "NIM_ARCHIVE")
 
     def test_version_check_is_exact_and_diagnostics_stay_private(self):
         with tempfile.TemporaryDirectory() as directory:

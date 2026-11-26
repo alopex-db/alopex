@@ -59,7 +59,9 @@ def download(archive: Path) -> None:
 
 def _parts(info: zipfile.ZipInfo) -> tuple[str, ...]:
     name = info.filename
-    if (not name or name.startswith("/") or "\\" in name or ":" in name
+    orig = getattr(info, "orig_filename", name)
+    if (not isinstance(orig, str) or orig != name
+            or not name or name.startswith("/") or "\\" in name or ":" in name
             or "\x00" in name):
         raise BootstrapError("NIM_ARCHIVE")
     pieces = name.rstrip("/").split("/")
