@@ -69,7 +69,7 @@ def _run(argv, source, environment, log_path, guard):
             process = subprocess.Popen(
                 argv, cwd=source, env=environment, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                start_new_session=True)
+                start_new_session=True, umask=0o077)
             require(process.stdout is not None)
             selector.register(process.stdout, selectors.EVENT_READ)
             deadline = time.monotonic() + TIME_LIMIT

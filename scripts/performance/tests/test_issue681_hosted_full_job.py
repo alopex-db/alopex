@@ -196,3 +196,90 @@ class HostedFullJobTests(unittest.TestCase):
                                 {}, "commit")
             self.assertEqual(list(task_parent.iterdir()), [])
             self.assertEqual(list(home_parent.iterdir()), [])
+
+    def test_hosted_measure_wires_install_locked_vendor_build_measure_and_audit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, task_parent, home_base, home_parent = self.setup_roots(
+                Path(tmp).resolve())
+            events = []
+
+            class Guard:
+                def __call__(self):
+                    events.append("guard")
+
+            guard = Guard()
+            pins = {"before": {"source_commit": "a"},
+                    "candidate": {"source_commit": "b"}}
+
+            def fake_install(install_guard, log_path):
+                self.assertTrue(callable(install_guard))
+                self.assertEqual(log_path.name, "rustup-install.private.log")
+                events.append("install")
+
+            def fake_acquire(work, task, home, *, manifest, vendor_mode):
+                self.assertEqual(work, workspace)
+                self.assertEqual(vendor_mode, "cargo_vendor_locked")
+                events.append("acquire")
+                return {"guard": guard}
+
+            def fake_build(acquired, work, parent):
+                self.assertIs(acquired["guard"], guard)
+                events.append("build")
+                return {"guard": guard, "pair": {"pins": pins}}
+
+            def fake_measure(acquired, built, work, parent, profile, finish):
+                self.assertEqual(finish, "commit")
+                output = directory(parent / "result") / "public.json"
+                output.write_bytes(b'{"ok":true}\n')
+                output.chmod(0o600)
+                events.append("measure")
+                return {"public": output, "guard": guard, "finish": finish}
+
+            stages = []
+            with mock.patch.object(job.Path, "home", return_value=home_base), \
+                 mock.patch.object(job.scoped_storage, "make_manifest",
+                                   return_value=object()), \
+                 mock.patch.object(job.qualify, "REPO", workspace), \
+                 mock.patch.object(job.capacity, "HostStorageGuard",
+                                   return_value=guard), \
+                 mock.patch.object(job.rust, "install_pinned_minimal",
+                                   side_effect=fake_install), \
+                 mock.patch.object(job.acquire, "acquire_all",
+                                   side_effect=fake_acquire), \
+                 mock.patch.object(job.build_join, "build",
+                                   side_effect=fake_build), \
+                 mock.patch.object(job.measure_join, "measure",
+                                   side_effect=fake_measure), \
+                 mock.patch.object(job.transport, "validate",
+                                   side_effect=lambda raw, **_: raw):
+                result = job.execute_hosted_measure(
+                    {"RUNNER_TEMP": str(task_parent)}, workspace, task_parent,
+                    home_parent, {"selected": True}, "commit",
+                    on_stage=stages.append)
+            self.assertEqual(events, ["install", "acquire", "build", "measure", "guard"])
+            self.assertEqual(stages, ["toolchain_install", "acquire", "build",
+                                      "measure", "audit"])
+            self.assertEqual(result["outcome"], "passed")
+            self.assertEqual(result["finish"], "commit")
+            self.assertEqual(result["public_bytes"], b'{"ok":true}\n')
+            self.assertEqual(result["public_sha256"],
+                             hashlib.sha256(b'{"ok":true}\n').hexdigest())
+
+    def test_hosted_measure_reports_failing_stage_and_cleans_owned_trees(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, task_parent, home_base, home_parent = self.setup_roots(
+                Path(tmp).resolve())
+            with mock.patch.object(job.Path, "home", return_value=home_base), \
+                 mock.patch.object(job.scoped_storage, "make_manifest",
+                                   return_value=object()), \
+                 mock.patch.object(job.qualify, "REPO", workspace), \
+                 mock.patch.object(job.capacity, "HostStorageGuard",
+                                   return_value=lambda: None), \
+                 mock.patch.object(job.rust, "install_pinned_minimal",
+                                   side_effect=ValueError("/private/leak")):
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_JOB:toolchain_install$"):
+                    job.execute_hosted_measure(
+                        {"RUNNER_TEMP": str(task_parent)}, workspace,
+                        task_parent, home_parent, {}, "commit")
+            self.assertEqual(list(task_parent.iterdir()), [])
+            self.assertEqual(list(home_parent.iterdir()), [])

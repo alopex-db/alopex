@@ -196,9 +196,13 @@ def _checkout(env, checkout):
             git("status", "--porcelain", "--untracked-files=all") == "")
 
 
-def _context(env):
-    require(env.get("GITHUB_EVENT_NAME") == "workflow_dispatch" and
-            env.get("GITHUB_JOB") == "hnsw_release_admission" and
+ALLOWED_JOBS = ("hnsw_release_admission", "hnsw_release_measure")
+
+
+def _context(env, *, expected_job="hnsw_release_admission"):
+    require(expected_job in ALLOWED_JOBS and
+            env.get("GITHUB_EVENT_NAME") == "workflow_dispatch" and
+            env.get("GITHUB_JOB") == expected_job and
             env.get("ISSUE_NUMBER") == "681" and
             env.get("GITHUB_REPOSITORY") == REPOSITORY and
             env.get("RUNNER_ENVIRONMENT") == "github-hosted" and
@@ -215,7 +219,7 @@ def _context(env):
 
 
 def _identity(env, fetch=_request, now=None, *, failed_subchecks=None,
-              failed_claim_keys=None):
+              failed_claim_keys=None, expected_job="hnsw_release_admission"):
     sub = "identity_oidc_url"
     try:
         request_url = env["ACTIONS_ID_TOKEN_REQUEST_URL"]
@@ -291,7 +295,7 @@ def _identity(env, fetch=_request, now=None, *, failed_subchecks=None,
                 job.get("head_sha") == sha and
                 job.get("check_run_url") ==
                 f"{API}/check-runs/{check_id}" and
-                job.get("name") == "hnsw_release_admission" and
+                job.get("name") == expected_job and
                 job.get("status") == "in_progress" and
                 "ubuntu-24.04" in job.get("labels", []))
     except BaseException:
@@ -425,7 +429,8 @@ def _classify_toolchain_failure():
     return failures or ["toolchain_other"]
 
 
-def run(env, *, fetch=_request, now=None, checkout=None):
+def run(env, *, fetch=_request, now=None, checkout=None,
+        expected_job="hnsw_release_admission"):
     checks = {
         "source": "skipped_prereq",
         "identity": "skipped_prereq",
@@ -444,7 +449,10 @@ def run(env, *, fetch=_request, now=None, checkout=None):
             first_error = err_code
 
     try:
-        _context(env) if checkout is None else _context_with_checkout(env, checkout)
+        if checkout is None:
+            _context(env, expected_job=expected_job)
+        else:
+            _context_with_checkout(env, checkout, expected_job=expected_job)
         checks["source"] = "passed"
     except BaseException:
         fail_stage("source", "SOURCE")
@@ -458,7 +466,8 @@ def run(env, *, fetch=_request, now=None, checkout=None):
     try:
         _identity(env, fetch=fetch, now=now,
                   failed_subchecks=failed_subchecks,
-                  failed_claim_keys=failed_claim_keys)
+                  failed_claim_keys=failed_claim_keys,
+                  expected_job=expected_job)
         checks["identity"] = "passed"
     except BaseException:
         fail_stage("identity", "IDENTITY")
@@ -516,11 +525,12 @@ def run(env, *, fetch=_request, now=None, checkout=None):
     return payload, 1
 
 
-def _context_with_checkout(env, checkout):
+def _context_with_checkout(env, checkout, *,
+                           expected_job="hnsw_release_admission"):
     # The injected path is for synthetic tests only; production uses GITHUB_WORKSPACE.
     copied = dict(env)
     copied["GITHUB_WORKSPACE"] = str(checkout)
-    _context(copied)
+    _context(copied, expected_job=expected_job)
 
 
 def main():

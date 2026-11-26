@@ -4,21 +4,29 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import tempfile
+import time
 
 import issue681_hosted_acquire_all as acquire
+import issue681_hosted_build_guard as capacity
 import issue681_hosted_build_join as build_join
+import issue681_hosted_identity as identity_gate
 import issue681_hosted_measure_join as measure_join
 import issue681_hosted_qualify as qualify
 import issue681_hosted_storage as scoped_storage
 import issue681_hosted_rust_preflight as rust
+import issue681_public_admission as public_admission
 import issue681_public_transport as transport
 
 ERROR = "PUBLIC_JOB"
 CASE = "HNSW_PUBLIC_JOB"
+SOFT_BUDGET_SECONDS = 160 * 60
+HOSTED_RUNNER_KIND = "github_hosted_ubuntu2404"
 
 
 def require(value):
@@ -125,3 +133,220 @@ def execute(env, workspace: Path, task_parent: Path, home_parent: Path,
     """Retain the Draft-PR qualification route for its original use case."""
     return _execute(env, workspace, task_parent, home_parent, profile, finish,
                     qualify.run)
+
+
+def execute_hosted_measure(env, workspace: Path, task_parent: Path,
+                           home_parent: Path, profile: dict, finish: str, *,
+                           expected_job: str = "hnsw_release_measure",
+                           soft_budget_seconds: int = SOFT_BUDGET_SECONDS,
+                           on_stage=None):
+    """Execute one admitted GitHub-hosted VM #681 measurement finish.
+
+    UC-V0817-681-HOSTED-MEASURE-WIRE-01:
+    1. Caller has already passed identity_gate.run(env, expected_job=...).
+    2. Install pinned Rust 1.90.0 --profile minimal under HostStorageGuard.
+    3. Acquire exact pinned sources, Nim parser, and cargo vendor --locked.
+    4. Build both release arms offline and verify vendor/source immutability.
+    5. Run 1k/10k/100k paired measurement under Admission + HostStorageGuard.
+    6. Snapshot and transport.validate() canonical public JSON.
+    """
+    owned = []
+    stage = "init"
+    started = time.monotonic()
+
+    def notify(stage_name):
+        if on_stage is not None:
+            on_stage(stage_name)
+
+    def check_budget():
+        require(time.monotonic() - started < soft_budget_seconds)
+
+    try:
+        require(type(env) is dict and isinstance(workspace, Path) and
+                workspace.is_absolute() and workspace.is_dir() and
+                not workspace.is_symlink() and
+                workspace.resolve(strict=True) == workspace and
+                workspace == qualify.REPO and
+                isinstance(task_parent, Path) and
+                isinstance(home_parent, Path) and
+                finish in ("commit", "rollback") and
+                expected_job in identity_gate.ALLOWED_JOBS and
+                build_join._disjoint((workspace, task_parent,
+                                      home_parent)) and
+                Path.home() in home_parent.parents)
+        _empty_private(task_parent)
+        _empty_private(home_parent)
+        manifest = scoped_storage.make_manifest(
+            workspace, Path(env.get("RUNNER_TEMP", str(task_parent))),
+            task_parent=task_parent, home_parent=home_parent)
+
+        task = Path(tempfile.mkdtemp(prefix="issue681-job-", dir=task_parent))
+        owned.append((task, task_parent, "issue681-job-", acquire._identity(task)))
+        home = Path(tempfile.mkdtemp(prefix="issue681-home-", dir=home_parent))
+        owned.append((home, home_parent, "issue681-home-", acquire._identity(home)))
+        for name in ("acquire", "build", "measure"):
+            (task / name).mkdir(mode=0o700)
+            _empty_private(task / name)
+
+        stage = "toolchain_install"
+        check_budget()
+        install_guard = capacity.HostStorageGuard(workspace, manifest=manifest)
+        rust.install_pinned_minimal(
+            install_guard, task / "rustup-install.private.log")
+        notify("toolchain_install")
+
+        stage = "acquire"
+        check_budget()
+        acquired = acquire.acquire_all(
+            workspace, task / "acquire", home, manifest=manifest,
+            vendor_mode="cargo_vendor_locked")
+        notify("acquire")
+
+        stage = "build"
+        check_budget()
+        built = build_join.build(acquired, workspace, task / "build")
+        notify("build")
+
+        stage = "measure"
+        check_budget()
+        result = measure_join.measure(acquired, built, workspace,
+                                      task / "measure", profile, finish)
+        notify("measure")
+
+        stage = "audit"
+        public = result["public"]
+        require(type(result) is dict and result["finish"] == finish and
+                result["guard"] is acquired["guard"] and
+                isinstance(public, Path) and public.is_relative_to(task) and
+                public.is_file() and not public.is_symlink() and
+                public.stat().st_uid == os.geteuid())
+        raw = _public_snapshot(public)
+        digest = hashlib.sha256(raw).hexdigest()
+        pins = built["pair"]["pins"]
+        require(transport.validate(raw, expected_sha256=digest,
+                                   expected_pins=pins, finish=finish) == raw)
+        acquired["guard"]()
+        notify("audit")
+        return {"case": CASE, "outcome": "passed", "public": public,
+                "public_bytes": raw, "public_sha256": digest,
+                "pins": copy.deepcopy(pins), "finish": finish,
+                "task_root": task, "home_root": home}
+    except BaseException:
+        for path, parent, prefix, identity in reversed(owned):
+            try:
+                _owned(path, parent, prefix, identity)
+            except BaseException:
+                pass
+        raise ValueError(f"{ERROR}:{stage}") from None
+
+
+def run_hosted_measure_cli(env=None):
+    """CLI entry point for .github/workflows/alopex-performance.yml hnsw_release_measure."""
+    env = dict(os.environ if env is None else env)
+    stages = {
+        "admission": "skipped_prereq",
+        "toolchain_install": "skipped_prereq",
+        "acquire": "skipped_prereq",
+        "build": "skipped_prereq",
+        "measure": "skipped_prereq",
+        "audit": "skipped_prereq",
+        "export": "skipped_prereq",
+    }
+    finish = env.get("HNSW_FINISH", "")
+    if finish not in ("commit", "rollback"):
+        print(json.dumps({"case": CASE, "outcome": "failed",
+                          "error_code": "INVALID_FINISH", "stages": stages},
+                         sort_keys=True), flush=True)
+        return 1
+
+    admission_outcome, admission_status = identity_gate.run(
+        env, expected_job="hnsw_release_measure")
+    print(json.dumps(admission_outcome, sort_keys=True), flush=True)
+    if admission_status != 0 or admission_outcome.get("outcome") != "passed":
+        stages["admission"] = "failed"
+        print(json.dumps({"case": CASE, "outcome": "failed",
+                          "error_code": "ADMISSION", "stages": stages},
+                         sort_keys=True), flush=True)
+        return 1
+    stages["admission"] = "passed"
+
+    runner_temp = Path(env["RUNNER_TEMP"]).resolve(strict=True)
+    workspace = Path(env["GITHUB_WORKSPACE"]).resolve(strict=True)
+    home_root = Path.home().resolve(strict=True)
+    task_parent = Path(tempfile.mkdtemp(prefix="alopex-681-task-",
+                                        dir=runner_temp))
+    os.chmod(task_parent, 0o700)
+    home_parent = Path(tempfile.mkdtemp(prefix=".alopex-681-home-",
+                                        dir=home_root))
+    os.chmod(home_parent, 0o700)
+
+    def on_stage(name):
+        stages[name] = "passed"
+        print(json.dumps({"case": CASE, "stage": name, "status": "passed"},
+                         sort_keys=True), flush=True)
+
+    profile = {
+        "schema": public_admission.SCHEMA,
+        "runner_kind": env.get("RUNNER_KIND", HOSTED_RUNNER_KIND),
+        "cpu_count": 4,
+        "additional_bytes": qualify.RESERVE_BYTES,
+    }
+    try:
+        result = execute_hosted_measure(
+            env, workspace, task_parent, home_parent, profile, finish,
+            expected_job="hnsw_release_measure", on_stage=on_stage)
+        export_dir = runner_temp / "issue681-public-export"
+        export_dir.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(export_dir, 0o700)
+        export_file = export_dir / f"issue681-public-{finish}.json"
+        if export_file.exists():
+            export_file.unlink()
+        fd = os.open(export_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY |
+                     getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(result["public_bytes"])
+            stream.flush()
+            os.fsync(stream.fileno())
+        stages["export"] = "passed"
+        print(json.dumps({
+            "case": CASE,
+            "outcome": "passed",
+            "finish": finish,
+            "public_sha256": result["public_sha256"],
+            "stages": stages,
+        }, sort_keys=True), flush=True)
+        return 0
+    except ValueError as exc:
+        token = str(exc)
+        failed_stage = (token.split(":", 1)[1]
+                        if token.startswith(ERROR + ":") else "unknown")
+        if failed_stage in stages:
+            stages[failed_stage] = "failed"
+        print(json.dumps({
+            "case": CASE,
+            "outcome": "failed",
+            "error_code": ERROR,
+            "failed_stage": failed_stage,
+            "stages": stages,
+        }, sort_keys=True), flush=True)
+        return 1
+    except BaseException:
+        print(json.dumps({
+            "case": CASE,
+            "outcome": "failed",
+            "error_code": ERROR,
+            "failed_stage": "export",
+            "stages": stages,
+        }, sort_keys=True), flush=True)
+        return 1
+    finally:
+        for directory in (task_parent, home_parent):
+            try:
+                if directory.exists():
+                    shutil.rmtree(directory)
+            except BaseException:
+                pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_hosted_measure_cli())

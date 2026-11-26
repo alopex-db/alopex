@@ -19,6 +19,7 @@ ARM_KEYS = {"source", "target", "work", "parser_record",
             "parser_sha256", "rust_version", "additional_storage_bytes",
             "private_roots", "build_lock", "git_binary", "git_env",
             "cargo_home", "vendor_mode_sha256"}
+OPTIONAL_COMMON_KEYS = {"vendor_tree_sha256"}
 COMMON = {"target", "parser_record", "parser_root", "parser_library",
           "example_sha256", "parser_record_sha256", "parser_sha256",
           "rust_version", "additional_storage_bytes", "private_roots",
@@ -37,9 +38,12 @@ def build_pair(inputs, output_parent, guard):
     try:
         require(type(inputs) is dict and set(inputs) == {"before", "candidate"})
         before, candidate = inputs["before"], inputs["candidate"]
-        require(all(type(arm) is dict and set(arm) == ARM_KEYS
-                    for arm in (before, candidate)))
-        require(all(before[key] == candidate[key] for key in COMMON) and
+        require(all(type(arm) is dict and ARM_KEYS <= set(arm) <=
+                    (ARM_KEYS | OPTIONAL_COMMON_KEYS)
+                    for arm in (before, candidate)) and
+                set(before) == set(candidate))
+        common_keys = COMMON | (set(before) & OPTIONAL_COMMON_KEYS)
+        require(all(before[key] == candidate[key] for key in common_keys) and
                 all(before[key] != candidate[key]
                     for key in ("source", "work", "source_commit")) and
                 all(isinstance(arm["source"], Path) and

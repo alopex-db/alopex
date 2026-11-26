@@ -209,7 +209,8 @@ def produce(*, source, target, work, output, parser_record, parser_root,
             source_commit, source_tree, example_sha256, cargo_lock_sha256,
             parser_record_sha256, parser_sha256, rust_version,
             additional_storage_bytes, private_roots, build_lock, host_guard,
-            git_binary, git_env, cargo_home, vendor_mode_sha256):
+            git_binary, git_env, cargo_home, vendor_mode_sha256,
+            vendor_tree_sha256=None):
     """Return exact public pins, or one fixed failure without a promoted bundle."""
     try:
         require(sys.platform == "linux" and platform.machine() == "x86_64")
@@ -228,7 +229,9 @@ def produce(*, source, target, work, output, parser_record, parser_root,
         require(re.fullmatch(r"1\.[0-9]{1,3}\.[0-9]{1,3}", rust_version) and
                 re.fullmatch(r"[0-9a-f]{64}", parser_record_sha256) and
                 re.fullmatch(r"[0-9a-f]{64}", parser_sha256))
-        compiler = _run(["rustc", "-Vv"])
+        compiler_env = dict(os.environ, RUSTUP_TOOLCHAIN=rust_version,
+                            RUSTUP_AUTO_INSTALL="0")
+        compiler = _run(["rustc", "-Vv"], env=compiler_env)
         require("release: " + rust_version in compiler.splitlines() and
                 "host: " + HOST in compiler.splitlines())
         verify_source(source, source_commit, source_tree, example_sha256,
@@ -246,13 +249,23 @@ def produce(*, source, target, work, output, parser_record, parser_root,
                     stat.S_IMODE(info.st_mode) == 0o600)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             baseline = _storage(inventory_roots, additional_storage_bytes)
-            vendor_tree.verify_tree(cargo_home / "vendor", host_guard,
-                                    vendor_mode_sha256)
+            if vendor_tree_sha256 is None:
+                vendor_tree.verify_tree(cargo_home / "vendor", host_guard,
+                                        vendor_mode_sha256)
+            else:
+                vendor_tree.verify_tree(
+                    cargo_home / "vendor", host_guard, vendor_mode_sha256,
+                    expected_tree_sha256=vendor_tree_sha256)
             _build(source, target, work, parser_library, inventory_roots,
                    baseline + additional_storage_bytes, rust_version, os.environ,
                    host_guard, cargo_home)
-            vendor_tree.verify_tree(cargo_home / "vendor", host_guard,
-                                    vendor_mode_sha256)
+            if vendor_tree_sha256 is None:
+                vendor_tree.verify_tree(cargo_home / "vendor", host_guard,
+                                        vendor_mode_sha256)
+            else:
+                vendor_tree.verify_tree(
+                    cargo_home / "vendor", host_guard, vendor_mode_sha256,
+                    expected_tree_sha256=vendor_tree_sha256)
             verify_source(source, source_commit, source_tree, example_sha256,
                           cargo_lock_sha256, git_binary=git_binary,
                           git_env=git_env)

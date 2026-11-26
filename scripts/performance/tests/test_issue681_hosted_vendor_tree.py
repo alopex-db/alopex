@@ -72,6 +72,33 @@ class HostedVendorTreeTest(unittest.TestCase):
                 tree.verify_tree(root, lambda: (_ for _ in ()).throw(
                     OSError("private mount detail")), mode_digest)
 
+    def test_locked_vendor_tree_accepts_explicit_tree_sha_and_rejects_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / "vendor"
+            pkg = root / "crate-a"
+            root.mkdir(mode=0o700)
+            pkg.mkdir(mode=0o700)
+            src = pkg / "lib.rs"
+            src.write_bytes(b"pub fn ok() {}\n")
+            src.chmod(0o600)
+            row = ("crate-a/lib.rs", len(b"pub fn ok() {}\n"),
+                   hashlib.sha256(b"pub fn ok() {}\n").hexdigest())
+            tree_sha = hashlib.sha256(
+                json.dumps(row, separators=(",", ":")).encode() + b"\n"
+            ).hexdigest()
+            mode_sha = hashlib.sha256(
+                json.dumps(("crate-a/lib.rs", 0o600), separators=(",", ":")).encode() + b"\n"
+            ).hexdigest()
+            self.assertEqual(
+                tree.verify_tree(root, lambda: None, mode_sha,
+                                 expected_tree_sha256=tree_sha),
+                tree_sha,
+            )
+            src.write_bytes(b"pub fn tampered() {}\n")
+            with self.assertRaisesRegex(ValueError, "^PUBLIC_VENDOR$"):
+                tree.verify_tree(root, lambda: None, mode_sha,
+                                 expected_tree_sha256=tree_sha)
+
 
 if __name__ == "__main__":
     unittest.main()

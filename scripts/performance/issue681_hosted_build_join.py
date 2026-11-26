@@ -26,6 +26,8 @@ PARSER_KEYS = {"parser_record", "parser_root", "parser_library",
                "parser_record_sha256", "parser_sha256"}
 VENDOR_KEYS = {"cargo_home", "vendor_root", "bundle_sha256",
                "vendor_tree_sha256", "vendor_mode_sha256"}
+LOCKED_VENDOR_KEYS = {"cargo_home", "vendor_root", "vendor_tree_sha256",
+                      "vendor_mode_sha256", "acquisition_mode"}
 
 
 def require(value):
@@ -56,10 +58,22 @@ def _admit(acquired, workspace, build_parent):
             type(acquired["parser"]) is dict and
             set(acquired["parser"]) == PARSER_KEYS and
             type(acquired["vendor"]) is dict and
-            set(acquired["vendor"]) == VENDOR_KEYS)
+            set(acquired["vendor"]) in (VENDOR_KEYS, LOCKED_VENDOR_KEYS))
     task, cargo_home = acquired["task"], acquired["cargo_home"]
     for path in (task, cargo_home, build_parent):
         _private_dir(path)
+    vendor = acquired["vendor"]
+    if set(vendor) == LOCKED_VENDOR_KEYS:
+        vendor_ok = (
+            vendor["acquisition_mode"] == "cargo_vendor_locked" and
+            isinstance(vendor["vendor_tree_sha256"], str) and
+            re.fullmatch(r"[0-9a-f]{64}", vendor["vendor_tree_sha256"])
+        )
+    else:
+        vendor_ok = (
+            vendor["bundle_sha256"] == vendor_consume.ZIP_SHA256 and
+            vendor["vendor_tree_sha256"] == VENDOR_TREE_SHA256
+        )
     require(isinstance(workspace, Path) and workspace.is_absolute() and
             workspace.is_dir() and not workspace.is_symlink() and
             workspace.resolve(strict=True) == workspace and
@@ -72,15 +86,12 @@ def _admit(acquired, workspace, build_parent):
             task / "parser-stage" / "parser-input" and
             acquired["parser"]["parser_record"].parent ==
             task / "parser-build" / "archive" and
-            acquired["vendor"]["cargo_home"] == cargo_home and
-            acquired["vendor"]["vendor_root"] == cargo_home / "vendor" and
-            acquired["vendor"]["bundle_sha256"] ==
-            vendor_consume.ZIP_SHA256 and
-            acquired["vendor"]["vendor_tree_sha256"] ==
-            VENDOR_TREE_SHA256 and
-            isinstance(acquired["vendor"]["vendor_mode_sha256"], str) and
+            vendor["cargo_home"] == cargo_home and
+            vendor["vendor_root"] == cargo_home / "vendor" and
+            vendor_ok and
+            isinstance(vendor["vendor_mode_sha256"], str) and
             re.fullmatch(r"[0-9a-f]{64}",
-                         acquired["vendor"]["vendor_mode_sha256"]) and
+                         vendor["vendor_mode_sha256"]) and
             acquired["git_binary"] == acquire_source.GIT and
             type(acquired["git_env"]) is dict)
     for path in (*acquired["sources"].values(),
@@ -121,6 +132,8 @@ def build(acquired, workspace: Path, build_parent: Path):
             "git_binary": acquired["git_binary"],
             "git_env": acquired["git_env"],
         }
+        if acquired["vendor"].get("acquisition_mode") == "cargo_vendor_locked":
+            common["vendor_tree_sha256"] = acquired["vendor"]["vendor_tree_sha256"]
         require(acquire_source.PINS["before"]["example"] ==
                 common["example_sha256"])
         arms = {}
