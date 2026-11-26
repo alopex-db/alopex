@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import stat
+import time
 
 import issue681_public as case
 import issue681_public_admission as admission
@@ -38,11 +39,22 @@ def _run_mode(*, pins, asset_locations, work, export, finish, private_roots,
               admission_dir, additional_bytes, admit_stage, admit_case,
               complete_case,
               inventory_roots=(), case_runner=case.run_case,
-              host_guard=None, diag=None):
+              host_guard=None, diag=None, on_case=None, budget_check=None):
     """Collect, audit and export exactly one completion mode in this job."""
     def mark(code):
         if isinstance(diag, dict):
             diag["code"] = code
+
+    def check_budget(position, rows, trial, arm, case_elapsed_s):
+        if budget_check is None:
+            return
+        mark("MEASURE_TIME_BUDGET")
+        try:
+            require(budget_check(position, rows, trial, arm, case_elapsed_s) is not False)
+        except ValueError as exc:
+            if str(exc) in ("MEASURE_TIME_BUDGET", "MEASURE_TIME_BUDGET_PROJECTED"):
+                mark(str(exc))
+            raise
 
     mark("MEASURE_ASSETS")
     pair._pins(pins)
@@ -50,8 +62,10 @@ def _run_mode(*, pins, asset_locations, work, export, finish, private_roots,
             type(asset_locations) is dict and set(asset_locations) == set(pair.ARMS) and
             type(private_roots) is tuple and callable(admit_stage) and
             callable(admit_case) and callable(complete_case) and
-                callable(case_runner) and
-                (host_guard is None or callable(host_guard)))
+            callable(case_runner) and
+            (host_guard is None or callable(host_guard)) and
+            (on_case is None or callable(on_case)) and
+            (budget_check is None or callable(budget_check)))
     _empty_private(work)
     _empty_private(export)
     require(work != export and work not in export.parents and
@@ -67,10 +81,12 @@ def _run_mode(*, pins, asset_locations, work, export, finish, private_roots,
     locations = []
     stage_rows = None
     for position, (rows, trial, arm) in enumerate(pair._order()):
+        check_budget(position, rows, trial, arm, None)
         if rows != stage_rows:
             mark("MEASURE_STAGE_ADMIT")
             require(admit_stage(rows) is True)
             stage_rows = rows
+        case_started = time.monotonic()
         mark("MEASURE_CASE_ADMIT")
         require(admit_case(rows, trial, arm) is True)
         root = work / f"case-{position:02d}"
@@ -90,15 +106,23 @@ def _run_mode(*, pins, asset_locations, work, export, finish, private_roots,
             case_inputs["host_guard"] = host_guard
         mark("MEASURE_CASE_RUN")
         report = case_runner(**case_inputs)
-        require(type(report) is dict and report.get("status") == "measured")
+        if not (type(report) is dict and report.get("status") == "measured"):
+            error_code = report.get("error_code") if type(report) is dict else None
+            if isinstance(error_code, str) and error_code in case.ERRORS:
+                mark(f"MEASURE_CASE_{error_code}")
+            require(False)
         mark("MEASURE_CASE_COMPLETE")
         require(complete_case(rows, trial, arm) is True)
         mark("MEASURE_CASE_AUDIT")
         require(audit.audit_case(public, private, admitted[arm]["binary"],
                                  pins[arm], rows, trial, finish) == report)
+        case_elapsed_s = max(0, int(time.monotonic() - case_started))
         reports.append(report)
         locations.append({"arm": arm, "rows": rows, "trial": trial,
                           "public": public, "private": private})
+        if on_case is not None:
+            on_case(position, rows, trial, arm, case_elapsed_s)
+        check_budget(position, rows, trial, arm, case_elapsed_s)
     mark("MEASURE_PAIR_WRITE")
     def independent_audit(value):
         return stage_audit.audit_stage(

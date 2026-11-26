@@ -26,7 +26,8 @@ import issue681_public_transport as transport
 
 ERROR = "PUBLIC_JOB"
 CASE = "HNSW_PUBLIC_JOB"
-SOFT_BUDGET_SECONDS = 160 * 60
+SOFT_BUDGET_SECONDS = 330 * 60
+CLEANUP_MARGIN_SECONDS = 10 * 60
 ACQUIRE_BUDGET_SECONDS = 25 * 60
 HOSTED_RUNNER_KIND = "github_hosted_ubuntu2404"
 ALLOWED_DETAIL_CODES = (
@@ -147,22 +148,27 @@ def execute_hosted_measure(env, workspace: Path, task_parent: Path,
                            home_parent: Path, profile: dict, finish: str, *,
                            expected_job: str = "hnsw_release_measure",
                            soft_budget_seconds: int = SOFT_BUDGET_SECONDS,
+                           cleanup_margin_seconds: int = CLEANUP_MARGIN_SECONDS,
                            acquire_budget_seconds: int = ACQUIRE_BUDGET_SECONDS,
                            on_stage=None,
-                           on_substage=None):
+                           on_substage=None,
+                           on_case=None):
     """Execute one admitted GitHub-hosted VM #681 measurement finish.
 
-    UC-V0817-681-HOSTED-MEASURE-WIRE-01 / UC-V0817-681-ACQUIRE-GUARD-DIAG-01:
+    UC-V0817-681-HOSTED-MEASURE-WIRE-01 / UC-V0817-681-ACQUIRE-GUARD-DIAG-01 /
+    UC-V0817-681-MEASURE-BUDGET-PROGRESS-01:
     1. Caller has already passed identity_gate.run(env, expected_job=...).
     2. Install pinned Rust 1.90.0 --profile minimal under HostStorageGuard.
     3. Acquire exact pinned sources, Nim parser, and cargo vendor --locked.
     4. Build both release arms offline and verify vendor/source immutability.
-    5. Run 1k/10k/100k paired measurement under Admission + HostStorageGuard.
+    5. Run 1k/10k/100k paired measurement under Admission + HostStorageGuard +
+       per-case soft-budget and 100k throughput projection early-stop.
     6. Snapshot and transport.validate() canonical public JSON.
     """
     owned = []
     stage = "init"
     started = time.monotonic()
+    observed_100k = {"before": [], "candidate": []}
 
     def notify(stage_name):
         if on_stage is not None:
@@ -170,6 +176,32 @@ def execute_hosted_measure(env, workspace: Path, task_parent: Path,
 
     def check_budget():
         require(time.monotonic() - started < soft_budget_seconds)
+
+    def case_budget_check(position, rows, trial, arm, case_elapsed_s):
+        elapsed = time.monotonic() - started
+        if elapsed >= soft_budget_seconds:
+            raise ValueError("MEASURE_TIME_BUDGET")
+        if case_elapsed_s is not None and rows == 100_000 and arm in observed_100k:
+            observed_100k[arm].append(max(1.0, float(case_elapsed_s)))
+            rem_before = 5 - len(observed_100k["before"])
+            rem_candidate = 5 - len(observed_100k["candidate"])
+            if (observed_100k["before"] and observed_100k["candidate"] and
+                    (rem_before + rem_candidate) > 0):
+                mean_before = (sum(observed_100k["before"]) /
+                               len(observed_100k["before"]))
+                mean_candidate = (sum(observed_100k["candidate"]) /
+                                  len(observed_100k["candidate"]))
+                projected_remaining = (rem_before * mean_before +
+                                       rem_candidate * mean_candidate)
+                if (elapsed + projected_remaining + cleanup_margin_seconds >
+                        soft_budget_seconds):
+                    raise ValueError("MEASURE_TIME_BUDGET_PROJECTED")
+        return True
+
+    def notify_case(position, rows, trial, arm, case_elapsed_s):
+        if on_case is not None:
+            on_case(position, rows, trial, arm, case_elapsed_s,
+                    max(0, int(time.monotonic() - started)))
 
     try:
         require(type(env) is dict and isinstance(workspace, Path) and
@@ -224,7 +256,11 @@ def execute_hosted_measure(env, workspace: Path, task_parent: Path,
 
         stage = "measure"
         check_budget()
-        measure_kwargs = {"on_substage": on_substage} if on_substage is not None else {}
+        measure_kwargs = {"budget_check": case_budget_check}
+        if on_substage is not None:
+            measure_kwargs["on_substage"] = on_substage
+        if on_case is not None:
+            measure_kwargs["on_case"] = notify_case
         result = measure_join.measure(acquired, built, workspace,
                                       task / "measure", profile, finish,
                                       **measure_kwargs)
@@ -300,6 +336,7 @@ def run_hosted_measure_cli(env=None):
     acquire_substages = {}
     build_substages = {}
     measure_substages = {}
+    completed_cases = {"count": 0}
     active_stage = {"name": "acquire"}
     failure_detail = {"substage": None, "detail_code": None}
 
@@ -340,6 +377,22 @@ def run_hosted_measure_cli(env=None):
             failure_detail["detail_code"] = safe_code
         print(json.dumps(payload, sort_keys=True), flush=True)
 
+    def on_case(position, rows, trial, arm, case_elapsed_s, job_elapsed_s):
+        completed_cases["count"] += 1
+        print(json.dumps({
+            "case": CASE,
+            "stage": "measure",
+            "substage": "case",
+            "position": position,
+            "total_cases": 30,
+            "rows": rows,
+            "trial": trial,
+            "arm": arm,
+            "status": "passed",
+            "elapsed_s": case_elapsed_s,
+            "job_elapsed_s": job_elapsed_s,
+        }, sort_keys=True), flush=True)
+
     profile = {
         "schema": public_admission.SCHEMA,
         "runner_kind": env.get("RUNNER_KIND", HOSTED_RUNNER_KIND),
@@ -350,7 +403,7 @@ def run_hosted_measure_cli(env=None):
         result = execute_hosted_measure(
             env, workspace, task_parent, home_parent, profile, finish,
             expected_job="hnsw_release_measure", on_stage=on_stage,
-            on_substage=on_substage)
+            on_substage=on_substage, on_case=on_case)
         export_dir = runner_temp / "issue681-public-export"
         export_dir.mkdir(mode=0o700, exist_ok=True)
         os.chmod(export_dir, 0o700)
@@ -391,6 +444,8 @@ def run_hosted_measure_cli(env=None):
             summary["build_substages"] = build_substages
         if measure_substages:
             summary["measure_substages"] = measure_substages
+        if completed_cases["count"] > 0 or failed_stage == "measure":
+            summary["completed_cases"] = completed_cases["count"]
         if failure_detail["substage"] is not None:
             summary["failed_substage"] = failure_detail["substage"]
         if failure_detail["detail_code"] is not None:

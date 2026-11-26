@@ -169,3 +169,32 @@ class HostedMeasureJoinTests(unittest.TestCase):
                     join.measure(acquired, built, workspace, measure,
                                  profile, "rollback")
             self.assertEqual(list(measure.iterdir()), [])
+
+    def test_measure_forwards_case_progress_and_emits_budget_projection_detail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            acquired, built, workspace, measure, profile = self.setup_inputs(Path(tmp).resolve())
+            substages = []
+            seen_cases = []
+
+            def run_mode(**values):
+                self.assertTrue(callable(values["on_case"]))
+                self.assertTrue(callable(values["budget_check"]))
+                values["on_case"](0, 1_000, 0, "before", 2)
+                values["diag"]["code"] = "MEASURE_TIME_BUDGET_PROJECTED"
+                raise ValueError("PUBLIC_STAGE")
+
+            with mock.patch.object(capacity.HostStorageGuard, "__call__"), \
+                 mock.patch.object(join.admission, "Admission", Admission), \
+                 mock.patch.object(join.run, "_run_mode_fixed",
+                                   side_effect=run_mode):
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_STAGE$"):
+                    join.measure(
+                        acquired, built, workspace, measure, profile, "commit",
+                        on_substage=lambda *args: substages.append(args),
+                        on_case=lambda *args: seen_cases.append(args),
+                        budget_check=lambda *_: True)
+            self.assertEqual(seen_cases, [(0, 1_000, 0, "before", 2)])
+            self.assertEqual(substages[-1][0], "cases")
+            self.assertEqual(substages[-1][1], "failed")
+            self.assertEqual(substages[-1][2], "MEASURE_TIME_BUDGET_PROJECTED")
+            self.assertEqual(list(measure.iterdir()), [])

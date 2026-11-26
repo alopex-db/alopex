@@ -27,6 +27,14 @@ MEASURE_DIAG_CODES = frozenset({
     "MEASURE_CASE_RUN",
     "MEASURE_CASE_COMPLETE",
     "MEASURE_CASE_AUDIT",
+    "MEASURE_CASE_PUBLIC_INPUT",
+    "MEASURE_CASE_PUBLIC_CAPACITY",
+    "MEASURE_CASE_PUBLIC_PROTOCOL",
+    "MEASURE_CASE_PUBLIC_COUNTER",
+    "MEASURE_CASE_PUBLIC_TIMEOUT",
+    "MEASURE_CASE_PUBLIC_CHILD",
+    "MEASURE_TIME_BUDGET",
+    "MEASURE_TIME_BUDGET_PROJECTED",
     "MEASURE_PAIR_WRITE",
     "MEASURE_VERIFY_EXPORT",
 })
@@ -99,7 +107,8 @@ def _guarded(guard, callback):
 
 
 def measure(acquired, built, workspace: Path, measure_parent: Path,
-            profile: dict, finish: str, *, on_substage=None, diag=None):
+            profile: dict, finish: str, *, on_substage=None, on_case=None,
+            budget_check=None, diag=None):
     """Return one audited public file, retaining private receipts separately."""
     owned = None
     identity = None
@@ -151,6 +160,10 @@ def measure(acquired, built, workspace: Path, measure_parent: Path,
                 inventory_roots=roots, host_guard=guard)
             if measure_diag is not None:
                 run_kwargs["diag"] = measure_diag
+            if on_case is not None:
+                run_kwargs["on_case"] = on_case
+            if budget_check is not None:
+                run_kwargs["budget_check"] = budget_check
             result = run._run_mode_fixed(**run_kwargs)
             emit("cases", "passed")
             guard()
