@@ -12,6 +12,86 @@ pub struct ArtifactPaths {
     pub root: PathBuf,
     pub logs_dir: PathBuf,
     pub checks_dir: PathBuf,
+    pub mode: EvidenceMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvidenceMode {
+    Public,
+    Debug,
+}
+
+impl EvidenceMode {
+    pub fn from_environment() -> Result<Self, &'static str> {
+        Self::parse(
+            std::env::var("STRESS_EVIDENCE_MODE").as_deref(),
+            std::env::var_os("CI").is_some(),
+        )
+    }
+
+    fn parse(mode: Result<&str, &std::env::VarError>, ci: bool) -> Result<Self, &'static str> {
+        match mode {
+            Ok("debug") if !ci => Ok(Self::Debug),
+            Ok("debug") => Err("debug stress evidence is forbidden in CI"),
+            Ok("public") | Err(&std::env::VarError::NotPresent) => Ok(Self::Public),
+            _ => Err("invalid STRESS_EVIDENCE_MODE"),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct PublicRunMetadata<'a> {
+    pub schema_version: u8,
+    pub test_name: &'a str,
+    pub lane: &'a str,
+    pub seed: u64,
+    pub binary_version: &'a str,
+    pub execution_model: &'a str,
+    pub concurrency: usize,
+    pub scenario_timeout_ms: u64,
+    pub operation_timeout_ms: u64,
+    pub metrics_interval_ms: u64,
+    pub warmup_ops: usize,
+    pub slo: Option<PublicSloConfig>,
+    pub replay: bool,
+    pub git_sha: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PublicSloConfig {
+    pub p99_max_latency_ns: Option<u64>,
+    pub p95_max_latency_ns: Option<u64>,
+    pub p999_max_latency_ns: Option<u64>,
+    pub p9999_max_latency_ns: Option<u64>,
+    pub min_throughput: Option<f64>,
+    pub max_error_ratio: Option<f64>,
+}
+
+impl From<&SloConfig> for PublicSloConfig {
+    fn from(config: &SloConfig) -> Self {
+        assert!(config.min_throughput.is_none_or(f64::is_finite));
+        assert!(config.max_error_ratio.is_none_or(f64::is_finite));
+        let ns = |value: Option<std::time::Duration>| value.map(|v| v.as_nanos() as u64);
+        Self {
+            p99_max_latency_ns: ns(config.p99_max_latency),
+            p95_max_latency_ns: ns(config.p95_max_latency),
+            p999_max_latency_ns: ns(config.p999_max_latency),
+            p9999_max_latency_ns: ns(config.p9999_max_latency),
+            min_throughput: config.min_throughput,
+            max_error_ratio: config.max_error_ratio,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct PublicCheckSummary {
+    pub schema_version: u8,
+    pub skipped: bool,
+    pub success: bool,
+    pub code: &'static str,
+    pub watchdog: &'static str,
+    pub slo_passed: bool,
+    pub duration_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -73,15 +153,22 @@ pub fn prepare_artifacts(
         return None;
     }
     let stamp = started_at.format("%Y%m%dT%H%M%SZ").to_string();
-    let base = root
-        .join(lane.as_str())
-        .join(sanitize(test_name))
-        .join(stamp);
+    let parent = root.join(lane.as_str()).join(sanitize(test_name));
+    let base = reserve_run_directory(&parent, &stamp)?;
 
+    let mode = EvidenceMode::from_environment().expect("valid stress evidence mode");
     let logs_dir = base.join("logs");
     let checks_dir = base.join("checks");
 
-    if std::fs::create_dir_all(&logs_dir).is_err() {
+    if mode == EvidenceMode::Debug {
+        #[cfg(target_family = "unix")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700))
+                .expect("protect local debug artifacts");
+        }
+    }
+    if mode == EvidenceMode::Debug && std::fs::create_dir_all(&logs_dir).is_err() {
         return None;
     }
     if std::fs::create_dir_all(&checks_dir).is_err() {
@@ -92,7 +179,21 @@ pub fn prepare_artifacts(
         root: base,
         logs_dir,
         checks_dir,
+        mode,
     })
+}
+
+fn reserve_run_directory(parent: &Path, stamp: &str) -> Option<PathBuf> {
+    std::fs::create_dir_all(parent).ok()?;
+    for attempt in 0..10_000 {
+        let base = parent.join(format!("{stamp}-{attempt:04}"));
+        match std::fs::create_dir(&base) {
+            Ok(()) => return Some(base),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 pub fn write_run_json(paths: &ArtifactPaths, metadata: &RunMetadata) {
@@ -100,6 +201,59 @@ pub fn write_run_json(paths: &ArtifactPaths, metadata: &RunMetadata) {
     if let Ok(body) = serde_json::to_string_pretty(metadata) {
         let _ = std::fs::write(path, body);
     }
+}
+
+pub fn write_public_run_json(paths: &ArtifactPaths, metadata: &PublicRunMetadata<'_>) {
+    write_json(&paths.root.join("run.json"), metadata);
+}
+
+pub fn write_public_metrics(paths: &ArtifactPaths, report: &MetricsReport) {
+    #[derive(Serialize)]
+    struct PublicMetrics {
+        schema_version: u8,
+        duration_ms: u64,
+        successes: u64,
+        errors: u64,
+        sample_count: usize,
+        throughput_per_sec: f64,
+        p50_ns: Option<u64>,
+        p95_ns: Option<u64>,
+        p99_ns: Option<u64>,
+        p999_ns: Option<u64>,
+        p9999_ns: Option<u64>,
+        outlier_count: usize,
+        outlier_ratio: f64,
+    }
+    let summary = &report.summary;
+    assert!(summary.throughput_per_sec.is_finite() && summary.outlier_ratio.is_finite());
+    let nanos = |value: Option<std::time::Duration>| value.map(|v| v.as_nanos() as u64);
+    write_json(
+        &paths.root.join("metrics.json"),
+        &PublicMetrics {
+            schema_version: 1,
+            duration_ms: report.duration.as_millis() as u64,
+            successes: summary.successes,
+            errors: summary.errors,
+            sample_count: summary.sample_count,
+            throughput_per_sec: summary.throughput_per_sec,
+            p50_ns: nanos(summary.p50),
+            p95_ns: nanos(summary.p95),
+            p99_ns: nanos(summary.p99),
+            p999_ns: nanos(summary.p999),
+            p9999_ns: nanos(summary.p9999),
+            outlier_count: summary.outlier_count,
+            outlier_ratio: summary.outlier_ratio,
+        },
+    );
+}
+
+pub fn write_public_checks(paths: &ArtifactPaths, summary: &PublicCheckSummary) {
+    write_json(&paths.checks_dir.join("summary.json"), summary);
+}
+
+fn write_json<T: Serialize>(path: &Path, value: &T) {
+    let body = serde_json::to_vec_pretty(value).expect("serialize stress evidence");
+    std::fs::write(path, body).expect("write stress evidence");
 }
 
 pub fn write_command_txt(paths: &ArtifactPaths, command: &str) {
@@ -336,4 +490,71 @@ fn disk_total_bytes(path: &Path) -> Option<u64> {
 #[cfg(not(target_family = "unix"))]
 fn disk_total_bytes(_path: &Path) -> Option<u64> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reserve_run_directory, EvidenceMode, PublicRunMetadata};
+
+    #[test]
+    fn repeated_invocations_reserve_distinct_run_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("ci").join("repeated_case");
+        let first = reserve_run_directory(&parent, "20261122T010000Z").unwrap();
+        let second = reserve_run_directory(&parent, "20261122T010000Z").unwrap();
+        assert_ne!(first, second);
+        assert!(first.is_dir() && second.is_dir());
+    }
+
+    #[test]
+    fn evidence_mode_defaults_public_and_rejects_debug_in_ci() {
+        assert_eq!(
+            EvidenceMode::parse(Err(&std::env::VarError::NotPresent), false),
+            Ok(EvidenceMode::Public)
+        );
+        assert_eq!(
+            EvidenceMode::parse(Ok("public"), true),
+            Ok(EvidenceMode::Public)
+        );
+        assert_eq!(
+            EvidenceMode::parse(Ok("debug"), false),
+            Ok(EvidenceMode::Debug)
+        );
+        assert!(EvidenceMode::parse(Ok("debug"), true).is_err());
+        assert!(EvidenceMode::parse(Ok("unknown"), false).is_err());
+    }
+
+    #[test]
+    fn public_run_schema_excludes_machine_and_free_text_fields() {
+        let run = PublicRunMetadata {
+            schema_version: 1,
+            test_name: "case_one",
+            lane: "nightly",
+            seed: 7,
+            binary_version: "alopex-core@0.8.17",
+            execution_model: "SyncSingle",
+            concurrency: 1,
+            scenario_timeout_ms: 1000,
+            operation_timeout_ms: 100,
+            metrics_interval_ms: 10,
+            warmup_ops: 0,
+            slo: None,
+            replay: true,
+            git_sha: None,
+        };
+        let value = serde_json::to_value(run).unwrap();
+        let fields = value.as_object().unwrap();
+        assert_eq!(fields.len(), 14);
+        for prohibited in [
+            "system",
+            "env",
+            "topology",
+            "storage_mode",
+            "error",
+            "command",
+            "started_at",
+        ] {
+            assert!(!fields.contains_key(prohibited));
+        }
+    }
 }

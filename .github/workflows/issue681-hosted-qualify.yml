@@ -1,0 +1,168 @@
+name: HNSW public hosted qualification
+
+on:
+  pull_request:
+    types: [opened]
+    branches: [integration/v0.8.17-candidate]
+
+permissions: {}
+
+concurrency:
+  group: issue681-hosted-qualify-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    if: ${{ github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'prep/v0817-681-hosted-build' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check exact PR event and host storage before checkout
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, sys
+          code = 'SOURCE'
+          try:
+              e = os.environ
+              assert os.geteuid() != 0
+              assert e.get('GITHUB_EVENT_NAME') == 'pull_request'
+              assert e.get('GITHUB_REPOSITORY') == 'alopex-db/alopex'
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_HEAD_SHA', ''))
+              assert e.get('GITHUB_RUN_ID', '').isdecimal()
+              assert e.get('GITHUB_RUN_ATTEMPT', '').isdecimal()
+              event = json.loads(pathlib.Path(e['GITHUB_EVENT_PATH']).read_text())
+              pr = event['pull_request']
+              assert pr['draft'] is True
+              assert pr['head']['sha'] == e['EXPECTED_HEAD_SHA']
+              assert pr['head']['repo']['full_name'] == e['GITHUB_REPOSITORY']
+              assert pr['base']['ref'] == 'integration/v0.8.17-candidate'
+              assert event['repository']['full_name'] == e['GITHUB_REPOSITORY']
+              assert e['GITHUB_REF'] == f"refs/pull/{pr['number']}/merge"
+              code = 'STORAGE'
+              home = pathlib.Path.home()
+              workspace = pathlib.Path(e['GITHUB_WORKSPACE']).parent
+              temporary = pathlib.Path(e['RUNNER_TEMP'])
+              for root in (home, workspace, temporary):
+                  assert (root.is_absolute() and root.is_dir() and
+                          not root.is_symlink() and
+                          root.resolve(strict=True) == root and
+                          root.stat().st_uid == os.geteuid())
+              lines = pathlib.Path('/proc/self/mountinfo').read_text().splitlines()
+              assert 1 <= len(lines) <= 4096
+              devices = {}
+              saw_root = False
+              for line in lines:
+                  fields = line.split(' - ', 1)[0].split()
+                  assert len(fields) >= 6
+                  mount = re.sub(r'\\([0-7]{3})',
+                                 lambda match: chr(int(match.group(1), 8)),
+                                 fields[4])
+                  path = pathlib.Path(mount)
+                  assert path.is_absolute() and path.exists() and not path.is_symlink()
+                  saw_root |= path == pathlib.Path('/')
+                  device = os.stat(path).st_dev
+                  vfs = os.statvfs(path)
+                  assert (vfs.f_frsize > 0 and
+                          0 <= vfs.f_bavail <= vfs.f_bfree <= vfs.f_blocks)
+                  allocation = (vfs.f_blocks-vfs.f_bfree)*vfs.f_frsize
+                  available = vfs.f_bavail*vfs.f_frsize
+                  if device in devices:
+                      previous = devices[device]
+                      devices[device] = (max(previous[0], allocation),
+                                         min(previous[1], available))
+                  else:
+                      devices[device] = (allocation, available)
+              assert saw_root and 1 <= len(devices) <= 256
+              used = sum(value[0] for value in devices.values())
+              assert used + 10_000_000_000 < 40_000_000_000
+              assert used + 10_000_000_000 < 50_000_000_000
+              assert devices[os.stat(workspace).st_dev][1] > 10_000_000_000
+              assert devices[os.stat(home).st_dev][1] > 1_000_000_000
+              assert devices[os.stat(temporary).st_dev][1] > 1_000_000_000
+              print('{"case":"HNSW_PRECHECK","outcome":"passed"}')
+          except BaseException:
+              print(json.dumps({'case':'HNSW_PRECHECK','outcome':'failed',
+                                'error_code':code}, sort_keys=True))
+              sys.exit(1)
+          PY
+      - name: Fetch exact public PR head without logging runner paths
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess, sys
+          try:
+              e = os.environ
+              event = json.loads(pathlib.Path(e['GITHUB_EVENT_PATH']).read_text())
+              pr = event['pull_request']
+              assert e['GITHUB_REPOSITORY'] == 'alopex-db/alopex'
+              assert pr['head']['repo']['full_name'] == e['GITHUB_REPOSITORY']
+              assert pr['base']['ref'] == 'integration/v0.8.17-candidate'
+              assert pr['draft'] is True
+              assert type(pr['number']) is int and pr['number'] > 0
+              assert re.fullmatch(r'[0-9a-f]{40}', e['EXPECTED_HEAD_SHA'])
+              assert pr['head']['sha'] == e['EXPECTED_HEAD_SHA']
+              workspace = pathlib.Path(e['GITHUB_WORKSPACE'])
+              assert workspace.is_absolute() and workspace.is_dir()
+              assert not workspace.is_symlink() and not any(workspace.iterdir())
+              assert workspace.stat().st_uid == os.geteuid()
+              git = pathlib.Path('/usr/bin/git')
+              info = git.stat()
+              assert (git.is_file() and not git.is_symlink() and
+                      info.st_uid == 0 and not (info.st_mode & 0o022))
+              env = {'HOME': str(pathlib.Path.home()), 'PATH': '/usr/bin:/bin',
+                     'LANG': 'C.UTF-8', 'GIT_TERMINAL_PROMPT': '0',
+                     'GIT_CONFIG_GLOBAL': '/dev/null',
+                     'GIT_CONFIG_NOSYSTEM': '1'}
+              def run(argv, timeout=30):
+                  result = subprocess.run(argv, cwd=workspace, env=env,
+                                          stdin=subprocess.DEVNULL,
+                                          capture_output=True, timeout=timeout)
+                  assert result.returncode == 0
+                  return result.stdout.decode().strip()
+              run([str(git), 'init', '-q'])
+              run([str(git), 'remote', 'add', 'origin',
+                   'https://github.com/alopex-db/alopex.git'])
+              run([str(git), '-c', 'credential.helper=', 'fetch', '-q',
+                   '--no-tags', '--depth=1', 'origin',
+                   f"refs/pull/{pr['number']}/head"], timeout=180)
+              run([str(git), 'checkout', '-q', '--detach', 'FETCH_HEAD'])
+              assert run([str(git), 'rev-parse', 'HEAD']) == e['EXPECTED_HEAD_SHA']
+              print('{"case":"HNSW_CHECKOUT","outcome":"passed"}')
+          except BaseException:
+              print('{"case":"HNSW_CHECKOUT","outcome":"failed",'
+                    '"error_code":"SOURCE"}')
+              sys.exit(1)
+          PY
+      - name: Qualify selected Linux job
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys
+          try:
+              result = subprocess.run(
+                  ['python3', '-B', 'scripts/performance/issue681_hosted_qualify.py'],
+                  stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                  timeout=240)
+              value = json.loads(result.stdout)
+              assert not result.stderr
+              assert value.get('case') == 'HNSW_HOSTED_QUAL'
+              if result.returncode == 0:
+                  assert value == {'case':'HNSW_HOSTED_QUAL','outcome':'passed'}
+              else:
+                  assert (value.get('outcome') == 'failed' and
+                          value.get('error_code') in
+                          ('SOURCE','PLATFORM','STORAGE'))
+                  assert set(value) == {'case','outcome','error_code'}
+              print(json.dumps(value, sort_keys=True))
+              sys.exit(result.returncode)
+          except Exception:
+              print('{"case":"HNSW_HOSTED_QUAL","outcome":"failed",'
+                    '"error_code":"EXECUTION"}')
+              sys.exit(1)
+          PY
+      - name: Check exact installed Rust without network
+        run: python3 -B scripts/performance/issue681_hosted_rust_preflight.py

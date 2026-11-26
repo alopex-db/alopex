@@ -63,7 +63,8 @@ def load_manifest(path, expected_digest):
             set(manifest["package_files"]) == {
                 f"four_case_diagnostic/{name}.py" for name in
                 ("__init__", "adapter", "container_pair_entrypoint",
-                 "log_parser", "operation", "oracle", "runner", "supervisor",
+                 "log_parser", "operation", "oracle", "public_attribution", "public_timing",
+                 "runner", "supervisor",
                  "worker")} and
             all(type(value) is str and qualification.HEX64.fullmatch(value)
                 for value in manifest["package_files"].values()) and
@@ -169,8 +170,43 @@ def verify_public_receipt(output, *, job_id, run_attempt, binding_sha256):
     return public
 
 
+def verify_failed_receipt(output, *, run_attempt):
+    """Bind a fixed public failure and completed count to its private receipt."""
+    require(type(run_attempt) is str and run_attempt.isdecimal() and
+            int(run_attempt) > 0, "RECEIPT_IDENTITY")
+    output = Path(output)
+    try:
+        public = json.loads(_read_owned_file(output / "receipt.public.json", 4096),
+                            object_pairs_hook=entrypoint.acquire.acquisition._unique_pairs)
+        private_raw = _read_owned_file(output / "receipt.private.json", 4096)
+        private = json.loads(private_raw,
+                             object_pairs_hook=entrypoint.acquire.acquisition._unique_pairs)
+    except (OSError, ValueError, UnicodeError) as error:
+        raise ValueError("RECEIPT_IDENTITY") from error
+    require(type(public) is dict and type(private) is dict and
+            set(public) == {"schema", "status", "error_code", "pair_count",
+                            "performance_qualification", "run_attempt",
+                            "private_receipt_sha256"} and
+            set(private) == {"schema", "status", "error_code", "pair_count",
+                             "performance_qualification"} and
+            public["schema"] == private["schema"] == SCHEMA and
+            public["status"] == private["status"] == "failed" and
+            public["run_attempt"] == run_attempt and
+            public["performance_qualification"] is False and
+            private["performance_qualification"] is False and
+            type(public["pair_count"]) is int and
+            0 <= public["pair_count"] <= 12 and
+            public["pair_count"] == private["pair_count"] and
+            type(public["error_code"]) is str and
+            public["error_code"] == private["error_code"] and
+            public["private_receipt_sha256"] == hashlib.sha256(private_raw).hexdigest(),
+            "RECEIPT_IDENTITY")
+    return public
+
+
 def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
-                     environment, output, operations, stage_pair, on_complete=None):
+                     environment, output, operations, stage_pair, on_complete=None,
+                     completed=None):
     """Attest #804, then run 12 independently staged owned-server pairs.
 
     ``stage_pair`` comes from the source-pinned wrapper and returns a deleted,
@@ -243,6 +279,8 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
                     report["owned_resources_cleaned"] is True, "PAIR_FAILED")
             runs[(case, trial)] = run
             results.append({"case": case, "trial": trial, "status": "passed"})
+            if completed is not None:
+                completed["pair_count"] = len(results)
     if on_complete is not None:
         on_complete(runs, lock, manifest, proof, receipt, job_id)
     private = {"schema": SCHEMA, "status": "passed", "job_id": job_id,
@@ -268,12 +306,13 @@ def _run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
 def run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
                     environment, output, operations, stage_pair, on_complete=None):
     """Run the matrix and emit a fixed-code public failure when it cannot pass."""
+    completed = {"pair_count": 0}
     try:
         _invalidate_receipts(output)
         return _run_current_job(
             manifest_path, manifest_digest, repo=repo, runner_temp=runner_temp,
             environment=environment, output=output, operations=operations,
-            stage_pair=stage_pair, on_complete=on_complete)
+            stage_pair=stage_pair, on_complete=on_complete, completed=completed)
     except BaseException as error:
         code = error.args[0] if type(error) is ValueError and error.args else "INTERNAL"
         allowed = {"MISSING_PIN", "PRIVATE_MANIFEST", "SAME_JOB", "QUALIFICATION",
@@ -281,7 +320,8 @@ def run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
                    "OPERATOR_IDENTITY", "OUTPUT_STATE", "PAIR_STAGE", "PAIR_FAILED"}
         public = {"schema": SCHEMA, "status": "failed",
                   "error_code": code if code in allowed else "INTERNAL",
-                  "pair_count": 0, "performance_qualification": False}
+                  "pair_count": completed["pair_count"],
+                  "performance_qualification": False}
         attempt = environment.get("GITHUB_RUN_ATTEMPT")
         if type(attempt) is str and attempt.isdecimal() and int(attempt) > 0:
             public["run_attempt"] = attempt
@@ -295,6 +335,7 @@ def run_current_job(manifest_path, manifest_digest, *, repo, runner_temp,
                         stat.S_IMODE(info.st_mode) == 0o700, "OUTPUT_STATE")
             failure = {"schema": SCHEMA, "status": "failed",
                        "error_code": public["error_code"],
+                       "pair_count": public["pair_count"],
                        "performance_qualification": False}
             public["private_receipt_sha256"] = _write_json(
                 destination / "receipt.private.json", failure)

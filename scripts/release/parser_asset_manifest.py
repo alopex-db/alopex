@@ -175,19 +175,22 @@ def read_regular_file(
     max_bytes: int | None = None,
 ) -> bytes:
     try:
-        metadata = path.lstat()
+        entry = path.lstat()
+        if stat.S_ISLNK(entry.st_mode):
+            raise ParserAssetError(f"{description} must not be a symlink: {path}")
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError as error:
         raise ParserAssetError(f"missing {description}: {path}") from error
-    if stat.S_ISLNK(metadata.st_mode):
-        raise ParserAssetError(f"{description} must not be a symlink: {path}")
-    if not stat.S_ISREG(metadata.st_mode):
-        raise ParserAssetError(f"{description} must be a regular file: {path}")
-    if max_bytes is not None and metadata.st_size > max_bytes:
-        raise ParserAssetError(
-            f"{description} exceeds the {max_bytes}-byte size limit"
-        )
     try:
-        content = path.read_bytes()
+        with os.fdopen(fd, "rb") as handle:
+            metadata = os.fstat(handle.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ParserAssetError(f"{description} must be a regular file: {path}")
+            if max_bytes is not None and metadata.st_size > max_bytes:
+                raise ParserAssetError(
+                    f"{description} exceeds the {max_bytes}-byte size limit"
+                )
+            content = handle.read(max_bytes + 1 if max_bytes is not None else -1)
     except OSError as error:
         raise ParserAssetError(f"could not read {description}: {path}") from error
     if nonempty and not content:
@@ -1012,10 +1015,14 @@ def validate_record_shape(record: dict[str, Any]) -> None:
 
 
 def verify_record_archive(record: dict[str, Any], archive_path: Path) -> None:
-    validate_record_shape(record)
     archive_content = read_regular_file(
         archive_path, "target archive", max_bytes=MAX_ARCHIVE_BYTES
     )
+    verify_record_archive_bytes(record, archive_content)
+
+
+def verify_record_archive_bytes(record: dict[str, Any], archive_content: bytes) -> None:
+    validate_record_shape(record)
     if len(archive_content) != record["archive"]["size"]:
         raise ParserAssetError("outer archive size mismatch")
     if sha256_bytes(archive_content) != record["archive"]["sha256"]:

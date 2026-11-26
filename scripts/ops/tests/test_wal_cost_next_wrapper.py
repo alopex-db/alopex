@@ -128,10 +128,32 @@ class AdmissionContract(unittest.TestCase):
         config_path = HERE / 'exact-a415-wal-cost-input.private.json'
         config = json.loads(config_path.read_text())
         self.assertEqual(wrapper.sha(config_path),
-                         '6cfd541fee14812b6ecda2a51c839e1048116ea023b7124be84e4292d5b34d66')
+                         '2d9222eaec0ea9bbc22874f8dcea17f8b09525fa6c8ba54b7d990ac9436f5c55')
+        self.assertEqual(wrapper.FROZEN_COMMIT,
+                         'fd34ca342617c247a9c711bcf597da8bbef3118f')
+        self.assertEqual(config['sources']['.github/ops/native-evidence-cert.pem'],
+                         'e8a39adb8f76185a87f805f6d083bdbe2bd7ea5d3bc05607f1a7a2e0deb8b775')
         self.assertEqual(config['stage_seconds'], 5400)
         self.assertEqual(config['cell_seconds'], 30)
         self.assertEqual(set(config['products']), {'before', 'candidate'})
+
+    def test_frozen_successor_rejects_old_head_and_tampered_recipient(self):
+        frozen = Path('/frozen')
+        config = {'sources': {
+            'scripts/ops/hosted_wal_cost.py': 'a' * 64,
+            '.github/ops/native-evidence-cert.pem': 'b' * 64}}
+        with patch.object(wrapper, 'head', return_value=
+                          '490f002dfb2c7f509a2444891808d9704fe6b001'), \
+             patch.object(wrapper, 'sha') as digest:
+            with self.assertRaisesRegex(RuntimeError, 'frozen comparator checkout differs'):
+                wrapper.verify_frozen_checkout(frozen, config, 'c' * 64)
+            digest.assert_not_called()
+        def observed(path):
+            return 'a' * 64 if path.name == 'hosted_wal_cost.py' else '0' * 64
+        with patch.object(wrapper, 'head', return_value=wrapper.FROZEN_COMMIT), \
+             patch.object(wrapper, 'sha', side_effect=observed):
+            with self.assertRaisesRegex(RuntimeError, 'frozen source differs'):
+                wrapper.verify_frozen_checkout(frozen, config, 'c' * 64)
 
     def test_artifact_preflight_rejects_missing_or_changed_baseline(self):
         products = {name: {'run': number, 'controller': name + '-head',

@@ -1,0 +1,20 @@
+{
+  "schema": "alopex.reference-original-staging/v1",
+  "originals": {
+    "before": {
+      "basename": "before-13585234163.zip",
+      "zip_sha256": "6a02fa70c6f37f96b501c35f563ac955593795540dc6d06ee553ea854a2b10a8",
+      "zip_size_bytes": 50676162
+    },
+    "published": {
+      "basename": "published-13585845849.zip",
+      "zip_sha256": "c7998a1f94da6c03ede541f9be5c93a8ea202d936bccb8b2cbf26246f8205e47",
+      "zip_size_bytes": 49185086
+    },
+    "postgresql": {
+      "basename": "reference-image-13645341209.zip",
+      "zip_sha256": "40364568f80fcef9b40ca83d7530bbbaa0b7ec04d693738aacc7aecdfc62463a",
+      "zip_size_bytes": 528892087
+    }
+  }
+}

@@ -43,10 +43,12 @@ job's owner.
 | `alopex-cli.yml:s3-compatibility-test` | Development CI | exact-SHA S3 behavior result |
 | `alopex-cli.yml:cli-success` | Development CI | status-only owner join |
 | `alopex-performance.yml:inventory` | Extended Verification | encrypted read-only host inventory, without qualification |
+| `alopex-performance.yml:hnsw_release_admission` | Extended Verification | #681 exact-source and storage admission before checkout, with a fixed result and no build or measurement |
 | `alopex-performance.yml:qualification` | Extended Verification | exact-SHA same-runner native acceptance; for #712, the pinned four-case server/client SQL matrix or paired stage diagnostic; for #684, selected Docker CLI offline wire capture after acceptance, each with separate encrypted evidence |
 | `alopex-performance.yml:wal_cost_682` | Extended Verification | exact-SHA same-runner native acceptance followed by frozen four-cell WAL cost comparison and encrypted evidence |
 | `alopex-performance.yml:s04_inspect` | Extended Verification | read-only selected-host Docker endpoint and CLI inspection for #684; encrypted private receipt, no container creation or performance qualification |
 | `alopex-performance.yml:s04_socket_inventory` | Extended Verification | read-only selected Unix socket path, ACL, context and daemon metadata for #684; encrypted private receipt before any S04 connection, without performance qualification |
+| `alopex-performance.yml:public_native_build` | Extended Verification | #712 exact-source native server and wheel build with verified public asset export |
 | `alopex-py-release.yml:linux` | RC Qualification | qualified Linux wheels |
 | `alopex-py-release.yml:macos` | RC Qualification | qualified macOS wheels |
 | `alopex-py-release.yml:windows` | RC Qualification | qualified Windows wheels |
@@ -63,6 +65,7 @@ job's owner.
 | `alopex-py.yml:benchmarks` | Development CI | fast exact-SHA benchmark policy result |
 | `alopex-py.yml:ci-success` | Development CI | status-only owner join |
 | `ci.yml:scope` | Development CI | exact-SHA change classification |
+| `ci.yml:hnsw-contract` | Development CI | exact-SHA bounded HNSW public harness contract tests |
 | `ci.yml:fmt` | Development CI | exact-SHA formatting result |
 | `ci.yml:formal` | Development CI | exact-SHA bounded model result |
 | `ci.yml:clippy` | Development CI | exact-SHA lint result |
@@ -79,9 +82,11 @@ job's owner.
 | `compatibility.yml:windows-overflow-public` | Extended Verification | manually selected Windows public overflow, fault/exit recovery and published old-reader receipts; source identity and cleanup |
 | `compatibility.yml:native` | Development CI | exact-SHA native compatibility result |
 | `compatibility.yml:wasm` | Development CI | exact-SHA WASM compatibility result |
+| `issue681-hosted-qualify.yml:qualify` | Extended Verification | #681 Draft PR head and selected Linux host admission with a fixed qualification result, without performance measurement |
 | `parity-harness.yml:contract` | Development CI | benchmark harness contract result |
 | `parity-performance.yml:performance` | Extended Verification | exact-SHA public v4 numeric JSON/Markdown and fixed run-status pair; private debug remains on the runner |
 | `parity-performance.yml:retain-run-outcome` | Extended Verification | runner-independent exact-SHA terminal run outcome |
+| `native-evidence-expiry.yml:recipients` | Extended Verification | scheduled read-only recipient certificate renewal-deadline check for candidate and frozen comparator |
 | `public-release-verification.yml:verify` | Stable Delivery | package reachability and minimal import |
 | `public-release-verification.yml:publish` | Stable Delivery | immutable public run report |
 | `public-release-verification.yml:publish-vector-benchmark` | Stable Delivery | selected successful run authentication and byte-identical public pair in docs |

@@ -7,7 +7,9 @@ use tempfile::TempDir;
 use super::artifacts::{
     binary_version, collect_env_metadata, command_hint, detect_git_sha, prepare_artifacts,
     storage_mode_env, system_info, topology_env, write_checks, write_command_txt, write_log,
-    write_metrics, write_run_json, ArtifactPaths, CheckSummary, RunMetadata,
+    write_metrics, write_public_checks, write_public_metrics, write_public_run_json,
+    write_run_json, ArtifactPaths, CheckSummary, EvidenceMode, PublicCheckSummary,
+    PublicRunMetadata, PublicSloConfig, RunMetadata,
 };
 use super::fixtures::{open_store_for_mode, StressStorageMode};
 use super::lane::{should_run, Lane};
@@ -135,6 +137,7 @@ pub struct StressTestHarness {
 
 impl StressTestHarness {
     pub fn new(config: StressTestConfig) -> CoreResult<Self> {
+        EvidenceMode::from_environment().expect("valid stress evidence mode");
         let temp_dir = TempDir::new()?;
         let watchdog = Arc::new(Watchdog::new(WatchdogConfig {
             operation_timeout: config.operation_timeout,
@@ -261,7 +264,11 @@ impl StressTestHarness {
             &slo_result,
             &watchdog_result,
         );
-        self.write_metrics_report(&report);
+        if EvidenceMode::from_environment().expect("valid stress evidence mode")
+            == EvidenceMode::Debug
+        {
+            self.write_metrics_report(&report);
+        }
         let ctx = ArtifactContext {
             started_at,
             duration,
@@ -345,7 +352,11 @@ impl StressTestHarness {
             &slo_result,
             &watchdog_result,
         );
-        self.write_metrics_report(&report);
+        if EvidenceMode::from_environment().expect("valid stress evidence mode")
+            == EvidenceMode::Debug
+        {
+            self.write_metrics_report(&report);
+        }
         let ctx = ArtifactContext {
             started_at,
             duration,
@@ -467,6 +478,74 @@ impl StressTestHarness {
         let Some(paths) = paths else {
             return;
         };
+
+        if paths.mode == EvidenceMode::Public {
+            let execution_model = match self.config.execution_model {
+                ExecutionModel::SyncSingle => "SyncSingle",
+                ExecutionModel::SyncMulti => "SyncMulti",
+                ExecutionModel::AsyncSingle => "AsyncSingle",
+                ExecutionModel::AsyncMulti => "AsyncMulti",
+            };
+            let sha = detect_git_sha().filter(|value| {
+                (value.len() == 40 || value.len() == 64)
+                    && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
+            write_public_run_json(
+                paths,
+                &PublicRunMetadata {
+                    schema_version: 1,
+                    test_name: &self.config.name,
+                    lane: self.config.lane.as_str(),
+                    seed: self.seed,
+                    binary_version: &binary_version(),
+                    execution_model,
+                    concurrency: self.config.concurrency,
+                    scenario_timeout_ms: self.config.scenario_timeout.as_millis() as u64,
+                    operation_timeout_ms: self.config.operation_timeout.as_millis() as u64,
+                    metrics_interval_ms: self.config.metrics_interval.as_millis() as u64,
+                    warmup_ops: self.config.warmup_ops,
+                    slo: self.config.slo.as_ref().map(PublicSloConfig::from),
+                    replay: deterministic_mode(),
+                    git_sha: sha,
+                },
+            );
+            if let Some(report) = ctx.report {
+                write_public_metrics(paths, report);
+            }
+            let watchdog = match ctx.watchdog_result {
+                WatchdogResult::Success => "success",
+                WatchdogResult::OperationTimeout => "operation_timeout",
+                WatchdogResult::ScenarioTimeout => "scenario_timeout",
+            };
+            let success = !ctx.skipped
+                && watchdog == "success"
+                && ctx.slo_result.passed
+                && ctx.error.is_none();
+            let code = if ctx.skipped {
+                "skipped"
+            } else if ctx.error.is_some() {
+                "test_error"
+            } else if watchdog != "success" {
+                watchdog
+            } else if !ctx.slo_result.passed {
+                "slo_failed"
+            } else {
+                "passed"
+            };
+            write_public_checks(
+                paths,
+                &PublicCheckSummary {
+                    schema_version: 1,
+                    skipped: ctx.skipped,
+                    success,
+                    code,
+                    watchdog,
+                    slo_passed: ctx.slo_result.passed,
+                    duration_ms: ctx.duration.as_millis() as u64,
+                },
+            );
+            return;
+        }
 
         let run_meta = RunMetadata {
             test_name: self.config.name.clone(),

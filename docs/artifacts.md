@@ -1,79 +1,39 @@
-# Artifacts
+# Stress artifacts
 
-This document describes the artifact layout, metadata, and replay guidance for stress tests.
+The harness uses `STRESS_EVIDENCE_MODE=public` by default. Set
+`STRESS_EVIDENCE_MODE=debug` explicitly for local diagnosis. Debug mode fails
+when `CI` is set. `STRESS_ARTIFACTS_DIR` selects the root (default `artifacts/`);
+an empty value disables harness artifacts. Stage 2 jobs set a dedicated public
+root and reject missing records.
 
-## Output roots
+Each run lives at `<root>/<lane>/<test-name>/<YYYYMMDDTHHMMSSZ>-<index>/`.
+The index is reserved atomically, so repeated invocations in the same second
+cannot overwrite an earlier measurement.
 
-Artifacts are written to `artifacts/` when `STRESS_ARTIFACTS_DIR` is unset, and disabled only when set to an empty string.
-Metrics reports are written when `STRESS_REPORT_DIR` is set (default: `target/stress-reports`).
+## Public mode
 
-## Layout
+Public runs contain only `run.json`, `metrics.json`, and `checks/summary.json`.
+Performance cases also write `checks/perf_*.json`. No command, log, host
+inventory, environment snapshot, crash input, or free-text error is recorded.
 
-```
-artifacts/<lane>/<test-name>/<timestamp>/
-  run.json
-  command.txt
-  metrics.json
-  logs/
-    harness.log
-    chaos_timeline.log
-  checks/
-    summary.json
-    kv_storage_consistency_*.json
-    sql_storage_consistency_*.json
-    dataframe_consistency.json
-    durability_*.json
-    linearizability.json
-    serializability.json
-    perf_*.json
-```
+- `run.json` has schema version 1, fixed test and lane identifiers, seed, crate
+  version, execution model, concurrency, timeouts, interval, warmup count, SLO
+  configuration, replay flag, and a validated commit SHA when available.
+- `metrics.json` has schema version 1, duration and operation counts, finite
+  throughput and outlier ratio, and optional latency percentiles in nanoseconds.
+- `checks/summary.json` has schema version 1, a fixed result code, watchdog
+  outcome, SLO outcome, skipped/success flags, and duration.
+- Performance checks retain finite current and baseline numeric values, a
+  pass flag per metric, and the overall comparison result. The Stage 2
+  publication step supplies and checks the pinned baseline identity.
 
-The `<timestamp>` format is `YYYYMMDDTHHMMSSZ`.
+See [stress-evidence-modes.md](stress-evidence-modes.md) for the acceptance
+contract.
 
-## run.json
+## Local debug mode
 
-`run.json` captures a configuration snapshot for reproducibility:
-
-- `test_name`, `lane`, `seed`, `replay`
-- `topology`, `binary_version`, `storage_mode`
-- `execution_model`, `concurrency`, `scenario_timeout_ms`, `operation_timeout_ms`
-- `metrics_interval_ms`, `warmup_ops`, `slo`
-- `started_at`, `git_sha`
-- `system` (OS, arch, kernel, CPU, mem, disk, compiler)
-- `env` (filtered environment variables)
-
-## command.txt
-
-`command.txt` includes a ready-to-run command with lane/seed:
-
-```
-STRESS_LANE=<lane> STRESS_SEED=<seed> cargo test -p <package> --tests --features lane_<lane>
-```
-
-## checks/
-
-The `checks/` directory stores detailed verification outputs. Examples:
-
-- `kv_storage_consistency_*.json`
-- `sql_storage_consistency_*.json`
-- `dataframe_consistency.json`
-- `durability_crash_loop.json`, `durability_wal_integrity.json`
-- `linearizability.json`, `serializability.json`
-- `perf_mixed_point_latency.json`, `perf_sequential_throughput_and_amplification.json`
-
-## logs/
-
-- `harness.log`: summary line with lane/seed/throughput.
-- `chaos_timeline.log`: chaos injection timeline (chaos matrix runs).
-
-## Replay workflow
-
-1) Read `command.txt` to get the exact command.
-2) Set `STRESS_REPLAY=1` (or `STRESS_SEED`/`STRESS_REPLAY_SEED`) to force deterministic mode.
-3) Re-run the test in the same lane and storage mode.
-
-Example:
-
-```bash
-STRESS_REPLAY=1 STRESS_SEED=12345 cargo test -p alopex-core --tests --features lane_nightly
-```
+The same run directory additionally contains `command.txt`, `logs/harness.log`,
+and detailed `checks/*.json` files. Chaos runs may write a timeline log.
+`STRESS_REPORT_DIR` (default `target/stress-reports`) receives the legacy JSON
+and Markdown metrics reports in debug mode only. These outputs are local
+diagnostics and are not accepted by the Stage 2 publisher.

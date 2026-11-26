@@ -146,6 +146,51 @@ fn write_perf_report(ctx: &common::TestContext, file: &str, report: &PerfReport)
         return;
     };
     let path = paths.checks_dir.join(file);
+    if paths.mode == common::artifacts::EvidenceMode::Public {
+        #[derive(Serialize)]
+        struct PublicComparison {
+            current: f64,
+            baseline: f64,
+            passed: bool,
+        }
+        #[derive(Serialize)]
+        struct PublicPerfReport {
+            schema_version: u8,
+            metrics: BTreeMap<String, f64>,
+            comparisons: BTreeMap<String, PublicComparison>,
+            baseline_present: bool,
+            passed: bool,
+        }
+        assert!(report.metrics.values().all(|value| value.is_finite()));
+        let mut comparisons = BTreeMap::new();
+        if let Some(baseline) = &report.baseline {
+            for (name, current) in &report.metrics {
+                let reference = *baseline.metrics.get(name).expect("baseline metric present");
+                assert!(reference.is_finite());
+                comparisons.insert(
+                    name.clone(),
+                    PublicComparison {
+                        current: *current,
+                        baseline: reference,
+                        passed: !report
+                            .violations
+                            .iter()
+                            .any(|violation| violation.metric == *name),
+                    },
+                );
+            }
+        }
+        let public = PublicPerfReport {
+            schema_version: 1,
+            metrics: report.metrics.clone(),
+            comparisons,
+            baseline_present: report.baseline.is_some(),
+            passed: report.violations.is_empty(),
+        };
+        let body = serde_json::to_vec_pretty(&public).expect("serialize public performance report");
+        fs::write(path, body).expect("write public performance report");
+        return;
+    }
     if let Ok(body) = serde_json::to_string_pretty(report) {
         let _ = fs::write(path, body);
     }
@@ -241,7 +286,10 @@ fn perf_mixed_point_latency() {
         };
         write_perf_report(ctx, "perf_mixed_point_latency.json", &report);
 
-        if baseline_update_mode() {
+        if baseline_update_mode()
+            && common::artifacts::EvidenceMode::from_environment().unwrap()
+                == common::artifacts::EvidenceMode::Debug
+        {
             save_baseline("perf_mixed_point_latency", &PerfBaseline { metrics });
         }
         log_perf_report_on_violation("perf_mixed_point_latency", &report);
@@ -353,7 +401,10 @@ fn perf_sequential_throughput_and_amplification() {
             &report,
         );
 
-        if baseline_update_mode() {
+        if baseline_update_mode()
+            && common::artifacts::EvidenceMode::from_environment().unwrap()
+                == common::artifacts::EvidenceMode::Debug
+        {
             save_baseline(
                 "perf_sequential_throughput_and_amplification",
                 &PerfBaseline { metrics },

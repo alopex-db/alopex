@@ -12,8 +12,18 @@ on:
         required: false
         type: boolean
         default: false
+      hnsw_release_admission_mode:
+        description: Admission-only selected #681 hosted job; no acquisition or measurement
+        required: false
+        type: boolean
+        default: false
       sql_four_case_mode:
         description: Continue same-job #804 qualification into the pinned #712 SQL matrix
+        required: false
+        type: boolean
+        default: false
+      sql_final_mode:
+        description: Run the reviewed public 52-run #712 final SQL comparison
         required: false
         type: boolean
         default: false
@@ -42,8 +52,25 @@ on:
         required: false
         type: boolean
         default: false
+      public_native_build_mode:
+        description: Build public-only native comparison subjects for #712
+        required: false
+        type: boolean
+        default: false
+      public_native_runner_label:
+        description: Selected runner label from the reviewed execution profile
+        required: false
+        type: string
+      public_native_build_config:
+        description: Base64 of reviewed source, parser, tool and resource pins
+        required: false
+        type: string
       expected_controller_sha:
-        description: Exact controller commit for qualification mode
+        description: Exact controller commit for qualification or selected #681 admission
+        required: false
+        type: string
+      expected_hnsw_source_tree:
+        description: Independently reviewed exact #681 source tree SHA
         required: false
         type: string
       four_case_lock_sha256:
@@ -62,6 +89,14 @@ on:
         description: Base64 of the exact #712 static manifest bytes
         required: false
         type: string
+      final_sql_lock_sha256:
+        description: Independently reviewed SHA-256 of the public final SQL lock
+        required: false
+        type: string
+      final_sql_lock_base64:
+        description: Base64 of exact public final SQL lock bytes
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -72,8 +107,137 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  hnsw_release_admission:
+    if: ${{ inputs.hnsw_release_admission_mode && inputs.issue_number == '681' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.sql_final_mode && !inputs.public_native_build_mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - name: Gate selected source and storage before checkout
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          EXPECTED_HNSW_SOURCE_TREE: ${{ inputs.expected_hnsw_source_tree }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, platform, re, sys
+          code = 'SOURCE'
+          try:
+              e = os.environ
+              assert e.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+              assert e.get('GITHUB_JOB') == 'hnsw_release_admission'
+              assert e.get('ISSUE_NUMBER') == '681'
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_CONTROLLER_SHA', ''))
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_HNSW_SOURCE_TREE', ''))
+              assert e['EXPECTED_CONTROLLER_SHA'] == e.get('GITHUB_SHA')
+              assert e.get('GITHUB_REF', '').startswith('refs/heads/')
+              assert e.get('RUNNER_ENVIRONMENT') == 'github-hosted'
+              assert platform.system() == 'Linux' and platform.machine() == 'x86_64'
+              code = 'STORAGE'
+              lines = pathlib.Path('/proc/self/mountinfo').read_text().splitlines()
+              assert 1 <= len(lines) <= 4096
+              devices = {}
+              for line in lines:
+                  mount = line.split(' - ', 1)[0].split()[4]
+                  mount = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m.group(1), 8)), mount)
+                  path = pathlib.Path(mount)
+                  assert path.is_absolute() and path.exists() and not path.is_symlink()
+                  identity = path.stat().st_dev
+                  fs = os.statvfs(path)
+                  assert fs.f_frsize > 0 and 0 <= fs.f_bavail <= fs.f_bfree <= fs.f_blocks
+                  used = (fs.f_blocks - fs.f_bfree) * fs.f_frsize
+                  free = fs.f_bavail * fs.f_frsize
+                  previous = devices.get(identity)
+                  devices[identity] = (max(used, previous[0]), min(free, previous[1])) if previous else (used, free)
+              assert 1 <= len(devices) <= 256
+              workspace = pathlib.Path(e['GITHUB_WORKSPACE'])
+              assert workspace.is_absolute() and workspace.parent.exists()
+              baseline = sum(value[0] for value in devices.values())
+              assert baseline + 10_000_000_000 < 40_000_000_000
+              assert devices[workspace.parent.stat().st_dev][1] > 10_000_000_000
+              with open(e['GITHUB_ENV'], 'a', encoding='ascii') as output:
+                  output.write('HNSW_ADMISSION_BASELINE=' + str(baseline) + '\n')
+              print(json.dumps({'case': 'HNSW_HOSTED_PRECHECK', 'outcome': 'passed'}))
+          except BaseException:
+              print(json.dumps({'case': 'HNSW_HOSTED_PRECHECK', 'outcome': 'failed', 'error_code': code}))
+              sys.exit(1)
+          PY
+      - name: Fetch exact selected source without path output
+        timeout-minutes: 2
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          EXPECTED_HNSW_SOURCE_TREE: ${{ inputs.expected_hnsw_source_tree }}
+          GH_CHECKOUT_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, re, stat, subprocess, sys, tempfile
+          try:
+              e = os.environ
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_CONTROLLER_SHA', ''))
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_HNSW_SOURCE_TREE', ''))
+              ref = e.get('GITHUB_REF', '')
+              assert re.fullmatch(r'refs/heads/[A-Za-z0-9._/-]+', ref)
+              assert '..' not in ref and '//' not in ref and not ref.endswith('/')
+              workspace = pathlib.Path(e['GITHUB_WORKSPACE'])
+              assert (workspace.is_absolute() and workspace.is_dir() and
+                      not workspace.is_symlink() and workspace.resolve(strict=True) == workspace and
+                      workspace.stat().st_uid == os.geteuid() and not any(workspace.iterdir()))
+              workspace.chmod(0o700)
+              git_binary = pathlib.Path('/usr/bin/git')
+              git_info = git_binary.stat()
+              assert (stat.S_ISREG(git_info.st_mode) and git_info.st_uid == 0 and
+                      not git_info.st_mode & 0o022)
+              temporary = pathlib.Path(e['RUNNER_TEMP'])
+              assert (temporary.is_absolute() and temporary.is_dir() and
+                      not temporary.is_symlink() and temporary.resolve(strict=True) == temporary and
+                      temporary.stat().st_uid == os.geteuid())
+              credentials = base64.b64encode(('x-access-token:' + e['GH_CHECKOUT_TOKEN']).encode()).decode()
+              with tempfile.TemporaryDirectory(dir=temporary) as template:
+                  git_env = {'HOME': str(pathlib.Path.home()), 'PATH': '/usr/bin:/bin',
+                             'LANG': 'C', 'GIT_CONFIG_COUNT': '1',
+                             'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
+                             'GIT_TEMPLATE_DIR': template,
+                             'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
+                             'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: basic ' + credentials,
+                             'GIT_TERMINAL_PROMPT': '0', 'GIT_LFS_SKIP_SMUDGE': '1'}
+                  def git(*args, read=False):
+                      result = subprocess.run([str(git_binary), '-C', str(workspace), *args],
+                                              env=git_env, stdin=subprocess.DEVNULL,
+                                              stdout=subprocess.PIPE if read else subprocess.DEVNULL,
+                                              stderr=subprocess.DEVNULL, timeout=105)
+                      assert result.returncode == 0
+                      if read:
+                          assert len(result.stdout) <= 4096
+                          return result.stdout.decode('ascii').strip()
+                  git('init', '-q')
+                  git('fetch', '--no-tags', '--depth=1',
+                      'https://github.com/alopex-db/alopex.git', ref)
+                  assert git('rev-parse', 'FETCH_HEAD', read=True) == e['EXPECTED_CONTROLLER_SHA']
+                  git('checkout', '--detach', '-q', 'FETCH_HEAD')
+                  assert git('rev-parse', 'HEAD', read=True) == e['EXPECTED_CONTROLLER_SHA']
+                  assert git('rev-parse', 'HEAD^{tree}', read=True) == e['EXPECTED_HNSW_SOURCE_TREE']
+                  assert git('status', '--porcelain', '--untracked-files=all', read=True) == ''
+              print(json.dumps({'case': 'HNSW_HOSTED_CHECKOUT', 'outcome': 'passed'}))
+          except BaseException:
+              print(json.dumps({'case': 'HNSW_HOSTED_CHECKOUT', 'outcome': 'failed',
+                                'error_code': 'SOURCE'}))
+              sys.exit(1)
+          PY
+      - name: Authenticate selected job and admit host
+        timeout-minutes: 5
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          EXPECTED_HNSW_SOURCE_TREE: ${{ inputs.expected_hnsw_source_tree }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GH_ACTIONS_READ_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/performance/issue681_hosted_identity.py
   s04_socket_inventory:
-    if: ${{ inputs.s04_socket_inventory_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode }}
+    if: ${{ !inputs.hnsw_release_admission_mode && inputs.s04_socket_inventory_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode && !inputs.public_native_build_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -226,6 +390,8 @@ jobs:
           ref: ${{ inputs.expected_controller_sha }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Check evidence recipient validity before socket collection
+        run: python3 -B scripts/ops/check_evidence_certificate.py --minimum-seconds 86400
       - name: Collect selected socket metadata without connection
         id: collect
         env:
@@ -249,13 +415,15 @@ jobs:
           compression-level: 0
           retention-days: 7
   inventory:
-    if: ${{ !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
+    if: ${{ !inputs.hnsw_release_admission_mode && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.public_native_build_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+      - name: Check evidence recipient validity before work
+        run: python3 -B scripts/ops/check_evidence_certificate.py --minimum-seconds 86400
       - name: Collect encrypted read-only host inventory
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -270,7 +438,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   qualification:
-    if: inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode))
+    if: ${{ !inputs.hnsw_release_admission_mode && inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_final_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode)) && !inputs.public_native_build_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -421,23 +589,33 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+      - name: Check evidence recipient validity before work
+        if: ${{ !inputs.sql_four_case_mode && !inputs.sql_final_mode }}
+        run: python3 -B scripts/ops/check_evidence_certificate.py --minimum-seconds 86400
       - name: Install independently pinned four-case inputs
-        if: inputs.sql_four_case_mode
+        if: inputs.sql_four_case_mode || inputs.sql_final_mode
         env:
           ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
           ALOPEX_FOUR_CASE_LOCK_B64: ${{ inputs.four_case_lock_base64 }}
           ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
           ALOPEX_FOUR_CASE_MANIFEST_B64: ${{ inputs.four_case_manifest_base64 }}
         run: python3 -B scripts/ops/four_case_job.py install
+      - name: Install independently pinned final SQL lock
+        if: inputs.sql_final_mode
+        env:
+          ALOPEX_FINAL_SQL_LOCK_SHA256: ${{ inputs.final_sql_lock_sha256 }}
+          ALOPEX_FINAL_SQL_LOCK_B64: ${{ inputs.final_sql_lock_base64 }}
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+        run: python3 -B scripts/ops/final_sql_job.py install
       - name: Admit this runner before candidate acquisition
-        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}
+        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode }}
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --admission-only
       - name: Retrieve exact candidate assets
-        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}
+        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode }}
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -445,7 +623,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B scripts/ops/hosted_test_env_qualification.py --acquire-assets
       - name: Qualify on this runner
-        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode }}
+        if: ${{ !inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode }}
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
@@ -474,7 +652,7 @@ jobs:
           ALOPEX_804_ASSETS: ${{ runner.temp }}/alopex-804-candidate
         run: python3 -B scripts/ops/hosted_test_env_qualification_1951.py --execute
       - name: Admit runner for source-pinned four-case qualification
-        if: inputs.sql_four_case_mode
+        if: inputs.sql_four_case_mode || inputs.sql_final_mode
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -482,7 +660,7 @@ jobs:
           ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
         run: python3 -B scripts/ops/hosted_test_env_qualification_four_case.py --admission-only
       - name: Acquire source-pinned four-case assets
-        if: inputs.sql_four_case_mode
+        if: inputs.sql_four_case_mode || inputs.sql_final_mode
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -491,7 +669,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B scripts/ops/hosted_test_env_qualification_four_case.py --acquire-assets
       - name: Qualify source-pinned four-case assets on this runner
-        if: inputs.sql_four_case_mode
+        if: inputs.sql_four_case_mode || inputs.sql_final_mode
+        id: four_case_qualification
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -499,11 +678,66 @@ jobs:
           ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
         run: python3 -B scripts/ops/hosted_test_env_qualification_four_case.py --execute
       - name: Preserve encrypted qualification evidence
-        if: always()
+        if: always() && !inputs.sql_four_case_mode && !inputs.sql_final_mode
         uses: actions/upload-artifact@v4
         with:
           name: hosted-test-env-qualification
           path: native-qualification-export/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Publish public four-case qualification
+        if: (inputs.sql_four_case_mode || inputs.sql_final_mode) && steps.four_case_qualification.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-test-env-qualification
+          path: native-qualification-export/public.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - name: Admit fixed final SQL source checkouts
+        if: inputs.sql_final_mode && steps.four_case_qualification.outcome == 'success'
+        id: final_source_budget
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+          ALOPEX_FINAL_SQL_LOCK_SHA256: ${{ inputs.final_sql_lock_sha256 }}
+        run: python3 -B scripts/ops/final_sql_job.py admit-sources
+      - name: Check out fixed public SQL docs source
+        if: inputs.sql_final_mode && steps.final_source_budget.outcome == 'success'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: alopex-db/docs
+          ref: 5c3d068b9ce4d60fbc1608924882df13b0a27568
+          path: alopex-final-docs
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out fixed candidate SQL helpers
+        if: inputs.sql_final_mode && steps.final_source_budget.outcome == 'success'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: alopex-db/alopex
+          ref: 426418099c4337e73f5ced4444215a640898ed5a
+          path: alopex-final-product
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Measure public final SQL comparison
+        if: inputs.sql_final_mode && steps.final_source_budget.outcome == 'success'
+        id: final_sql
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+          ALOPEX_FINAL_SQL_LOCK_SHA256: ${{ inputs.final_sql_lock_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/ops/final_sql_job.py run
+      - name: Publish verified public final SQL comparison
+        if: inputs.sql_final_mode && steps.final_sql.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-sql-final-comparison
+          path: native-final-sql-export/public.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -544,20 +778,25 @@ jobs:
           ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
           ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
         run: python3 -B scripts/ops/four_case_job.py run
-      - name: Seal private four-case evidence
+      - name: Prepare public four-case result
+        id: matrix_export
         if: always() && inputs.sql_four_case_mode && steps.matrix.outcome != 'skipped'
         env:
           ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
           ALOPEX_FOUR_CASE_MANIFEST_SHA256: ${{ inputs.four_case_manifest_sha256 }}
-        run: python3 -B scripts/ops/four_case_job.py seal
-      - name: Preserve encrypted four-case evidence
-        if: always() && inputs.sql_four_case_mode && steps.matrix.outcome != 'skipped'
-        uses: actions/upload-artifact@v4
+        run: python3 -B scripts/ops/four_case_job.py export
+      - name: Verify four-case public measurement
+        id: matrix_public
+        if: always() && inputs.sql_four_case_mode && steps.matrix_export.outcome == 'success'
+        env:
+          ALOPEX_FOUR_CASE_LOCK_SHA256: ${{ inputs.four_case_lock_sha256 }}
+        run: python3 -B scripts/ops/four_case_job.py verify-public
+      - name: Publish verified four-case measurement
+        if: always() && inputs.sql_four_case_mode && steps.matrix_public.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-sql-four-case-matrix
-          path: |
-            native-sql-four-case-export/private-evidence.cms
-            native-sql-four-case-export/public.json
+          path: native-sql-four-case-export/public.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -578,7 +817,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   wal_cost_682:
-    if: inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode
+    if: ${{ !inputs.hnsw_release_admission_mode && inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.public_native_build_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
@@ -731,12 +970,16 @@ jobs:
         with:
           fetch-depth: 1
           path: qualification-controller
+      - name: Check evidence recipient validity before work
+        run: python3 -B qualification-controller/scripts/ops/check_evidence_certificate.py --minimum-seconds 86400
       - name: Stage frozen #682 comparator in measured workspace
         uses: actions/checkout@v4
         with:
-          ref: 490f002dfb2c7f509a2444891808d9704fe6b001
+          ref: fd34ca342617c247a9c711bcf597da8bbef3118f
           fetch-depth: 1
           path: frozen-wal-controller
+      - name: Check evidence recipient validity before work
+        run: python3 -B qualification-controller/scripts/ops/check_evidence_certificate.py --certificate frozen-wal-controller/.github/ops/native-evidence-cert.pem --expected-sha256 e8a39adb8f76185a87f805f6d083bdbe2bd7ea5d3bc05607f1a7a2e0deb8b775 --minimum-seconds 86400
       - name: Qualify, capture signed indexes, measure WAL, and check candidate closure
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
@@ -749,7 +992,7 @@ jobs:
             --qualification-checkout "$GITHUB_WORKSPACE/qualification-controller" \
             --frozen-checkout "$GITHUB_WORKSPACE/frozen-wal-controller" \
             --config "$GITHUB_WORKSPACE/qualification-controller/scripts/ops/wal_cost_next/exact-a415-wal-cost-input.private.json" \
-            --config-sha256 6cfd541fee14812b6ecda2a51c839e1048116ea023b7124be84e4292d5b34d66
+            --config-sha256 2d9222eaec0ea9bbc22874f8dcea17f8b09525fa6c8ba54b7d990ac9436f5c55
       - name: Seal signed Ubuntu indexes
         if: always() && !cancelled()
         run: |
@@ -784,7 +1027,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   s04_inspect:
-    if: ${{ inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode }}
+    if: ${{ !inputs.hnsw_release_admission_mode && inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.public_native_build_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -880,6 +1123,8 @@ jobs:
           ref: ${{ inputs.expected_controller_sha }}
           fetch-depth: 1
           persist-credentials: false
+      - name: Check evidence recipient validity before work
+        run: python3 -B scripts/ops/check_evidence_certificate.py --minimum-seconds 86400
       - name: Inspect selected Docker context read-only
         id: inspect
         run: |
@@ -907,6 +1152,95 @@ jobs:
           path: |
             native-s04-inspect-export/private-evidence.cms
             native-s04-inspect-export/public.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+  public_native_build:
+    if: ${{ inputs.public_native_build_mode && inputs.issue_number == '712' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.sql_final_mode && !inputs.hnsw_release_admission_mode }}
+    runs-on: ${{ inputs.public_native_runner_label }}
+    timeout-minutes: 210
+    steps:
+      - name: Prepare source within the measured VM work budget
+        env:
+          RUNNER_KIND: ${{ runner.environment }}
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          import json, os, pathlib, re, signal, stat, subprocess, time
+          os.umask(0o077)
+          try:
+              assert os.environ.get('RUNNER_KIND') == 'github-hosted'
+              assert os.environ.get('GITHUB_REPOSITORY') == 'alopex-db/alopex'
+              assert re.fullmatch(r'[a-f0-9]{40}', os.environ.get('EXPECTED_CONTROLLER_SHA', ''))
+              assert os.environ['EXPECTED_CONTROLLER_SHA'] == os.environ['GITHUB_SHA']
+              root = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+              temporary = pathlib.Path(os.environ['RUNNER_TEMP'])
+              roots = [root.parent, temporary]
+              for candidate in (root.parent.parent / '_actions', pathlib.Path.home() / '.cargo', pathlib.Path.home() / '.cache'):
+                  if candidate.exists(): roots.append(candidate)
+              def measure():
+                  seen, total = set(), 0
+                  pending = list(roots)
+                  while pending:
+                      path = pending.pop()
+                      info = path.lstat()
+                      identity = info.st_dev, info.st_ino
+                      if identity in seen: continue
+                      seen.add(identity)
+                      total += info.st_blocks * 512
+                      if stat.S_ISDIR(info.st_mode): pending.extend(path.iterdir())
+                      elif stat.S_ISLNK(info.st_mode):
+                          target = path.resolve()
+                          if target.exists(): pending.append(target)
+                  return total
+              initial = measure()
+              allowance = 1_000_000_000
+              assert initial + allowance < 40_000_000_000
+              assert root.is_dir() and not (root / '.git').exists()
+              for args in (['git','init','--quiet'],
+                           ['git','fetch','--quiet','--depth=1','https://github.com/alopex-db/alopex.git',os.environ['GITHUB_SHA']],
+                           ['git','checkout','--quiet','--detach','FETCH_HEAD']):
+                  with (temporary / 'alopex-source.log').open('ab') as output:
+                      process = subprocess.Popen(args,cwd=root,stdout=output,stderr=output,start_new_session=True)
+                      deadline = time.monotonic() + 120
+                      try:
+                          while process.poll() is None:
+                              assert time.monotonic() < deadline and measure() <= initial + allowance
+                              try: process.wait(timeout=2)
+                              except subprocess.TimeoutExpired: pass
+                          assert process.returncode == 0 and measure() <= initial + allowance
+                      finally:
+                          if process.poll() is None:
+                              os.killpg(process.pid,signal.SIGTERM)
+                              try: process.wait(timeout=5)
+                              except subprocess.TimeoutExpired:
+                                  os.killpg(process.pid,signal.SIGKILL)
+                                  process.wait(timeout=5)
+              actual = subprocess.run(['git','rev-parse','HEAD'],cwd=root,capture_output=True,text=True,check=True).stdout.strip()
+              assert actual == os.environ['GITHUB_SHA']
+              (temporary / 'alopex-source.log').unlink()
+              print('{"source_preparation":"passed"}')
+          except BaseException:
+              print('{"source_preparation":"failed"}')
+              raise SystemExit(1)
+          PYCODE
+      - name: Build source-bound server and wheel serially
+        env:
+          RUNNER_KIND: ${{ runner.environment }}
+          PUBLIC_BUILD_CONFIG: ${{ inputs.public_native_build_config }}
+        shell: bash
+        run: python3 -B scripts/ops/hosted_native_assets.py
+      - name: Verify public asset export
+        if: always()
+        id: public_export
+        run: python3 -B scripts/ops/native_public_export.py
+      - name: Preserve public software assets and fixed result
+        if: always() && steps.public_export.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-product-assets
+          path: native-assets-export/
           if-no-files-found: error
           compression-level: 0
           retention-days: 7

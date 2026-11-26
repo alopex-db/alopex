@@ -175,6 +175,8 @@ class AttestorTests(unittest.TestCase):
 
     def test_authenticates_private_files_and_binds_receipt(self):
         proof, receipt = self.attest()
+        self.assertEqual(proof["profile"]["storage"]["runtime_storage_roots"],
+                         ["/tmp/docker"])
         self.assertEqual(proof["acquisition"]["zip_size_bytes"],
                          self.pin["asset_zip_size_bytes"])
         self.assertEqual(receipt["job_id"], JOB)

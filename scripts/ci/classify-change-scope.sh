@@ -6,7 +6,7 @@ head_sha="${2:?head commit is required}"
 
 for sha in "${base_sha}" "${head_sha}"; do
   if ! [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
-    printf 'production=true\nsecurity=true\n'
+    printf 'production=true\nsecurity=true\nhnsw_contract=true\n'
     exit 0
   fi
 done
@@ -14,17 +14,22 @@ done
 changed_paths="$(mktemp)"
 trap 'rm -f "${changed_paths}"' EXIT
 if ! git diff --no-renames --name-only -z "${base_sha}" "${head_sha}" >"${changed_paths}"; then
-  printf 'production=true\nsecurity=true\n'
+  printf 'production=true\nsecurity=true\nhnsw_contract=true\n'
   exit 0
 fi
 
 production=false
 security=false
+hnsw_contract=false
 changed=0
 while IFS= read -r -d '' path; do
   changed=$((changed + 1))
   case "${path}" in
+    .github/workflows/issue681-*) security=true; hnsw_contract=true ;;
     .github/workflows/*) security=true ;;
+    scripts/performance/issue681_*|scripts/performance/tests/test_issue681_*|scripts/performance/phase_rss.py|scripts/performance/tests/test_phase_rss.py)
+      hnsw_contract=true
+      ;;
     .github/actions/*|scripts/ci/*|deny.toml|Cargo.lock)
       production=true
       security=true
@@ -36,9 +41,11 @@ done <"${changed_paths}"
 
 if [[ "${changed}" -eq 0 ]]; then
   production=true
+  hnsw_contract=true
 fi
 if [[ "${production}" == true ]]; then
   security=true
 fi
 echo "production=${production}"
 echo "security=${security}"
+echo "hnsw_contract=${hnsw_contract}"

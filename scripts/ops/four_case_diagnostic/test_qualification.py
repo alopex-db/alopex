@@ -1,7 +1,10 @@
 """Focused offline checks for the four-case same-job qualification contract."""
 import copy
 import hashlib
+import importlib.util
 import json
+from pathlib import Path
+import tempfile
 import unittest
 
 from . import qualification as q
@@ -44,9 +47,14 @@ def fixture():
                          "security": {"lsm_kind": "apparmor",
                                       "lsm_profile": "docker-default",
                                       "seccomp_sha256": pin["seccomp_sha256"]},
-                         "storage": {"stop_bytes": 40_000_000_000,
+                         "storage": {"roots": ["/tmp/qualified", "/tmp/docker"],
+                                     "runtime_storage_roots": ["/tmp/docker"],
+                                     "readonly_sudo_du_root": "/tmp/docker",
+                                     "stop_bytes": 40_000_000_000,
                                      "reserve_bytes": 1_000_000_000,
-                                     "poll_seconds": 10}},
+                                     "poll_seconds": 10,
+                                     "readonly_sudo_du_timeout_seconds": 60,
+                                     "planned_bytes": dict(q.PLANNED_BYTES)}},
              "acquisition": {"schema": "alopex.sql-four-case-acquisition/v2",
                              "qualification_job_id": JOB,
                              "run": pin["asset_run_id"],
@@ -103,9 +111,54 @@ def checked(lock, proof, receipt, *, job_id=JOB):
 
 
 class QualificationContractTests(unittest.TestCase):
+    def test_storage_contract_matches_runtime_profile_loader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            budget_root = root / "budget"
+            docker_root = root / "docker"
+            budget_root.mkdir()
+            docker_root.mkdir()
+            storage = fixture()[1]["profile"]["storage"]
+            storage["roots"] = [str(budget_root), str(docker_root)]
+            storage["runtime_storage_roots"] = [str(docker_root)]
+            storage["readonly_sudo_du_root"] = str(docker_root)
+            profile = {"schema": "alopex.test-env-profile/v1", "run_id": "hosted-804-1",
+                       "platform": "linux/amd64", "execution_mode": "native",
+                       "docker_context": "selected", "image_lock": "private-lock",
+                       "assets": "private-assets", "private_output": "private-output",
+                       "cache": "private-cache", "cpu": {"server": [0], "client": [1]},
+                       "limits": {"memory_bytes": 1, "swap_bytes": 0, "pids": 1,
+                                  "case_seconds": 1, "run_seconds": 1,
+                                  "stop_seconds": 1}, "storage": storage,
+                       "security": {"lsm_kind": "apparmor", "lsm_profile": "docker-default",
+                                    "seccomp_profile": "private-policy",
+                                    "seccomp_sha256": "a" * 64}}
+            path = root / "profile.json"
+            path.write_text(json.dumps(profile))
+            path.chmod(0o600)
+            spec = importlib.util.spec_from_file_location(
+                "test_env_common_contract", Path(__file__).resolve().parents[2] /
+                "test-env/common.py")
+            common = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(common)
+            self.assertEqual(common.load_profile(path)["storage"], storage)
+            q._storage(storage)
+
     def test_current_job_full_proof_and_receipt(self):
         lock, proof, receipt = fixture()
         self.assertEqual(checked(lock, proof, receipt)["job_id"], JOB)
+
+    def test_runtime_storage_inventory_is_required_and_private(self):
+        for change in (lambda s: s.pop("runtime_storage_roots"),
+                       lambda s: s.update(extra="private"),
+                       lambda s: s.update(runtime_storage_roots=[]),
+                       lambda s: s.update(readonly_sudo_du_root="/tmp/other"),
+                       lambda s: s["planned_bytes"].update(build=1),
+                       lambda s: s.update(roots=["/tmp/qualified", "../escape"])):
+            lock, proof, receipt = fixture()
+            change(proof["profile"]["storage"])
+            with self.assertRaisesRegex(ValueError, "POLICY"):
+                checked(lock, proof, receipt)
 
     def test_rejects_wrong_lock_identity_and_extra_field(self):
         lock, proof, receipt = fixture()

@@ -21,6 +21,53 @@ REPO = Path(__file__).resolve().parents[2]
 STOP_BYTES = 40_000_000_000
 WINDOWS = os.name == "nt"
 
+
+def worktree_paths(repo):
+    result = subprocess.run(
+        ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    paths = [
+        Path(line[9:]).resolve()
+        for line in result.stdout.splitlines()
+        if line.startswith("worktree ")
+    ]
+    if not paths:
+        raise RuntimeError(f"Git returned no worktrees for {repo}")
+    return paths
+
+
+def checkout_roots():
+    if (REPO / ".git").exists():
+        paths = worktree_paths(REPO)
+        return paths, paths[0].parent, True  # Git lists the main worktree first.
+    runner_temp_value = os.environ.get("RUNNER_TEMP", "")
+    workspace_value = os.environ.get("GITHUB_WORKSPACE", "")
+    if (os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
+            or not runner_temp_value or not workspace_value):
+        raise RuntimeError("missing trusted checkout for storage inventory")
+    runner_temp = Path(runner_temp_value)
+    workspace = Path(workspace_value)
+    bootstrap = runner_temp / "stress-bootstrap"
+    if (not runner_temp.is_absolute() or runner_temp.is_symlink()
+            or not workspace.is_absolute() or workspace.is_symlink()
+            or not workspace.is_dir() or REPO != bootstrap.resolve()):
+        raise RuntimeError("untrusted bootstrap inventory location")
+    bootstrap_info = bootstrap.lstat()
+    workspace_info = workspace.stat()
+    if (not stat.S_ISDIR(bootstrap_info.st_mode)
+            or bootstrap_info.st_uid != os.getuid()
+            or stat.S_IMODE(bootstrap_info.st_mode) != 0o700
+            or workspace_info.st_uid != os.getuid()):
+        raise RuntimeError("unowned bootstrap inventory location")
+    # This pinned bootstrap starts from an empty hosted checkout and never
+    # creates a linked worktree. A failed fetch may leave .git unreadable;
+    # requiring Git here would hide the failure-path allocation measurement.
+    return [workspace], workspace.parent, False
+
+
 if WINDOWS:
     from storage_windows import allocation_size, native_file_info
 
@@ -67,8 +114,9 @@ def allocated_bytes(roots):
 
 def inventory(extra=()):
     home = Path.home()
+    checkout_worktrees, workspace, discover_linked = checkout_roots()
     roots = {
-        REPO.parent,
+        workspace,
         home / ".cargo/registry",
         home / ".cargo/git",
         home / ".cache/uv",
@@ -102,21 +150,13 @@ def inventory(extra=()):
         roots.add(cache / "uv/cache")
         roots.update(p for p in cache.iterdir() if "alopex" in p.name.lower())
     roots.update(Path(p) for p in extra)
-    # Discover all linked worktrees, including locations outside the workspace.
-    for repo in [REPO, *REPO.parent.iterdir()]:
-        if not (repo / ".git").exists():
-            continue
-        result = subprocess.run(
-            ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        roots.update(
-            Path(line[9:])
-            for line in result.stdout.splitlines()
-            if line.startswith("worktree ")
-        )
+    # Discover linked worktrees for every sibling repository in the main workspace.
+    roots.update(checkout_worktrees)
+    if discover_linked:
+        for repo in workspace.iterdir():
+            if not (repo / ".git").exists():
+                continue
+            roots.update(worktree_paths(repo))
     # Prior cleanup inventories may cover nonstandard Alopex cache/toolchain locations.
     prior = Path("/private/tmp/alopex-cleanup-20261018/local-budget.json")
     if prior.exists():

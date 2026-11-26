@@ -1,11 +1,15 @@
 """Regression tests for the matrix's failure propagation (stdlib only)."""
 
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.compatibility.run import assert_complete
+from scripts.compatibility import storage
 from scripts.compatibility.storage import allocated_bytes
 
 
@@ -120,6 +124,95 @@ class MatrixAcceptanceTests(unittest.TestCase):
         self.assertEqual(
             total, self.root.stat().st_blocks * 512 + payload.stat().st_blocks * 512
         )
+
+    def test_linked_worktree_inventory_includes_main_workspace(self):
+        workspace = self.root / "workspace"
+        main = workspace / "alopex"
+        linked = self.root / "linked" / "alopex"
+        main.mkdir(parents=True)
+        (workspace / "sibling-output").mkdir()
+        for command in [
+            ["git", "init", "-q", str(main)],
+            [
+                "git", "-C", str(main), "-c", "user.name=Test",
+                "-c", "user.email=test@example.invalid", "commit", "-q",
+                "--allow-empty", "-m", "fixture",
+            ],
+            ["git", "-C", str(main), "worktree", "add", "-q", "--detach", str(linked)],
+        ]:
+            subprocess.run(command, check=True, capture_output=True)
+
+        for checkout in [main, linked]:
+            with patch.object(storage, "REPO", checkout), patch.object(
+                storage, "allocated_bytes", return_value=123
+            ) as count:
+                self.assertEqual(storage.inventory()["allocated_bytes"], 123)
+            self.assertTrue(
+                workspace.resolve() in count.call_args.args[0],
+                "main workspace missing from inventory roots",
+            )
+
+    def test_inventory_stops_when_worktree_discovery_fails(self):
+        with patch.object(storage, "worktree_paths", side_effect=RuntimeError("git failed")):
+            with self.assertRaisesRegex(RuntimeError, "git failed"):
+                storage.inventory()
+
+    def test_fetched_bootstrap_helper_inventories_before_and_after_git_init(self):
+        runner_temp = self.root / "runner-temp"
+        runner_temp.mkdir()
+        bootstrap = runner_temp / "stress-bootstrap"
+        bootstrap.mkdir(mode=0o700)
+        workspace = self.root / "work" / "alopex"
+        workspace.mkdir(parents=True)
+        environment = {"RUNNER_TEMP": str(runner_temp),
+                       "GITHUB_WORKSPACE": str(workspace),
+                       "RUNNER_ENVIRONMENT": "github-hosted"}
+        with patch.dict(os.environ, environment), \
+             patch.object(storage, "REPO", bootstrap.resolve()), \
+             patch.object(storage, "allocated_bytes", return_value=123) as count:
+            self.assertEqual(storage.inventory()["allocated_bytes"], 123)
+            self.assertIn(workspace.parent, count.call_args.args[0])
+            subprocess.run(["git", "init", "-q", str(workspace)], check=True,
+                           capture_output=True)
+            self.assertEqual(storage.inventory()["allocated_bytes"], 123)
+            self.assertIn(workspace.parent, count.call_args.args[0])
+
+    def test_nonrepository_helper_outside_trusted_bootstrap_is_rejected(self):
+        runner_temp = self.root / "runner-temp"
+        runner_temp.mkdir()
+        (runner_temp / "stress-bootstrap").mkdir(mode=0o700)
+        workspace = self.root / "work" / "alopex"
+        workspace.mkdir(parents=True)
+        with patch.dict(os.environ,
+                        {"RUNNER_TEMP": str(runner_temp),
+                         "GITHUB_WORKSPACE": str(workspace),
+                         "RUNNER_ENVIRONMENT": "github-hosted"}), \
+             patch.object(storage, "REPO", self.root / "untrusted"):
+            with self.assertRaisesRegex(RuntimeError, "untrusted"):
+                storage.inventory()
+
+    def test_fetched_helper_inventories_corrupt_partial_git_without_git_dependency(self):
+        runner_temp = self.root / "runner-temp"
+        runner_temp.mkdir()
+        bootstrap = runner_temp / "stress-bootstrap"
+        bootstrap.mkdir(mode=0o700)
+        workspace = self.root / "work" / "alopex"
+        workspace.mkdir(parents=True)
+        (workspace / ".git").mkdir()
+        (workspace / ".git/HEAD").write_text("corrupt")
+        sibling = workspace.parent / "partial-sibling"
+        sibling.mkdir()
+        (sibling / ".git").mkdir()
+        with patch.dict(os.environ,
+                        {"RUNNER_TEMP": str(runner_temp),
+                         "GITHUB_WORKSPACE": str(workspace),
+                         "RUNNER_ENVIRONMENT": "github-hosted"}), \
+             patch.object(storage, "REPO", bootstrap.resolve()), \
+             patch.object(storage, "worktree_paths",
+                          side_effect=AssertionError("Git must not run")), \
+             patch.object(storage, "allocated_bytes", return_value=123) as count:
+            self.assertEqual(storage.inventory()["allocated_bytes"], 123)
+            self.assertIn(workspace.parent, count.call_args.args[0])
 
 
 if __name__ == "__main__":

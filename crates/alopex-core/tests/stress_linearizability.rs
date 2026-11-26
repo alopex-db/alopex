@@ -125,6 +125,9 @@ fn write_linearizability_artifact(ctx: &common::TestContext, report: &Linearizab
     let Some(paths) = ctx.artifact_paths.as_ref() else {
         return;
     };
+    if paths.mode != common::artifacts::EvidenceMode::Debug {
+        return;
+    }
     let path = paths.checks_dir.join("linearizability.json");
     if let Ok(body) = serde_json::to_string_pretty(report) {
         let _ = std::fs::write(path, body);
@@ -323,6 +326,9 @@ fn write_serializability_artifact(ctx: &common::TestContext, report: &Serializab
     let Some(paths) = ctx.artifact_paths.as_ref() else {
         return;
     };
+    if paths.mode != common::artifacts::EvidenceMode::Debug {
+        return;
+    }
     let path = paths.checks_dir.join("serializability.json");
     if let Ok(body) = serde_json::to_string_pretty(report) {
         let _ = std::fs::write(path, body);

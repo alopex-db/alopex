@@ -13,7 +13,7 @@
 //! ## フォーマット特性
 //! - バイトオーダー: Little Endian 固定
 //! - セクションデータのチェックサムは「圧縮後バイト列」に対して計算
-//! - バージョン互換性: `file.version` が [`FileVersion::CURRENT`] を超える場合、 [`FormatError::IncompatibleVersion`] を返す
+//! - バージョン互換性: 公開リーダーは [`FileVersion::CURRENT`] を超える形式を拒否する。crate 内の LSM 復元経路だけが [`FileVersion::WAL_OVERFLOW`] を読む
 //! - 圧縮: None / Snappy（デフォルト）/ Zstd / LZ4 （feature で有効化）
 //! - ターゲット: x86_64 / ARM64 / WASM（WASMは Snappy/None のみをデフォルトサポート）
 //!

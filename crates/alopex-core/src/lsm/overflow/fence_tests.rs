@@ -1,6 +1,6 @@
 //! Small file-publication contracts; these do not enable Windows LSM overflow.
 use super::*;
-use crate::storage::format::{AlopexFileWriter, FileFlags, SectionType};
+use crate::storage::format::{AlopexFileWriter, FileFlags, FileSource, SectionType};
 
 fn fixture() -> (tempfile::TempDir, PathBuf, Vec<u8>) {
     let dir = tempfile::tempdir().unwrap();
@@ -16,10 +16,17 @@ fn fixture() -> (tempfile::TempDir, PathBuf, Vec<u8>) {
 }
 
 fn assert_fenced(path: &Path) {
-    let reader = AlopexFileReader::open(FileSource::Path(path.to_path_buf())).unwrap();
+    let reader = AlopexFileReader::open_lsm_container(path).unwrap();
     assert_eq!(reader.header().version, FileVersion::WAL_OVERFLOW);
     reader.validate_section(0).unwrap();
     assert_eq!(reader.read_section(0).unwrap(), b"old");
+    assert!(matches!(
+        AlopexFileReader::open(FileSource::Path(path.to_path_buf())),
+        Err(crate::storage::format::FormatError::IncompatibleVersion {
+            file: FileVersion::WAL_OVERFLOW,
+            reader: FileVersion::CURRENT,
+        })
+    ));
     assert!(!path.with_extension("overflow-fence").exists());
 }
 

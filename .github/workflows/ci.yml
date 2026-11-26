@@ -35,6 +35,7 @@ jobs:
     outputs:
       production: ${{ steps.classify.outputs.production }}
       security: ${{ steps.classify.outputs.security }}
+      hnsw_contract: ${{ steps.classify.outputs.hnsw_contract }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,6 +46,10 @@ jobs:
           python3 -m unittest scripts.ci.test_check_parser_wire_contract scripts.ci.test_pinned_tool_download scripts.ci.test_candidate_macos_runner_contract
       - name: Verify parser source contract guard
         run: python3 scripts/ci/test_parser_source_contract.py
+      - name: Verify evidence certificate rotation contracts
+        run: |
+          python3 -B -m unittest discover -s scripts/ops/tests -p 'test_evidence_certificate.py' -v
+          python3 -B -m unittest discover -s scripts/ops/tests -p 'test_verify_evidence_rotation.py' -v
       - name: Verify read-only S04 peer pidfd lifecycle on Linux
         run: |
           python3 -B -m unittest discover -s scripts/ops/tests \
@@ -78,6 +83,42 @@ jobs:
           bash scripts/ci/classify-change-scope.sh "${base_sha}" "${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
           [[ "${base_sha}" =~ ^[0-9a-f]{40}$ ]]
           python3 scripts/ci/check_parser_wire_contract.py "${base_sha}" "${GITHUB_SHA}"
+
+  hnsw-contract:
+    name: HNSW public harness contract
+    needs: [scope]
+    if: needs.scope.outputs.hnsw_contract == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.11'
+      - name: Verify bounded HNSW harness contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          private_log="$(mktemp)"
+          trap 'rm -f "${private_log}"' EXIT
+          if python3 -B -m unittest discover -s scripts/performance/tests \
+              -p 'test_hnsw_ci_failure_code.py' >"${private_log}" 2>&1 && \
+             python3 -B -m unittest discover -s scripts/performance/tests \
+              -p 'test_issue681_*.py' >"${private_log}" 2>&1 && \
+             python3 -B -m unittest discover -s scripts/performance/tests \
+              -p 'test_phase_rss.py' >>"${private_log}" 2>&1; then
+            echo '{"case":"HNSW_CI_CONTRACT","outcome":"passed"}'
+          else
+            diagnostic="$(python3 -B scripts/performance/hnsw_ci_failure_code.py "${private_log}" 2>/dev/null)" || diagnostic=""
+            if [[ "${diagnostic}" =~ ^TEST_[A-Z0-9_]{1,80}$ ]]; then
+              printf '{"case":"HNSW_CI_CONTRACT","outcome":"failed","error_code":"%s"}\n' "${diagnostic}"
+            else
+              echo '{"case":"HNSW_CI_CONTRACT","outcome":"failed","error_code":"TEST_UNCLASSIFIED"}'
+            fi
+            exit 1
+          fi
 
   fmt:
     name: Rustfmt
@@ -696,7 +737,7 @@ jobs:
 
   ci-success:
     name: CI Success
-    needs: [scope, fmt, formal, clippy, clippy-beta, test, coverage, security-audit, build, v08-release-gate]
+    needs: [scope, hnsw-contract, fmt, formal, clippy, clippy-beta, test, coverage, security-audit, build, v08-release-gate]
     runs-on: ubuntu-latest
     if: ${{ !cancelled() }}
     steps:
@@ -704,6 +745,14 @@ jobs:
         run: |
           if [[ "${{ needs.scope.result }}" != "success" ]]; then
             echo "change scope classification failed"
+            exit 1
+          fi
+          expected_hnsw=skipped
+          if [[ "${{ needs.scope.outputs.hnsw_contract }}" == "true" ]]; then
+            expected_hnsw=success
+          fi
+          if [[ "${{ needs['hnsw-contract'].result }}" != "${expected_hnsw}" ]]; then
+            echo "HNSW harness contract did not match change scope"
             exit 1
           fi
           if [[ "${{ needs.scope.outputs.production }}" == "false" ]]; then
@@ -723,7 +772,7 @@ jobs:
               echo "non-product change ran an unexpected CI job or missed Security Audit"
               exit 1
             fi
-            echo "Release-process-only change: required scoped verification passed"
+            echo "Scoped non-product verification passed"
             exit 0
           fi
           if [[ "${{ needs.fmt.result }}" != "success" ]] || \
