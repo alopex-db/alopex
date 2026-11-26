@@ -7,7 +7,15 @@ on:
         description: Manual compatibility suite
         type: choice
         default: full
-        options: [full, windows-overflow]
+        options: [full, windows-overflow-pilot, windows-overflow]
+      pilot_run_id:
+        description: Successful exact-source Windows overflow pilot run ID
+        type: string
+        required: false
+      pilot_run_attempt:
+        description: Successful exact-source Windows overflow pilot attempt
+        type: string
+        required: false
   schedule:
     - cron: '17 2 * * 1'
   push:
@@ -44,16 +52,15 @@ env:
   NIM_SQL_PARSER_DIR: crates/alopex-sql/nim-sql-parser
 
 jobs:
-  windows-overflow-public:
-    name: Manual Windows public overflow acceptance
-    if: github.event_name == 'workflow_dispatch' && inputs.acceptance_suite == 'windows-overflow'
+  windows-overflow-pilot:
+    name: Bounded Windows overflow source pilot
+    if: github.event_name == 'workflow_dispatch' && inputs.acceptance_suite == 'windows-overflow-pilot'
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
     permissions:
       contents: read
     env:
-      ALOPEX_ACCEPTANCE_SUITE: windows-overflow
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      ALOPEX_ACCEPTANCE_SUITE: windows-overflow-pilot
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -61,17 +68,129 @@ jobs:
       PYTHONUTF8: 1
       PYTHONDONTWRITEBYTECODE: 1
     steps:
+      - name: Start bounded pilot clock
+        shell: pwsh
+        run: '"ALOPEX_JOB_STARTED_UNIX=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" >> $env:GITHUB_ENV'
+      - name: Admit physical volumes before checkout and tool setup
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          foreach ($path in @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:USERPROFILE, $env:LOCALAPPDATA, $env:RUNNER_TOOL_CACHE)) {
+            try {
+              if (-not [IO.Path]::IsPathRooted($path)) { throw 'root' }
+              $volume = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($path))
+              if (-not $volume.IsReady) { throw 'volume' }
+              $free = $volume.AvailableFreeSpace
+            } catch {
+              [Console]::Error.WriteLine('WINDOWS_OVERFLOW_VOLUME_COVERAGE')
+              exit 1
+            }
+            if ($free -lt 8000000000) {
+              [Console]::Error.WriteLine('WINDOWS_OVERFLOW_PHYSICAL_SPACE')
+              exit 1
+            }
+          }
       - uses: actions/checkout@v4
+        id: checkout
       - uses: actions/setup-python@v5
+        id: python_setup
         with:
           python-version: '3.11'
-      - name: Check manual runner selection and cleanup guards
-        run: python -m unittest discover -s scripts/compatibility -p test_windows_overflow_acceptance.py -v
-      - name: Record source, scope and measured host budget
+      - name: Admit bounded hosted pilot and record source
         run: python scripts/compatibility/windows_overflow_acceptance.py prepare
       - uses: dtolnay/rust-toolchain@1.96.0
-      - name: Setup exact Nim parser toolchain
-        uses: ./.github/actions/setup-nim-parser-toolchain
+        timeout-minutes: 5
+      - name: Prepare exact Nim parser toolchain privately
+        timeout-minutes: 13
+        run: python scripts/compatibility/windows_overflow_acceptance.py toolchain
+      - name: Build parser under storage watchdog
+        run: python scripts/compatibility/windows_overflow_acceptance.py parser
+      - name: Probe representative current-source paths
+        timeout-minutes: 22
+        run: python scripts/compatibility/windows_overflow_acceptance.py pilot
+      - name: Remove owned pilot binaries and fixtures
+        if: always() && steps.checkout.outcome == 'success' && steps.python_setup.outcome == 'success'
+        run: python scripts/compatibility/windows_overflow_acceptance.py cleanup
+      - name: Seal pilot diagnostics and publish fixed status
+        if: always() && steps.checkout.outcome == 'success' && steps.python_setup.outcome == 'success'
+        run: python scripts/compatibility/windows_overflow_acceptance.py publish
+      - name: Upload exact pilot evidence files
+        if: always() && steps.checkout.outcome == 'success' && steps.python_setup.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-overflow-pilot-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/windows-overflow-public/public.json
+            artifacts/windows-overflow-public/private-evidence.cms
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-overflow-public:
+    name: Manual Windows public overflow acceptance
+    if: github.event_name == 'workflow_dispatch' && inputs.acceptance_suite == 'windows-overflow'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
+    env:
+      ALOPEX_ACCEPTANCE_SUITE: windows-overflow
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_BUILD_JOBS: 2
+      PYTHONUTF8: 1
+      PYTHONDONTWRITEBYTECODE: 1
+    steps:
+      - name: Start full-job clock before checkout
+        shell: pwsh
+        run: '"ALOPEX_JOB_STARTED_UNIX=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" >> $env:GITHUB_ENV'
+      - name: Admit physical volumes before checkout and tool setup
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          foreach ($path in @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:USERPROFILE, $env:LOCALAPPDATA, $env:RUNNER_TOOL_CACHE)) {
+            try {
+              if (-not [IO.Path]::IsPathRooted($path)) { throw 'root' }
+              $volume = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($path))
+              if (-not $volume.IsReady) { throw 'volume' }
+              $free = $volume.AvailableFreeSpace
+            } catch {
+              [Console]::Error.WriteLine('WINDOWS_OVERFLOW_VOLUME_COVERAGE')
+              exit 1
+            }
+            if ($free -lt 8000000000) {
+              [Console]::Error.WriteLine('WINDOWS_OVERFLOW_PHYSICAL_SPACE')
+              exit 1
+            }
+          }
+      - uses: actions/checkout@v4
+        id: checkout
+      - uses: actions/setup-python@v5
+        id: python_setup
+        with:
+          python-version: '3.11'
+      - name: Verify exact-source pilot artifact before full construction
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ALOPEX_PILOT_RUN_ID: ${{ inputs.pilot_run_id }}
+          ALOPEX_PILOT_RUN_ATTEMPT: ${{ inputs.pilot_run_attempt }}
+          ALOPEX_PILOT_ADMISSION_PATH: ${{ runner.temp }}/alopex-pilot-admission.json
+        run: >-
+          python scripts/compatibility/windows_pilot_attestation.py
+          --repository "$env:GITHUB_REPOSITORY"
+          --run-id "$env:ALOPEX_PILOT_RUN_ID"
+          --run-attempt "$env:ALOPEX_PILOT_RUN_ATTEMPT"
+          --output "$env:ALOPEX_PILOT_ADMISSION_PATH"
+      - name: Record source, scope and measured host budget
+        env:
+          ALOPEX_PILOT_ADMISSION_PATH: ${{ runner.temp }}/alopex-pilot-admission.json
+        run: python scripts/compatibility/windows_overflow_acceptance.py prepare
+      - uses: dtolnay/rust-toolchain@1.96.0
+        timeout-minutes: 5
+      - name: Prepare exact Nim parser toolchain privately
+        timeout-minutes: 13
+        run: python scripts/compatibility/windows_overflow_acceptance.py toolchain
       - name: Build parser under storage watchdog
         run: python scripts/compatibility/windows_overflow_acceptance.py parser
       - name: Normal extension and 15 ordinary public API cases
@@ -86,24 +205,25 @@ jobs:
       - name: Reconcile all source-bound acceptance receipts
         run: python scripts/compatibility/windows_overflow_acceptance.py verify
       - name: Remove owned binaries and fixtures, record final storage
-        if: always()
+        if: always() && steps.checkout.outcome == 'success' && steps.python_setup.outcome == 'success'
         run: python scripts/compatibility/windows_overflow_acceptance.py cleanup
-      - name: Upload compact Windows acceptance evidence
-        if: always()
+      - name: Validate fixed public Windows acceptance result
+        if: always() && steps.checkout.outcome == 'success' && steps.python_setup.outcome == 'success'
+        run: python scripts/compatibility/windows_overflow_acceptance.py publish
+      - name: Upload encrypted diagnostics and validated public result
+        if: always() && steps.checkout.outcome == 'success' && steps.python_setup.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: windows-overflow-public-${{ github.sha }}
           path: |
-            artifacts/windows-overflow-public/**/*.json
-            artifacts/windows-overflow-public/**/*.jsonl
-            artifacts/windows-overflow-public/**/*.log
-            artifacts/windows-overflow-public/**/*.xml
+            artifacts/windows-overflow-public/public.json
+            artifacts/windows-overflow-public/private-evidence.cms
           if-no-files-found: error
           retention-days: 14
 
   historical-parser:
     name: Historical parser artifact owner
-    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && inputs.acceptance_suite != 'windows-overflow'
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.acceptance_suite == 'full')
     runs-on: ubuntu-latest
     env:
       ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD: "1"
@@ -141,7 +261,7 @@ jobs:
 
   historical-contract:
     name: Historical contract (${{ matrix.gate }})
-    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && inputs.acceptance_suite != 'windows-overflow'
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.acceptance_suite == 'full')
     needs: historical-parser
     runs-on: ubuntu-latest
     strategy:
@@ -203,7 +323,7 @@ jobs:
 
   current-windows-full:
     name: Full Windows current compatibility
-    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && inputs.acceptance_suite != 'windows-overflow'
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.acceptance_suite == 'full')
     runs-on: windows-latest
     env:
       CARGO_INCREMENTAL: 0
