@@ -217,16 +217,17 @@ class HostedIdentityTests(unittest.TestCase):
                        EXPECTED_CONTROLLER_SHA=head, EXPECTED_HNSW_SOURCE_TREE=tree)
             device = os.stat(root).st_dev
             with mock.patch.object(identity, "_identity"), \
-                    mock.patch.object(identity.qualify, "platform_security"), \
+                    mock.patch.object(identity.qualify, "platform_security") as plat_mock, \
                     mock.patch.object(identity.qualify, "storage"), \
                     mock.patch.object(identity.qualify.scoped_storage,
                                       "make_manifest", return_value=object()), \
                     mock.patch.object(identity.qualify.scoped_storage,
                                       "root_seal", return_value="synthetic-seal"), \
-                    mock.patch.object(identity.rust_preflight, "check"), \
+                    mock.patch.object(identity.rust_preflight, "check_admission"), \
                     mock.patch.object(identity.qualify, "mounted_allocation",
                                       return_value=(1_100_000_000, {device: 11_000_000_000})):
                 result, status = identity.run(env)
+                plat_mock.assert_called_once_with(allow_vm_unfiltered_seccomp=True)
                 self.assertEqual(status, 0)
                 self.assertEqual(result, {
                     "case": identity.CASE,
@@ -248,7 +249,7 @@ class HostedIdentityTests(unittest.TestCase):
                     plat_res, _ = identity.run(env)
                     self.assertEqual(plat_res["error_code"], "PLATFORM")
                     self.assertNotIn("private path", json.dumps(plat_res))
-                with mock.patch.object(identity.rust_preflight, "check",
+                with mock.patch.object(identity.rust_preflight, "check_admission",
                                        side_effect=RuntimeError("private path")):
                     tc_res, _ = identity.run(env)
                     self.assertEqual(tc_res["error_code"], "TOOLCHAIN")
@@ -263,7 +264,7 @@ class HostedIdentityTests(unittest.TestCase):
                                        side_effect=ValueError("secret-token-xyz")), \
                         mock.patch.object(identity.qualify, "platform_security",
                                           side_effect=ValueError("private-platform")), \
-                        mock.patch.object(identity.rust_preflight, "check",
+                        mock.patch.object(identity.rust_preflight, "check_admission",
                                           side_effect=ValueError("private-toolchain")):
                     multi_res, multi_code = identity.run(stale)
                     self.assertEqual(multi_code, 1)
@@ -280,6 +281,42 @@ class HostedIdentityTests(unittest.TestCase):
                     self.assertNotIn("private-platform", serialized)
                     self.assertNotIn("private-toolchain", serialized)
                     self.assertNotIn(str(root), serialized)
+
+    def test_request_uses_endpoint_specific_accept_headers(self):
+        seen_headers = []
+
+        class FakeResponse:
+            def __init__(self, url):
+                self.status = 200
+                self.url = url
+
+            def read(self, _limit):
+                return b'{"ok":true}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        class FakeOpener:
+            def open(self, req, timeout=10):
+                seen_headers.append((req.full_url, req.get_header("Accept")))
+                return FakeResponse(req.full_url)
+
+        with mock.patch.object(identity.urllib.request, "build_opener",
+                               return_value=FakeOpener()):
+            identity._request("https://pipelinesghubeus23.actions.githubusercontent.com/oidc?api-version=2.0",
+                              token="tok")
+            identity._request("https://token.actions.githubusercontent.com/.well-known/jwks")
+            identity._request("https://api.github.com/repos/alopex-db/alopex/actions/runs/1",
+                              token="tok")
+        self.assertEqual(
+            [accept for _, accept in seen_headers],
+            ["application/json; api-version=2.0",
+             "application/json",
+             "application/vnd.github+json"],
+        )
 
 
 if __name__ == "__main__":

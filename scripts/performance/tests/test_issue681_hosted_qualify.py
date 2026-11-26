@@ -184,6 +184,28 @@ class HostedQualificationTest(unittest.TestCase):
         counter.assert_not_called()
         storage.assert_not_called()
 
+    def test_platform_vm_flag_admits_seccomp_0_and_2_but_rejects_1(self):
+        mounts = "1 0 0:1 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n"
+        for mode, should_pass in (("0", True), ("2", True), ("1", False)):
+            proc_status = f"CapEff:\t0000000000000000\nSeccomp:\t{mode}\nNoNewPrivs:\t0\n"
+            def read(path, *args, status_text=proc_status, **kwargs):
+                return status_text if str(path) == "/proc/self/status" else mounts
+            with self.subTest(mode=mode), \
+                 mock.patch.object(qualify.sys, "platform", "linux"), \
+                 mock.patch.object(qualify.platform, "machine", return_value="x86_64"), \
+                 mock.patch.object(qualify.os, "geteuid", return_value=501), \
+                 mock.patch.object(qualify.os, "sched_getaffinity",
+                                   return_value={0, 1, 2, 3}, create=True), \
+                 mock.patch.object(qualify.Path, "read_text", read), \
+                 mock.patch.object(qualify.Path, "iterdir", return_value=iter(())), \
+                 mock.patch.object(qualify.admission, "current_allocation", return_value=("/", 0)), \
+                 mock.patch.object(qualify.admission, "child_counter_probe"):
+                if should_pass:
+                    qualify.platform_security(allow_vm_unfiltered_seccomp=True)
+                else:
+                    with self.assertRaises(ValueError):
+                        qualify.platform_security(allow_vm_unfiltered_seccomp=True)
+
     def test_full_orchestration_passes_and_rejects_counter_or_storage_gap(self):
         with mock.patch.object(qualify, "context"), \
              mock.patch.object(qualify, "platform_security"), \

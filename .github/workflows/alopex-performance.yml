@@ -176,6 +176,7 @@ jobs:
               assert not any(path.exists() or path.is_symlink() for path in
                              (scratch, scratch_lock))
               assert not any(workspace.iterdir())
+              workspace.chmod(0o700)
               checks['workspace'] = 'passed'
               code = 'STORAGE_FS_STATS'
               free_by_device = {}

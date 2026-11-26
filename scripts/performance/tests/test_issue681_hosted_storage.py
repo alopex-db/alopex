@@ -347,6 +347,9 @@ class HostedStorageTests(unittest.TestCase):
             manifest = storage.make_manifest(checkout, temp, home=home,
                                              scratch=scratch)
             expected, _ = storage.snapshot(manifest)
+            # Simulate hosted GITHUB_WORKSPACE starting at 0o755: Step 1 must tighten
+            # to 0o700 before sealing so Step 2 chmod(0o700) never invalidates root_seal.
+            checkout.chmod(0o755)
             output = temp / "admission.env"
             env = dict(os.environ, GITHUB_EVENT_NAME="workflow_dispatch",
                        GITHUB_JOB="hnsw_release_admission", ISSUE_NUMBER="681",
@@ -360,6 +363,7 @@ class HostedStorageTests(unittest.TestCase):
                                     env=env, text=True, capture_output=True,
                                     timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(stat.S_IMODE(checkout.stat().st_mode), 0o700)
             passed_payload = json.loads(result.stdout)
             self.assertEqual(passed_payload["case"], "HNSW_HOSTED_PRECHECK")
             self.assertEqual(passed_payload["outcome"], "passed")

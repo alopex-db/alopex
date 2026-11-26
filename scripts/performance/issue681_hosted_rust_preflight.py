@@ -62,6 +62,33 @@ def check():
                          package))
 
 
+def check_admission():
+    """Verify rustup/rustc/cargo binary health without requiring 1.90.0 preinstalled.
+
+    Actual #681 build/measurement jobs install pinned 1.90.0 --profile minimal
+    under the 40 GB storage watchdog and then enforce check().
+    """
+    home = Path.home()
+    require(home.is_absolute() and home.is_dir() and not home.is_symlink() and
+            home.stat().st_uid == os.geteuid())
+    search = str(home / ".cargo/bin") + ":/usr/local/bin:/usr/bin:/bin"
+    environment = {"HOME": str(home), "PATH": search, "LANG": "C",
+                   "RUSTUP_AUTO_INSTALL": "0"}
+    rustup = _binary("rustup", search)
+    rustc = _binary("rustc", search)
+    cargo = _binary("cargo", search)
+    manager = _run(rustup, environment, "-V").strip()
+    require(re.fullmatch(r"rustup [0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)? \([^)]+\)",
+                         manager))
+    compiler = _run(rustc, environment, "-Vv").splitlines()
+    require(any(re.fullmatch(r"release: [0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)?", line)
+                for line in compiler) and
+            compiler.count("host: " + HOST) == 1)
+    package = _run(cargo, environment, "-V").strip()
+    require(re.fullmatch(r"cargo [0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)? \([^)]+\)",
+                         package))
+
+
 def run():
     try:
         check()

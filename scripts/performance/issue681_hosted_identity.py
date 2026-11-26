@@ -142,7 +142,7 @@ def verify_jwt(token, jwks, now, *, temp_root=None):
     return claims
 
 
-def _request(url, *, token=None, limit=65536):
+def _request(url, *, token=None, limit=65536, accept=None):
     parsed = urllib.parse.urlsplit(url)
     require(parsed.scheme == "https" and parsed.port in (None, 443) and
             parsed.username is None and parsed.password is None and
@@ -150,7 +150,14 @@ def _request(url, *, token=None, limit=65536):
             (parsed.hostname in ("token.actions.githubusercontent.com",
                                  "api.github.com") or
              _is_allowed_oidc_host(parsed.hostname)))
-    headers = {"Accept": "application/vnd.github+json", "User-Agent": "alopex-681-admission"}
+    if accept is None:
+        if parsed.hostname == "api.github.com":
+            accept = "application/vnd.github+json"
+        elif parsed.hostname == "token.actions.githubusercontent.com":
+            accept = "application/json"
+        else:
+            accept = "application/json; api-version=2.0"
+    headers = {"Accept": accept, "User-Agent": "alopex-681-admission"}
     if token is not None:
         require(type(token) is str and 0 < len(token) <= 4096)
         headers["Authorization"] = "Bearer " + token
@@ -281,7 +288,7 @@ def _identity(env, fetch=_request, now=None, *, failed_subchecks=None,
         raise
 
 
-def _classify_platform_failure():
+def _classify_platform_failure(*, allow_vm_unfiltered_seccomp: bool = True):
     """Return fixed allowlisted failing subchecks for platform_security()."""
     failures = []
     try:
@@ -300,8 +307,9 @@ def _classify_platform_failure():
                 status[key] = value.strip()
         if status.get("CapEff") != "0000000000000000":
             failures.append("platform_capeff_zero")
-        if status.get("Seccomp") != "2":
-            failures.append("platform_seccomp_2")
+        allowed_seccomp = ("0", "2") if allow_vm_unfiltered_seccomp else ("2",)
+        if status.get("Seccomp") not in allowed_seccomp:
+            failures.append("platform_seccomp_mode")
         if status.get("NoNewPrivs") not in ("0", "1"):
             failures.append("platform_no_new_privs")
     except BaseException:
@@ -349,7 +357,7 @@ def _classify_platform_failure():
 
 
 def _classify_toolchain_failure():
-    """Return fixed allowlisted failing subchecks for rust_preflight.check()."""
+    """Return fixed allowlisted failing subchecks for rust_preflight.check_admission()."""
     failures = []
     try:
         home = Path.home()
@@ -360,9 +368,12 @@ def _classify_toolchain_failure():
         return ["toolchain_home"]
     search = str(home / ".cargo/bin") + ":/usr/local/bin:/usr/bin:/bin"
     environment = {"HOME": str(home), "PATH": search, "LANG": "C",
-                   "RUSTUP_AUTO_INSTALL": "0",
-                   "RUSTUP_TOOLCHAIN": rust_preflight.VERSION}
-    rustc = cargo = None
+                   "RUSTUP_AUTO_INSTALL": "0"}
+    rustup = rustc = cargo = None
+    try:
+        rustup = rust_preflight._binary("rustup", search)
+    except BaseException:
+        failures.append("toolchain_rustup_bin")
     try:
         rustc = rust_preflight._binary("rustc", search)
     except BaseException:
@@ -371,10 +382,20 @@ def _classify_toolchain_failure():
         cargo = rust_preflight._binary("cargo", search)
     except BaseException:
         failures.append("toolchain_cargo_bin")
+    if rustup is not None:
+        try:
+            manager = rust_preflight._run(rustup, environment, "-V").strip()
+            if not re.fullmatch(
+                    r"rustup [0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)? \([^)]+\)",
+                    manager):
+                failures.append("toolchain_rustup_version")
+        except BaseException:
+            failures.append("toolchain_rustup_version")
     if rustc is not None:
         try:
             compiler = rust_preflight._run(rustc, environment, "-Vv").splitlines()
-            if not (compiler.count("release: " + rust_preflight.VERSION) == 1 and
+            if not (any(re.fullmatch(r"release: [0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)?", line)
+                        for line in compiler) and
                     compiler.count("host: " + rust_preflight.HOST) == 1):
                 failures.append("toolchain_rustc_version")
         except BaseException:
@@ -383,8 +404,8 @@ def _classify_toolchain_failure():
         try:
             package = rust_preflight._run(cargo, environment, "-V").strip()
             if not re.fullmatch(
-                    r"cargo " + re.escape(rust_preflight.VERSION) +
-                    r" \([0-9a-f]{9} [0-9]{4}-[0-9]{2}-[0-9]{2}\)", package):
+                    r"cargo [0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)? \([^)]+\)",
+                    package):
                 failures.append("toolchain_cargo_version")
         except BaseException:
             failures.append("toolchain_cargo_version")
@@ -430,14 +451,14 @@ def run(env, *, fetch=_request, now=None, checkout=None):
         fail_stage("identity", "IDENTITY")
 
     try:
-        qualify.platform_security()
+        qualify.platform_security(allow_vm_unfiltered_seccomp=True)
         checks["platform"] = "passed"
     except BaseException:
         fail_stage("platform", "PLATFORM")
-        failed_subchecks.extend(_classify_platform_failure())
+        failed_subchecks.extend(_classify_platform_failure(allow_vm_unfiltered_seccomp=True))
 
     try:
-        rust_preflight.check()
+        rust_preflight.check_admission()
         checks["toolchain"] = "passed"
     except BaseException:
         fail_stage("toolchain", "TOOLCHAIN")

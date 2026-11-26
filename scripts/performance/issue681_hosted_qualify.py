@@ -60,7 +60,7 @@ def context(env, *, checkout=REPO):
                      "--untracked-files=all"]) == "")
 
 
-def platform_security():
+def platform_security(*, allow_vm_unfiltered_seccomp: bool = False):
     require(sys.platform == "linux" and platform.machine() == "x86_64" and
             os.geteuid() != 0)
     status = {}
@@ -68,8 +68,9 @@ def platform_security():
         if ":" in line:
             key, value = line.split(":", 1)
             status[key] = value.strip()
+    allowed_seccomp = ("0", "2") if allow_vm_unfiltered_seccomp else ("2",)
     require(status.get("CapEff") == "0000000000000000" and
-            status.get("Seccomp") == "2" and
+            status.get("Seccomp") in allowed_seccomp and
             status.get("NoNewPrivs") in ("0", "1"))
     mounts = [line.split() for line in
               Path("/proc/self/mountinfo").read_text().splitlines()

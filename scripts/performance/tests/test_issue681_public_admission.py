@@ -59,6 +59,18 @@ class AdmissionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "^PUBLIC_ADMIT$"):
                 admission.cgroup_allocation(root, "/hidden/selected",
                                             (2, 3, 4, 5), pid=123)
+            # Standard Linux cgroup v2 root has no cpu.max; non-root without cpu in parent subtree_control also has no cpu.max/nr_throttled.
+            (root / "cgroup.procs").write_text("")
+            (root / "cpu.max").unlink()
+            (root / "cgroup.subtree_control").write_text("cpuset memory\n")
+            (child / "cpu.max").unlink()
+            (child / "cpu.stat").write_text("usage_usec 100\n")
+            self.assertEqual(admission.cgroup_allocation(
+                root, "/selected", (2, 3, 4, 5), pid=123), ("/selected", 0))
+            # If parent enables cpu controller, missing cpu.max on non-root must fail.
+            (root / "cgroup.subtree_control").write_text("cpu cpuset memory\n")
+            with self.assertRaisesRegex(ValueError, "^PUBLIC_ADMIT$"):
+                admission.cgroup_allocation(root, "/selected", (2, 3, 4, 5), pid=123)
 
     def test_case_completion_rejects_throttling(self):
         with tempfile.TemporaryDirectory() as tmp:
