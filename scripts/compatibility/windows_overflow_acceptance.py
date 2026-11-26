@@ -498,12 +498,31 @@ class Acceptance:
                                     "-s", "scripts/compatibility", "-p", "test_windows_*.py",
                                     "-q"], additional=100_000_000, read_output=False)
 
+    def parser_temp_dir(self):
+        # Keep Git Bash /tmp on the runner's C: Temp volume during Nim MSVC
+        # staticlib builds so vccexe.exe never builds >260-char relative paths
+        # against a D: workspace (C1083 MAX_PATH). Both volumes are already
+        # covered by self.volume_roots() and storage.py inventory.
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            candidate = Path(local_app_data) / "Temp"
+            if candidate.is_dir() and not candidate.is_symlink():
+                return candidate.resolve()
+        host_temp = os.environ.get("TEMP") or os.environ.get("TMP")
+        if host_temp:
+            candidate = Path(host_temp)
+            if candidate.is_dir() and not candidate.is_symlink():
+                return candidate.resolve()
+        return self.work / "tmp"
+
     def build_parser(self):
         started = time.monotonic()
         bash = native_git_bash(shutil.which("git"))
+        parser_tmp = str(self.parser_temp_dir())
+        parser_env = dict(self.env, TMP=parser_tmp, TEMP=parser_tmp, TMPDIR=parser_tmp)
         self.run("parser-build", [str(bash), "--noprofile", "--norc",
                                  "scripts/build-nim-parser.sh", "--backend", "host"],
-                 additional=2_000_000_000)
+                 env=parser_env, additional=2_000_000_000)
         write(self.output / "parser-identity.json", {
             "sha256": digest(self.parser / "alopex_sql_parser.dll"),
             "contract": (self.parser / "CONTRACT_VERSION").read_text().strip()})

@@ -469,6 +469,19 @@ class AcceptanceGuardTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 validate_pytest(path)
 
+    def test_build_parser_prefers_host_localappdata_temp_over_same_drive_work_tmp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            local_app_data = root / "LocalAppData"
+            host_temp = local_app_data / "Temp"
+            host_temp.mkdir(parents=True)
+            work = root / "work"
+            (work / "tmp").mkdir(parents=True)
+            owner = object.__new__(acceptance.Acceptance)
+            owner.work = work
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(local_app_data)}, clear=False):
+                self.assertEqual(owner.parser_temp_dir(), host_temp.resolve())
+
 
 if __name__ == "__main__":
     unittest.main()
