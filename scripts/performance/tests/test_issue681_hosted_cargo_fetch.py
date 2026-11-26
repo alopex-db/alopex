@@ -139,6 +139,95 @@ class WatchedCargoFetchTests(unittest.TestCase):
             killpg.assert_called_once_with(3333, cargo_fetch.signal.SIGTERM)
             self.assertEqual(list(cargo_home.iterdir()), [])
 
+    def test_normalize_throttles_guard_and_enforces_deadline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            vendor = root / "vendor"
+            vendor.mkdir(mode=0o700)
+            for idx in range(600):
+                crate = vendor / f"c{idx // 50}"
+                crate.mkdir(mode=0o755, exist_ok=True)
+                (crate / f"f{idx}.rs").write_bytes(b"fn x(){}\n")
+            guard = FakeGuard()
+            diag = {}
+            tree, modes = cargo_fetch._normalize_and_digest(
+                vendor, guard, deadline=cargo_fetch.time.monotonic() + 30, diag=diag)
+            self.assertEqual(len(tree), 64)
+            self.assertEqual(len(modes), 64)
+            # Bounded by entry stride (256) + start/end, never O(N) per file.
+            self.assertLessEqual(guard.calls, 10)
+
+            # Expired deadline fails closed with fixed FETCH_NORMALIZE_TIMEOUT.
+            timeout_diag = {}
+            with self.assertRaisesRegex(ValueError, "^PUBLIC_VENDOR$"):
+                cargo_fetch._normalize_and_digest(
+                    vendor, FakeGuard(), deadline=cargo_fetch.time.monotonic() - 1,
+                    diag=timeout_diag)
+            self.assertEqual(timeout_diag.get("code"), "FETCH_NORMALIZE_TIMEOUT")
+
+    def test_fetch_removes_ephemeral_cache_before_normalize_and_reports_fixed_diag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            home = root / "home"
+            home.mkdir(mode=0o700)
+            cargo_home = home / "cargo-stage"
+            cargo_home.mkdir(mode=0o700)
+            scratch = root / "scratch"
+            scratch.mkdir(mode=0o700)
+            sources = self._make_sources(root)
+            fake_pins = {
+                name: {"lock": hashlib.sha256((sources[name] / "Cargo.lock").read_bytes()).hexdigest()}
+                for name in ("before", "candidate")
+            }
+            seen = {}
+
+            def fake_popen(argv, *, cwd, env, stdin, stdout, stderr, start_new_session):
+                seen["fetch_home"] = Path(env["CARGO_HOME"])
+                (seen["fetch_home"] / "cache.bin").write_bytes(b"cache")
+                target_dir = Path(argv[-1])
+                crate = target_dir / "demo-0.1.0"
+                crate.mkdir(mode=0o755)
+                (crate / "lib.rs").write_bytes(b"pub fn ok() {}\n")
+                proc = mock.Mock(pid=4444, returncode=0)
+                proc.poll.return_value = 0
+                return proc
+
+            real_norm = cargo_fetch._normalize_and_digest
+
+            def check_norm(vendor_root, guard, **kwargs):
+                seen["fetch_home_exists_at_norm"] = seen["fetch_home"].exists()
+                return real_norm(vendor_root, guard, **kwargs)
+
+            diag = {}
+            with mock.patch.object(cargo_fetch.Path, "home", return_value=home), \
+                 mock.patch.object(acquire, "PINS", fake_pins), \
+                 mock.patch.object(cargo_fetch.rust_preflight, "_binary",
+                                   return_value=Path("/usr/bin/cargo")), \
+                 mock.patch.object(cargo_fetch.subprocess, "Popen", side_effect=fake_popen), \
+                 mock.patch.object(cargo_fetch, "_normalize_and_digest", side_effect=check_norm):
+                cargo_fetch.fetch_and_stage_vendor(
+                    sources, cargo_home, scratch, FakeGuard(), diag=diag)
+            self.assertFalse(seen["fetch_home_exists_at_norm"])
+            self.assertEqual(diag, {})
+
+            # Non-zero exit populates fixed FETCH_VENDOR_EXIT diagnostic.
+            scratch2 = root / "scratch2"
+            scratch2.mkdir(mode=0o700)
+            cargo_home2 = home / "cargo-stage-2"
+            cargo_home2.mkdir(mode=0o700)
+            fail_proc = mock.Mock(pid=5555, returncode=101)
+            fail_proc.poll.return_value = 101
+            fail_diag = {}
+            with mock.patch.object(cargo_fetch.Path, "home", return_value=home), \
+                 mock.patch.object(acquire, "PINS", fake_pins), \
+                 mock.patch.object(cargo_fetch.rust_preflight, "_binary",
+                                   return_value=Path("/usr/bin/cargo")), \
+                 mock.patch.object(cargo_fetch.subprocess, "Popen", return_value=fail_proc):
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_VENDOR$"):
+                    cargo_fetch.fetch_and_stage_vendor(
+                        sources, cargo_home2, scratch2, FakeGuard(), diag=fail_diag)
+            self.assertEqual(fail_diag.get("code"), "FETCH_VENDOR_EXIT")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -133,6 +133,36 @@ class HostedAcquireAllTest(unittest.TestCase):
                                                home_parent))
                 self.assertEqual(events, [])
 
+    def test_on_substage_reports_allowlisted_detail_without_private_leaks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, task_parent, home_parent = self.layout(Path(tmp))
+            self.components()
+            recorded = []
+
+            def fail_cargo(_sources, _cargo_home, _scratch, _guard, *, timeout, diag):
+                diag["code"] = "FETCH_NORMALIZE_TIMEOUT"
+                raise ValueError("PUBLIC_VENDOR")
+
+            with mock.patch.object(acquire.cargo_fetch, "fetch_and_stage_vendor",
+                                   side_effect=fail_cargo):
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_ACQUIRE$"):
+                    acquire.acquire_all(
+                        workspace, task_parent, home_parent,
+                        manifest=self.manifest(workspace, task_parent, home_parent),
+                        vendor_mode="cargo_vendor_locked",
+                        on_substage=lambda *row: recorded.append(row),
+                        stage_budget_seconds=120)
+            self.assertEqual([r[:2] for r in recorded[:-1]], [
+                ("sources", "passed"),
+                ("nim_fetch", "passed"),
+                ("nim_extract", "passed"),
+                ("parser_tools", "passed"),
+                ("parser_seed", "passed"),
+                ("parser_build", "passed"),
+            ])
+            self.assertEqual(recorded[-1][:3],
+                             ("cargo_vendor", "failed", "FETCH_NORMALIZE_TIMEOUT"))
+
 
 if __name__ == "__main__":
     unittest.main()

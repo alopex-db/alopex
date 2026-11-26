@@ -26,6 +26,7 @@ import issue681_public_transport as transport
 ERROR = "PUBLIC_JOB"
 CASE = "HNSW_PUBLIC_JOB"
 SOFT_BUDGET_SECONDS = 160 * 60
+ACQUIRE_BUDGET_SECONDS = 25 * 60
 HOSTED_RUNNER_KIND = "github_hosted_ubuntu2404"
 
 
@@ -139,10 +140,12 @@ def execute_hosted_measure(env, workspace: Path, task_parent: Path,
                            home_parent: Path, profile: dict, finish: str, *,
                            expected_job: str = "hnsw_release_measure",
                            soft_budget_seconds: int = SOFT_BUDGET_SECONDS,
-                           on_stage=None):
+                           acquire_budget_seconds: int = ACQUIRE_BUDGET_SECONDS,
+                           on_stage=None,
+                           on_substage=None):
     """Execute one admitted GitHub-hosted VM #681 measurement finish.
 
-    UC-V0817-681-HOSTED-MEASURE-WIRE-01:
+    UC-V0817-681-HOSTED-MEASURE-WIRE-01 / UC-V0817-681-ACQUIRE-GUARD-DIAG-01:
     1. Caller has already passed identity_gate.run(env, expected_job=...).
     2. Install pinned Rust 1.90.0 --profile minimal under HostStorageGuard.
     3. Acquire exact pinned sources, Nim parser, and cargo vendor --locked.
@@ -197,9 +200,12 @@ def execute_hosted_measure(env, workspace: Path, task_parent: Path,
 
         stage = "acquire"
         check_budget()
+        acquire_kwargs = {"manifest": manifest, "vendor_mode": "cargo_vendor_locked"}
+        if on_substage is not None:
+            acquire_kwargs["on_substage"] = on_substage
+            acquire_kwargs["stage_budget_seconds"] = acquire_budget_seconds
         acquired = acquire.acquire_all(
-            workspace, task / "acquire", home, manifest=manifest,
-            vendor_mode="cargo_vendor_locked")
+            workspace, task / "acquire", home, **acquire_kwargs)
         notify("acquire")
 
         stage = "build"
@@ -280,10 +286,30 @@ def run_hosted_measure_cli(env=None):
                                         dir=home_root))
     os.chmod(home_parent, 0o700)
 
+    acquire_substages = {}
+    failure_detail = {"substage": None, "detail_code": None}
+
     def on_stage(name):
         stages[name] = "passed"
         print(json.dumps({"case": CASE, "stage": name, "status": "passed"},
                          sort_keys=True), flush=True)
+
+    def on_substage(name, status, detail_code, elapsed_s):
+        acquire_substages[name] = status
+        payload = {
+            "case": CASE,
+            "stage": "acquire",
+            "substage": name,
+            "status": status,
+            "elapsed_s": elapsed_s,
+        }
+        if status == "failed":
+            safe_code = (detail_code if detail_code in acquire.ALLOWED_DETAIL_CODES
+                         else acquire.ERROR)
+            payload["detail_code"] = safe_code
+            failure_detail["substage"] = name
+            failure_detail["detail_code"] = safe_code
+        print(json.dumps(payload, sort_keys=True), flush=True)
 
     profile = {
         "schema": public_admission.SCHEMA,
@@ -294,7 +320,8 @@ def run_hosted_measure_cli(env=None):
     try:
         result = execute_hosted_measure(
             env, workspace, task_parent, home_parent, profile, finish,
-            expected_job="hnsw_release_measure", on_stage=on_stage)
+            expected_job="hnsw_release_measure", on_stage=on_stage,
+            on_substage=on_substage)
         export_dir = runner_temp / "issue681-public-export"
         export_dir.mkdir(mode=0o700, exist_ok=True)
         os.chmod(export_dir, 0o700)
@@ -322,13 +349,20 @@ def run_hosted_measure_cli(env=None):
                         if token.startswith(ERROR + ":") else "unknown")
         if failed_stage in stages:
             stages[failed_stage] = "failed"
-        print(json.dumps({
+        summary = {
             "case": CASE,
             "outcome": "failed",
             "error_code": ERROR,
             "failed_stage": failed_stage,
             "stages": stages,
-        }, sort_keys=True), flush=True)
+        }
+        if acquire_substages:
+            summary["acquire_substages"] = acquire_substages
+        if failure_detail["substage"] is not None:
+            summary["failed_substage"] = failure_detail["substage"]
+        if failure_detail["detail_code"] is not None:
+            summary["detail_code"] = failure_detail["detail_code"]
+        print(json.dumps(summary, sort_keys=True), flush=True)
         return 1
     except BaseException:
         print(json.dumps({
