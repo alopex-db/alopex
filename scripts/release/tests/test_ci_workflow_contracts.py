@@ -112,13 +112,19 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertEqual(steps[3]["with"]["path"], "${{ runner.temp }}/issue681-public-export/")
 
     def test_toolchain_identity_checks_drain_output_and_preserve_failures(self) -> None:
-        action = (WORKFLOW_DIR.parent / "actions/setup-nim-parser-toolchain/action.yml").read_text(
+        composite = (WORKFLOW_DIR.parent / "actions/setup-nim-parser-toolchain/action.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('ALOPEX_ACTION_DIR: ${{ github.action_path }}', composite)
+        self.assertIn('action_dir="$(cygpath -u "${action_dir}")"', composite)
+        self.assertIn('bash "${action_dir}/setup.sh"', composite)
+        action = (WORKFLOW_DIR.parent / "actions/setup-nim-parser-toolchain/setup.sh").read_text(
             encoding="utf-8"
         )
         # Exercise the real final verification block without building Nim or
         # downloading packages. Two small writes reproduce an early reader exit.
         block = textwrap.dedent(action.rsplit('} >>"${GITHUB_OUTPUT}"', 1)[1].split(
-            '        cleanup_ephemeral', 1
+            'cleanup_ephemeral', 1
         )[0])
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -215,7 +221,7 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertIn("exit 1", signal_step)
 
     def test_exact_toolchain_pins_the_immutable_nimble_registry_snapshot(self) -> None:
-        action = (WORKFLOW_DIR.parent / "actions/setup-nim-parser-toolchain/action.yml").read_text(
+        action = (WORKFLOW_DIR.parent / "actions/setup-nim-parser-toolchain/setup.sh").read_text(
             encoding="utf-8"
         )
         revision = "b79eaaa3fc65fc473bc9e803445f8f7aef7112a2"

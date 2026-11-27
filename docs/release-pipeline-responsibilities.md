@@ -81,6 +81,7 @@ job's owner.
 | `compatibility.yml:historical-contract` | Extended Verification | historical API matrix result |
 | `compatibility.yml:current-windows-full` | Extended Verification | Windows full-workspace result |
 | `compatibility.yml:windows-overflow-public` | Extended Verification | manually selected Windows public overflow, fault/exit recovery and published old-reader receipts; source identity and cleanup |
+| `compatibility.yml:windows-overflow-pilot` | Extended Verification | bounded 30-minute Windows overflow pilot attestation preceding full `windows-overflow-public` acceptance, verifying storage capacity, timing extrapolation, and clean teardown |
 | `compatibility.yml:native` | Development CI | exact-SHA native compatibility result |
 | `compatibility.yml:wasm` | Development CI | exact-SHA WASM compatibility result |
 | `issue681-hosted-qualify.yml:qualify` | Extended Verification | #681 Draft PR head and selected Linux host admission with a fixed qualification result, without performance measurement |
