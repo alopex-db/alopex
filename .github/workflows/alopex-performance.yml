@@ -18,16 +18,17 @@ on:
         type: boolean
         default: false
       hnsw_release_measure_mode:
-        description: Selected #681 hosted paired measurement job (1k/10k/100k, one finish)
+        description: Selected #681 hosted paired measurement job (precondition fixture once per scale, SUT commit/rollback)
         required: false
         type: boolean
         default: false
       hnsw_finish:
-        description: Single completion finish for #681 hosted measurement
+        description: Completion finish scope for #681 hosted measurement (both reuses each prebuilt fixture for commit and rollback)
         required: false
         type: choice
-        default: commit
+        default: both
         options:
+          - both
           - commit
           - rollback
       sql_four_case_mode:
@@ -719,11 +720,11 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           GH_ACTIONS_READ_TOKEN: ${{ github.token }}
         run: python3 -B scripts/performance/issue681_hosted_identity.py
-  # stage-budget / early-stop: 330m soft budget + per-case 100k throughput projection early-stop + HostStorageGuard 40 GB stop
+  # stage-budget / early-stop: 120m soft budget + precondition fixture once per scale + HostStorageGuard 40 GB stop
   hnsw_release_measure:
     if: ${{ inputs.hnsw_release_measure_mode && !inputs.hnsw_release_admission_mode && inputs.issue_number == '681' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.sql_final_mode && !inputs.public_native_build_mode }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 150
     permissions:
       contents: read
       actions: read
@@ -1311,7 +1312,7 @@ jobs:
               sys.exit(1)
           PY
       - name: Authenticate, build, measure, and audit public finish
-        timeout-minutes: 345
+        timeout-minutes: 135
         env:
           EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
           EXPECTED_HNSW_SOURCE_TREE: ${{ inputs.expected_hnsw_source_tree }}
@@ -1320,13 +1321,13 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           RUNNER_KIND: github_hosted_ubuntu2404
           GH_ACTIONS_READ_TOKEN: ${{ github.token }}
-        run: python3 -B scripts/performance/issue681_hosted_full_job.py
+        run: python3 -B scripts/performance/issue681_hosted_fixture_measure.py
       - name: Upload audited public JSON artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: issue681-public-${{ inputs.hnsw_finish }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/issue681-public-export/issue681-public-${{ inputs.hnsw_finish }}.json
+          path: ${{ runner.temp }}/issue681-public-export/
           if-no-files-found: error
           retention-days: 14
   s04_socket_inventory:

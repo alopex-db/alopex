@@ -327,10 +327,10 @@ class HostedStorageTests(unittest.TestCase):
         self.assertIn('if [[ "${RUNNER_IS_WINDOWS}" == "1" ]]; then\n'
                       '    mkdir "${build_root}"', build_script)
         measure_job = json.loads(parsed)["jobs"]["hnsw_release_measure"]
-        self.assertEqual(measure_job["timeout-minutes"], 360)
+        self.assertEqual(measure_job["timeout-minutes"], 150)
         self.assertEqual(len(measure_job["steps"]), 4)
-        self.assertEqual(measure_job["steps"][2]["timeout-minutes"], 345)
-        self.assertIn("issue681_hosted_full_job.py", measure_job["steps"][2]["run"])
+        self.assertEqual(measure_job["steps"][2]["timeout-minutes"], 135)
+        self.assertIn("issue681_hosted_fixture_measure.py", measure_job["steps"][2]["run"])
         self.assertNotIn(".cms", json.dumps(measure_job["steps"]))
 
     def test_precheckout_and_checked_out_scanner_agree_on_fixture(self):
