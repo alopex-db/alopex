@@ -9,6 +9,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import issue681_hosted_acquire_all as acquire
+import issue681_hosted_storage as storage
 
 
 class Guard:
@@ -45,7 +46,7 @@ class HostedAcquireAllTest(unittest.TestCase):
         guard = Guard(events)
         self.patch(acquire.capacity, "HostStorageGuard", new=Guard)
 
-        def source(workspace, parent):
+        def source(workspace, parent, *, manifest):
             events.append("sources")
             self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o700)
             return {"guard": guard, "sources": {
@@ -79,11 +80,18 @@ class HostedAcquireAllTest(unittest.TestCase):
                    side_effect=step("vendor-install", {"cargo_home": Path("/private/cargo")}))
         return events, guard
 
+    def manifest(self, workspace, task_parent, home_parent):
+        home = home_parent.parent
+        return storage.Manifest(workspace, task_parent, home, task_parent,
+                                home_parent, (), (), task_parent / "scratch")
+
     def test_exact_order_and_shared_pretransfer_guard(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace, task_parent, home_parent = self.layout(Path(tmp))
             events, guard = self.components()
-            result = acquire.acquire_all(workspace, task_parent, home_parent)
+            result = acquire.acquire_all(
+                workspace, task_parent, home_parent,
+                manifest=self.manifest(workspace, task_parent, home_parent))
             self.assertEqual(events, [
                 "sources", "guard", "nim-fetch", "guard", "nim-extract",
                 "tools", "guard", "seed", "guard", "parser", "guard",
@@ -102,7 +110,9 @@ class HostedAcquireAllTest(unittest.TestCase):
             workspace, task_parent, home_parent = self.layout(Path(tmp))
             events, _ = self.components(fail="vendor-install")
             with self.assertRaisesRegex(ValueError, "^PUBLIC_ACQUIRE$"):
-                acquire.acquire_all(workspace, task_parent, home_parent)
+                acquire.acquire_all(
+                    workspace, task_parent, home_parent,
+                    manifest=self.manifest(workspace, task_parent, home_parent))
             self.assertEqual(events[-1], "vendor-install")
             self.assertEqual(list(task_parent.iterdir()), [])
             self.assertEqual(list(home_parent.iterdir()), [])
@@ -117,7 +127,10 @@ class HostedAcquireAllTest(unittest.TestCase):
                 else:
                     task_parent.chmod(0o755)
                 with self.assertRaisesRegex(ValueError, "^PUBLIC_ACQUIRE$"):
-                    acquire.acquire_all(workspace, task_parent, home_parent)
+                    acquire.acquire_all(
+                        workspace, task_parent, home_parent,
+                        manifest=self.manifest(workspace, task_parent,
+                                               home_parent))
                 self.assertEqual(events, [])
 
 

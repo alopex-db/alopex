@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -39,6 +40,7 @@ class HostedSourceAcquisitionTest(unittest.TestCase):
             workspace.mkdir(mode=0o700)
             parent = root / "sources"
             parent.mkdir(mode=0o700)
+            manifest = SimpleNamespace(workspace=workspace, task_parent=root)
             events = []
             guard = lambda: events.append("guard")
 
@@ -52,11 +54,12 @@ class HostedSourceAcquisitionTest(unittest.TestCase):
 
             with mock.patch.object(acquire, "_trusted_git"), \
                  mock.patch.object(acquire.capacity, "HostStorageGuard",
-                                   side_effect=lambda workspace: (
+                                   side_effect=lambda workspace, manifest: (
                                        events.append("created") or guard)), \
                  mock.patch.object(acquire, "_git", side_effect=fetch), \
                  mock.patch.object(acquire.producer, "verify_source") as verify:
-                result = acquire.acquire_sources(workspace, parent)
+                result = acquire.acquire_sources(workspace, parent,
+                                                 manifest=manifest)
             self.assertIs(result["guard"], guard)
             self.assertEqual(result["git_binary"], acquire.GIT)
             self.assertEqual(result["git_env"]["HOME"],
@@ -77,6 +80,7 @@ class HostedSourceAcquisitionTest(unittest.TestCase):
             workspace.mkdir(mode=0o700)
             parent = root / "sources"
             parent.mkdir(mode=0o700)
+            manifest = SimpleNamespace(workspace=workspace, task_parent=root)
 
             def fetch(args, cwd, active_guard, output, env):
                 if cwd.name == "candidate" and args[0] == "fetch":
@@ -88,7 +92,8 @@ class HostedSourceAcquisitionTest(unittest.TestCase):
                  mock.patch.object(acquire, "_git", side_effect=fetch), \
                  mock.patch.object(acquire.producer, "verify_source"):
                 with self.assertRaisesRegex(ValueError, "^PUBLIC_ACQUIRE$"):
-                    acquire.acquire_sources(workspace, parent)
+                    acquire.acquire_sources(workspace, parent,
+                                            manifest=manifest)
             self.assertFalse((parent / "before").exists())
             self.assertFalse((parent / "candidate").exists())
             self.assertEqual([entry.name for entry in parent.iterdir()],

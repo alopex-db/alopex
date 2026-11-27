@@ -119,6 +119,60 @@ class RustPreflightTest(unittest.TestCase):
                                        "outcome": "failed",
                                        "error_code": "TOOLCHAIN"})
 
+    def test_check_admission_accepts_healthy_rustup_and_current_stable_without_1_90(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            home = root / "home"
+            home.mkdir(mode=0o700)
+            binary = root / "bin"
+            binary.mkdir(mode=0o700)
+            for name in ("rustup", "rustc", "cargo"):
+                path = binary / name
+                path.write_bytes(b"tool")
+                path.chmod(0o700)
+
+            def which(name, *, path):
+                return str(binary / name)
+
+            def command(argv, *, env, stdin, capture_output, timeout):
+                self.assertEqual(env["RUSTUP_AUTO_INSTALL"], "0")
+                self.assertNotIn("RUSTUP_TOOLCHAIN", env)
+                if argv[0].endswith("rustup"):
+                    out = b"rustup 1.28.2 (e4f3ad6f8 2025-04-28)\n"
+                    err = (b"info: This is the version for the rustup toolchain manager, "
+                           b"not the rustc compiler.\n"
+                           b"info: the currently active `rustc` version is `rustc 1.92.0`\n")
+                elif argv[0].endswith("rustc"):
+                    out = (b"rustc 1.92.0\nbinary: rustc\nrelease: 1.92.0\n"
+                           b"host: x86_64-unknown-linux-gnu\n")
+                    err = b""
+                else:
+                    out = b"cargo 1.92.0 (123456789 2026-01-15)\n"
+                    err = b""
+                return subprocess.CompletedProcess(argv, 0, out, err)
+
+            with mock.patch.object(rust.Path, "home", return_value=home), \
+                 mock.patch.object(rust.shutil, "which", side_effect=which), \
+                 mock.patch.object(rust.subprocess, "run", side_effect=command):
+                rust.check_admission()
+            # Non-info stderr on rustup -V must still fail.
+            with mock.patch.object(rust.Path, "home", return_value=home), \
+                 mock.patch.object(rust.shutil, "which", side_effect=which), \
+                 mock.patch.object(
+                     rust.subprocess, "run",
+                     return_value=subprocess.CompletedProcess(
+                         ["rustup", "-V"], 0,
+                         b"rustup 1.28.2 (e4f3ad6f8 2025-04-28)\n",
+                         b"error: unexpected warning\n")):
+                with self.assertRaises(ValueError):
+                    rust.check_admission()
+            with mock.patch.object(rust.Path, "home", return_value=home), \
+                 mock.patch.object(rust.shutil, "which",
+                                   side_effect=lambda n, path: None if n == "rustup" else str(binary / n)), \
+                 mock.patch.object(rust.subprocess, "run", side_effect=command):
+                with self.assertRaises(ValueError):
+                    rust.check_admission()
+
 
 if __name__ == "__main__":
     unittest.main()

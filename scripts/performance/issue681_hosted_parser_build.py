@@ -149,6 +149,8 @@ def build_parser(source, nim, nimble, seed, build_parent, stage_parent,
     try:
         require(sys.platform == "linux" and os.uname().machine == "x86_64")
         require(type(guard) is capacity.HostStorageGuard)
+        require(guard.manifest is not None and
+                guard.manifest.scratch == SCRATCH)
         for path in (source, seed, build_parent, stage_parent):
             archive._owned_directory(path)
             require(path.resolve(strict=True) == path)

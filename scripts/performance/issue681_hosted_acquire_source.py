@@ -92,7 +92,7 @@ def _git(args, cwd, guard, output, env):
         raise
 
 
-def acquire_sources(workspace, parent):
+def acquire_sources(workspace, parent, *, manifest):
     """Return the pre-download guard and two verified private checkouts."""
     created = []
     try:
@@ -106,7 +106,9 @@ def acquire_sources(workspace, parent):
                 parent != workspace and parent not in workspace.parents and
                 workspace not in parent.parents)
         _trusted_git()
-        guard = capacity.HostStorageGuard(workspace)
+        require(manifest.workspace == workspace and
+                parent.is_relative_to(manifest.task_parent))
+        guard = capacity.HostStorageGuard(workspace, manifest=manifest)
         git_home = parent / "git-home"
         git_home.mkdir(mode=0o700)
         created.append(git_home)

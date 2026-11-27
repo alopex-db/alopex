@@ -39,7 +39,7 @@ class HostedFullJobTests(unittest.TestCase):
             pins = {"before": {"source_commit": "a"},
                     "candidate": {"source_commit": "b"}}
 
-            def acquire(work, task, home):
+            def acquire(work, task, home, *, manifest):
                 self.assertEqual(work, workspace)
                 self.assertEqual(task.parent.parent, task_parent)
                 self.assertEqual(home.parent, home_parent)
@@ -66,6 +66,8 @@ class HostedFullJobTests(unittest.TestCase):
                         "finish": finish}
 
             with mock.patch.object(job.Path, "home", return_value=home_base), \
+                 mock.patch.object(job.scoped_storage, "make_manifest",
+                                   return_value=object()), \
                  mock.patch.object(job.qualify, "REPO", workspace), \
                  mock.patch.object(job.qualify, "run",
                                    side_effect=lambda _: (calls.append("qualify") or

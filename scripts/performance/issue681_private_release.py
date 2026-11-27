@@ -75,16 +75,16 @@ def _private_qualification(_unused, workspace, task_parent, home_parent,
         require(root.is_absolute() and root.is_dir() and not root.is_symlink() and
                 root.resolve(strict=True) == root and
                 root.stat().st_uid == os.geteuid())
-    used, free = qualify.mounted_allocation()
+    manifest = qualify.scoped_storage.make_manifest(
+        workspace, task_parent, task_parent=task_parent,
+        home_parent=home_parent)
+    used, free = qualify.mounted_allocation(manifest)
     require(used + qualify.BUILD_BYTES + qualify.RESERVE_BYTES <
             qualify.STOP_BYTES and
             used + qualify.BUILD_BYTES + qualify.RESERVE_BYTES <
             qualify.CEILING_BYTES and
-            free[os.stat(workspace).st_dev] >
-            qualify.BUILD_BYTES + qualify.RESERVE_BYTES and
-            free[os.stat(task_parent).st_dev] >
-            qualify.BUILD_BYTES + qualify.RESERVE_BYTES and
-            free[os.stat(home_parent).st_dev] > 1_000_000_000)
+            all(value > qualify.BUILD_BYTES + qualify.RESERVE_BYTES
+                for value in free.values()))
     return {"case": qualify.CASE, "outcome": "passed"}, 0
 
 
