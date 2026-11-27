@@ -48,6 +48,7 @@ class CiWorkflowContractTests(unittest.TestCase):
         for name, job in jobs.items():
             if name != "hnsw_release_admission":
                 self.assertIn("!inputs.hnsw_release_admission_mode", job["if"], name)
+            if name not in ("hnsw_release_admission", "hnsw_release_measure"):
                 self.assertNotIn("id-token", job.get("permissions", {}), name)
         steps = admission["steps"]
         self.assertEqual(len(steps), 3)
@@ -68,6 +69,47 @@ class CiWorkflowContractTests(unittest.TestCase):
                               "issue681_hosted_acquire", "issue681_hosted_full_job",
                               "issue681_public_pair", "issue681_private_release"):
                 self.assertNotIn(forbidden, text)
+
+    def test_issue681_selected_measure_is_mutually_exclusive_and_audited(self) -> None:
+        workflow = self.workflow("alopex-performance.yml")
+        parsed = subprocess.run(
+            ["ruby", "-rjson", "-ryaml", "-e",
+             "puts JSON.generate(YAML.load_file(ARGV.fetch(0)))",
+             str(WORKFLOW_DIR / "alopex-performance.yml")],
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+        document = json.loads(parsed.stdout)
+        jobs = document["jobs"]
+        measure = jobs["hnsw_release_measure"]
+        self.assertIn("hnsw_release_measure_mode", workflow)
+        self.assertEqual(measure["runs-on"], "ubuntu-24.04")
+        self.assertEqual(measure["timeout-minutes"], 150)
+        self.assertEqual(measure["permissions"],
+                         {"contents": "read", "actions": "read", "id-token": "write"})
+        self.assertIn("inputs.issue_number == '681'", measure["if"])
+        self.assertIn("inputs.hnsw_release_measure_mode", measure["if"])
+        self.assertIn("!inputs.hnsw_release_admission_mode", measure["if"])
+        for old_mode in ("qualification_mode", "sql_four_case_mode", "sql_final_mode",
+                         "public_native_build_mode", "wal_cost_mode",
+                         "sql_diagnostic_mode", "s04_inspect_mode",
+                         "s04_socket_inventory_mode", "s04_capture_mode"):
+            self.assertIn("!inputs." + old_mode, measure["if"])
+        for name, job in jobs.items():
+            if name != "hnsw_release_measure":
+                self.assertIn("!inputs.hnsw_release_measure_mode", job["if"], name)
+        steps = measure["steps"]
+        self.assertEqual(len(steps), 4)
+        self.assertEqual(steps[0]["name"], "Gate selected source and storage before checkout")
+        self.assertIn("Fetch exact selected source", steps[1]["name"])
+        self.assertIn("GIT_CONFIG_NOSYSTEM", steps[1]["run"])
+        self.assertIn("GIT_TEMPLATE_DIR", steps[1]["run"])
+        self.assertIn("HEAD^{tree}", steps[1]["run"])
+        self.assertEqual(steps[2]["timeout-minutes"], 135)
+        self.assertEqual(steps[2]["run"],
+                         "python3 -B scripts/performance/issue681_hosted_fixture_measure.py")
+        self.assertEqual(steps[3]["if"], "success()")
+        self.assertEqual(steps[3]["uses"], "actions/upload-artifact@v4")
+        self.assertEqual(steps[3]["with"]["path"], "${{ runner.temp }}/issue681-public-export/")
 
     def test_toolchain_identity_checks_drain_output_and_preserve_failures(self) -> None:
         action = (WORKFLOW_DIR.parent / "actions/setup-nim-parser-toolchain/action.yml").read_text(
