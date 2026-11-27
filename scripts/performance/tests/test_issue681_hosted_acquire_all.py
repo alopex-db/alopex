@@ -54,7 +54,7 @@ class HostedAcquireAllTest(unittest.TestCase):
                 "git_binary": Path("/usr/bin/git"), "git_env": {"HOME": "sealed"}}
 
         def step(name, result):
-            def call(*args):
+            def call(*args, **_kwargs):
                 events.append(name)
                 self.assertIn(guard, args)
                 if name == fail:
@@ -132,6 +132,120 @@ class HostedAcquireAllTest(unittest.TestCase):
                         manifest=self.manifest(workspace, task_parent,
                                                home_parent))
                 self.assertEqual(events, [])
+
+    def test_on_substage_reports_allowlisted_detail_without_private_leaks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, task_parent, home_parent = self.layout(Path(tmp))
+            self.components()
+            recorded = []
+
+            def fail_cargo(_sources, _cargo_home, _scratch, _guard, *, timeout, diag):
+                diag["code"] = "FETCH_NORMALIZE_TIMEOUT"
+                raise ValueError("PUBLIC_VENDOR")
+
+            with mock.patch.object(acquire.cargo_fetch, "fetch_and_stage_vendor",
+                                   side_effect=fail_cargo):
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_ACQUIRE$"):
+                    acquire.acquire_all(
+                        workspace, task_parent, home_parent,
+                        manifest=self.manifest(workspace, task_parent, home_parent),
+                        vendor_mode="cargo_vendor_locked",
+                        on_substage=lambda *row: recorded.append(row),
+                        stage_budget_seconds=120)
+            self.assertEqual([r[:2] for r in recorded[:-1]], [
+                ("sources", "passed"),
+                ("nim_fetch", "passed"),
+                ("nim_extract", "passed"),
+                ("parser_tools", "passed"),
+                ("parser_seed", "passed"),
+                ("parser_build", "passed"),
+            ])
+            self.assertEqual(recorded[-1][:3],
+                             ("cargo_vendor", "failed", "FETCH_NORMALIZE_TIMEOUT"))
+
+    def test_nimble_install_fallback_reports_allowlisted_detail_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, task_parent, home_parent = self.layout(Path(tmp))
+            self.components()
+            recorded = []
+
+            def fail_install(_extracted, _guard, *, diag):
+                diag["code"] = "NIMBLE_ARCHIVE_DIGEST"
+                raise ValueError("PUBLIC_PARSER_INPUT")
+
+            with mock.patch.object(acquire.parser_tools, "verify_tools",
+                                   side_effect=ValueError("PUBLIC_PARSER_INPUT")), \
+                 mock.patch.object(acquire.parser_tools, "install_pinned_nimble",
+                                   side_effect=fail_install):
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_ACQUIRE$"):
+                    acquire.acquire_all(
+                        workspace, task_parent, home_parent,
+                        manifest=self.manifest(workspace, task_parent, home_parent),
+                        vendor_mode="cargo_vendor_locked",
+                        on_substage=lambda *row: recorded.append(row),
+                        stage_budget_seconds=120)
+            self.assertEqual(recorded[-1][:3],
+                             ("nimble_install", "failed", "NIMBLE_ARCHIVE_DIGEST"))
+
+    def test_nimble_install_fallback_succeeds_and_rechecks_verify_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, task_parent, home_parent = self.layout(Path(tmp))
+            self.components()
+            recorded = []
+            verify_calls = {"n": 0}
+
+            def verify_twice(_extracted, _guard):
+                verify_calls["n"] += 1
+                if verify_calls["n"] == 1:
+                    raise ValueError("PUBLIC_PARSER_INPUT")
+                return {"nim": Path("/private/nim"), "nimble": Path("/private/nimble")}
+
+            with mock.patch.object(acquire.parser_tools, "verify_tools",
+                                   side_effect=verify_twice), \
+                 mock.patch.object(acquire.parser_tools, "install_pinned_nimble",
+                                   return_value=Path("/private/nimble")) as inst, \
+                 mock.patch.object(acquire.cargo_fetch, "fetch_and_stage_vendor",
+                                   return_value={"cargo_home": Path("/private/cargo")}):
+                result = acquire.acquire_all(
+                    workspace, task_parent, home_parent,
+                    manifest=self.manifest(workspace, task_parent, home_parent),
+                    vendor_mode="cargo_vendor_locked",
+                    on_substage=lambda *row: recorded.append(row),
+                    stage_budget_seconds=120)
+            inst.assert_called_once()
+            self.assertEqual(verify_calls["n"], 2)
+            self.assertIn(("nimble_install", "passed"), [(r[0], r[1]) for r in recorded])
+            self.assertIn(("parser_tools", "passed"), [(r[0], r[1]) for r in recorded])
+            self.assertEqual(result["vendor"], {"cargo_home": Path("/private/cargo")})
+
+    def test_seed_and_parser_build_report_allowlisted_detail_codes(self):
+        for target_step, expected_substage, expected_code in (
+            ("seed", "parser_seed", "SEED_VERIFY"),
+            ("parser", "parser_build", "PARSER_PROCESS"),
+        ):
+            with self.subTest(target=target_step), tempfile.TemporaryDirectory() as tmp:
+                workspace, task_parent, home_parent = self.layout(Path(tmp))
+                self.components()
+                recorded = []
+
+                def fail_with_diag(*_args, diag=None, code=expected_code):
+                    if isinstance(diag, dict):
+                        diag["code"] = code
+                    raise ValueError("PUBLIC_PARSER_INPUT")
+
+                patch_obj = (acquire.parser_seed if target_step == "seed"
+                             else acquire.parser_build)
+                patch_fn = "acquire_seed" if target_step == "seed" else "build_parser"
+                with mock.patch.object(patch_obj, patch_fn, side_effect=fail_with_diag):
+                    with self.assertRaisesRegex(ValueError, "^PUBLIC_ACQUIRE$"):
+                        acquire.acquire_all(
+                            workspace, task_parent, home_parent,
+                            manifest=self.manifest(workspace, task_parent, home_parent),
+                            vendor_mode="cargo_vendor_locked",
+                            on_substage=lambda *row: recorded.append(row),
+                            stage_budget_seconds=120)
+                self.assertEqual(recorded[-1][:3],
+                                 (expected_substage, "failed", expected_code))
 
 
 if __name__ == "__main__":

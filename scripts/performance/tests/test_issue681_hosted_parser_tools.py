@@ -1,9 +1,12 @@
 """Parser tool preflight rejects untrusted identities and keeps output private."""
 
 from pathlib import Path
+import hashlib
+import io
 import shlex
 import stat
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -140,6 +143,128 @@ class HostedParserToolsTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "^PUBLIC_PARSER_INPUT$"):
                     tools.verify_tools(output, lambda: None)
             self.assertFalse((root / "tools-probe.partial").exists())
+
+    def _make_nimble_archive(self, payload: bytes, *, extra_member=None,
+                             member_name="nimble", member_mode=0o755,
+                             symlink_member=False):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            info = tarfile.TarInfo(member_name)
+            if symlink_member:
+                info.type = tarfile.SYMTYPE
+                info.linkname = "/bin/sh"
+                info.mode = 0o777
+                tf.addfile(info)
+            else:
+                info.size = len(payload)
+                info.mode = member_mode
+                tf.addfile(info, io.BytesIO(payload))
+            if extra_member is not None:
+                extra = tarfile.TarInfo(extra_member)
+                extra.size = 1
+                extra.mode = 0o644
+                tf.addfile(extra, io.BytesIO(b"x"))
+        return buf.getvalue()
+
+    def _fake_requests(self, archive_bytes, *,
+                       redirect_location="https://release-assets.githubusercontent.com/github-production-release-asset/1?sig=ok"):
+        class FakeConn:
+            def close(self):
+                pass
+
+        class FakeResp:
+            def __init__(self, status, headers, body=b""):
+                self.status = status
+                self._headers = headers
+                self._stream = io.BytesIO(body)
+
+            def getheader(self, name):
+                return self._headers.get(name)
+
+            def read(self, size=-1):
+                return self._stream.read(size)
+
+            def close(self):
+                pass
+
+        calls = []
+
+        def fake_request(host, target):
+            calls.append((host, target))
+            if len(calls) == 1:
+                return FakeConn(), FakeResp(302, {"Location": redirect_location})
+            return FakeConn(), FakeResp(
+                200, {"Content-Length": str(len(archive_bytes))}, archive_bytes)
+
+        return fake_request, calls
+
+    def test_install_pinned_nimble_replaces_bundled_tool_and_verifies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            output = self.fixture(root, nimble_sha="0" * 40)
+            payload = (
+                "#!/bin/sh\nprintf 'nimble v0.22.3 compiled\\ngit hash: " +
+                tools.NIMBLE_SHA + "\\n'\n"
+            ).encode()
+            archive_bytes = self._make_nimble_archive(payload)
+            fake_request, calls = self._fake_requests(archive_bytes)
+            diag = {}
+            with mock.patch.object(tools, "NIMBLE_ARCHIVE_BYTES", len(archive_bytes)), \
+                 mock.patch.object(tools, "NIMBLE_ARCHIVE_SHA256",
+                                   hashlib.sha256(archive_bytes).hexdigest()), \
+                 mock.patch.object(tools, "NIMBLE_BIN_BYTES", len(payload)), \
+                 mock.patch.object(tools, "NIMBLE_BIN_SHA256",
+                                   hashlib.sha256(payload).hexdigest()), \
+                 mock.patch.object(tools.archive, "_request", side_effect=fake_request):
+                nimble = tools.install_pinned_nimble(output, lambda: None, diag=diag)
+            self.assertEqual(nimble, output / "nim-2.2.10/bin/nimble")
+            self.assertEqual(stat.S_IMODE(nimble.stat().st_mode), 0o700)
+            self.assertEqual(diag, {})
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0], (tools.archive.FIRST_HOST, tools.NIMBLE_DOWNLOAD_PATH))
+            self.assertFalse((nimble.parent / "nimble.partial").exists())
+            verified = tools.verify_tools(output, lambda: None)
+            self.assertEqual(verified["nimble"], nimble)
+
+    def test_install_pinned_nimble_rejects_bad_archive_and_records_diag(self):
+        cases = (
+            ("redirect", "NIMBLE_REDIRECT"),
+            ("archive_sha", "NIMBLE_ARCHIVE_DIGEST"),
+            ("extra_member", "NIMBLE_EXTRACT"),
+            ("symlink_member", "NIMBLE_EXTRACT"),
+            ("bin_sha", "NIMBLE_BIN_DIGEST"),
+            ("capacity", "NIMBLE_CAPACITY"),
+        )
+        for case, expected_code in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                output = self.fixture(root, nimble_sha="0" * 40)
+                payload = b"#!/bin/sh\necho ok\n"
+                archive_bytes = self._make_nimble_archive(
+                    payload,
+                    extra_member="extra.txt" if case == "extra_member" else None,
+                    symlink_member=(case == "symlink_member"),
+                )
+                location = ("https://evil.example.com/x?a=1" if case == "redirect"
+                            else "https://release-assets.githubusercontent.com/github-production-release-asset/1?sig=ok")
+                fake_request, _ = self._fake_requests(archive_bytes,
+                                                      redirect_location=location)
+                expected_archive_sha = ("0" * 64 if case == "archive_sha"
+                                        else hashlib.sha256(archive_bytes).hexdigest())
+                expected_bin_sha = ("0" * 64 if case == "bin_sha"
+                                    else hashlib.sha256(payload).hexdigest())
+                guard = (mock.Mock(side_effect=ValueError("PUBLIC_CAPACITY"))
+                         if case == "capacity" else (lambda: None))
+                diag = {}
+                with mock.patch.object(tools, "NIMBLE_ARCHIVE_BYTES", len(archive_bytes)), \
+                     mock.patch.object(tools, "NIMBLE_ARCHIVE_SHA256", expected_archive_sha), \
+                     mock.patch.object(tools, "NIMBLE_BIN_BYTES", len(payload)), \
+                     mock.patch.object(tools, "NIMBLE_BIN_SHA256", expected_bin_sha), \
+                     mock.patch.object(tools.archive, "_request", side_effect=fake_request):
+                    with self.assertRaisesRegex(ValueError, "^PUBLIC_PARSER_INPUT$"):
+                        tools.install_pinned_nimble(output, guard, diag=diag)
+                self.assertEqual(diag.get("code"), expected_code)
+                self.assertFalse((output / "nim-2.2.10/bin/nimble.partial").exists())
 
 
 if __name__ == "__main__":

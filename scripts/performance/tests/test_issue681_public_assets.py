@@ -93,8 +93,11 @@ class PublicAssetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "bundle"
             pin = make_bundle(root, example=b"/private/host/secret\n")
+            diag = {}
             with self.assertRaisesRegex(ValueError, "^PUBLIC_ASSET$"):
-                assets.verify(root, pin, private_roots=(str(root), "/private/host"))
+                assets.verify(root, pin, private_roots=(str(root), "/private/host"),
+                              diag=diag)
+            self.assertEqual(diag.get("code"), "BUILD_ASSETS_PREFIX_EXAMPLE")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "bundle"
             pin = make_bundle(root, qualification="/private/host/diagnostic")

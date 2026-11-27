@@ -1,0 +1,13 @@
+[package]
+name = "issue681-fixture-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+alopex-core = { path = "../../../crates/alopex-core" }
+alopex-embedded = { path = "../../../crates/alopex-embedded" }
+alopex-sql = { path = "../../../crates/alopex-sql" }
+serde_json = "1"

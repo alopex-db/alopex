@@ -42,6 +42,22 @@ PINS = {
 REGISTRY_BYTES = 977_981
 REGISTRY_SHA256 = "e42c394337184b2fe52f65538ea3dc93fb8840efb77ec775261ebd1f7169d329"
 PACKAGE_FILES = ("packages_official.json", "packages_temp.json")
+SEED_DIAG_CODES = frozenset({
+    "SEED_ADMISSION",
+    "SEED_GIT",
+    "SEED_ASSEMBLY",
+    "SEED_VERIFY",
+    "SEED_CLEANUP",
+})
+
+
+def _set_diag(diag, code):
+    if isinstance(diag, dict) and code in SEED_DIAG_CODES:
+        diag["code"] = code
+
+
+def package_dirname(name, pin):
+    return f"{name}-{pin['version']}-{pin['commit']}"
 
 
 def require(value):
@@ -130,19 +146,17 @@ def _copy_package(checkout, seed, name, pin):
     src = checkout / "src"
     require(manifest.is_file() and not manifest.is_symlink() and
             src.is_dir() and not src.is_symlink())
-    selected = [manifest]
+    selected = [(manifest, Path(manifest.name))]
     for path in src.rglob("*"):
         info = path.lstat()
         require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
         if stat.S_ISREG(info.st_mode) and path.suffix == ".nim":
-            selected.append(path)
+            selected.append((path, path.relative_to(src)))
     require(len(selected) == pin["source_files"] + 1)
-    package = seed / "pkgs2" / (name + "-" + pin["version"] + "-" +
-                               pin["commit"][:12])
+    package = seed / "pkgs2" / package_dirname(name, pin)
     package.mkdir(mode=0o700)
     members = []
-    for path in sorted(selected, key=lambda item: item.relative_to(checkout).as_posix()):
-        relative = path.relative_to(checkout)
+    for path, relative in sorted(selected, key=lambda item: item[1].as_posix()):
         data = path.read_bytes()
         require(len(data) <= 5_000_000)
         destination = package / relative
@@ -177,8 +191,7 @@ def _verify_seed(seed, log, guard):
                  "verify-inputs"]
     for name in ("npeg", "msgpack4nim"):
         pin = PINS[name]
-        package = seed / "pkgs2" / (name + "-" + pin["version"] + "-" +
-                                   pin["commit"][:12])
+        package = seed / "pkgs2" / package_dirname(name, pin)
         arguments += ["--package", name + "=" + pin["version"] + "=" +
                       str(package)]
     for name in PACKAGE_FILES:
@@ -190,13 +203,14 @@ def _verify_seed(seed, log, guard):
     guard()
 
 
-def acquire_seed(parent, guard, git_env):
+def acquire_seed(parent, guard, git_env, *, diag=None):
     """Return an authenticated owner-only seed, or only PUBLIC_PARSER_INPUT."""
     owned_dirs = []
     owned_log = None
     checkouts = seed = None
     stage = "admission"
     try:
+        _set_diag(diag, "SEED_ADMISSION")
         _owned_empty(parent)
         require(callable(guard))
         _sealed_git_env(git_env)
@@ -216,20 +230,26 @@ def acquire_seed(parent, guard, git_env):
             owned_dirs.append((seed, _directory_identity(seed)))
             (seed / "pkgs2").mkdir(mode=0o700)
             stage = "git"
+            _set_diag(diag, "SEED_GIT")
             for name in ("npeg", "msgpack4nim", "registry"):
                 _checkout(checkouts / name, PINS[name], git_env, guard, log)
             stage = "assembly"
+            _set_diag(diag, "SEED_ASSEMBLY")
             for name in ("npeg", "msgpack4nim"):
                 _copy_package(checkouts / name, seed, name, PINS[name])
                 guard()
             _copy_registry(checkouts / "registry", seed)
             stage = "verification"
+            _set_diag(diag, "SEED_VERIFY")
             _verify_seed(seed, log, guard)
         stage = "cleanup"
+        _set_diag(diag, "SEED_CLEANUP")
         _remove_owned(checkouts, owned_dirs[0][1])
         owned_dirs = [item for item in owned_dirs if item[0] != checkouts]
         checkouts = None
         guard()
+        if isinstance(diag, dict):
+            diag.pop("code", None)
         return seed
     except BaseException as error:
         try:

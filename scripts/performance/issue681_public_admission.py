@@ -23,6 +23,7 @@ from phase_rss import PhaseRss
 
 SCHEMA = "alopex.issue681-public-execution/v1"
 WINDOW_SECONDS = 3
+MAX_QUIET_ATTEMPTS = 10
 MIN_IDLE_BASIS_POINTS = 9_900
 LEDGER_SCHEMA = "alopex.issue681-private-admission/v1"
 LEDGER_FIELDS = {"schema", "kind", "rows", "trial", "arm",
@@ -316,21 +317,28 @@ class Admission:
 
     def _quiet_window(self):
         before = Path("/proc/stat").read_text()
-        started = time.monotonic()
-        time.sleep(WINDOW_SECONDS)
-        require(time.monotonic() - started >= WINDOW_SECONDS)
-        after = Path("/proc/stat").read_text()
-        return quiet(before, after, self.selected)
+        for _ in range(MAX_QUIET_ATTEMPTS):
+            started = time.monotonic()
+            time.sleep(WINDOW_SECONDS)
+            require(time.monotonic() - started >= WINDOW_SECONDS)
+            after = Path("/proc/stat").read_text()
+            if len(eligible_cpus(before, after, self.selected)) == len(self.selected):
+                return quiet(before, after, self.selected)
+            before = after
+        raise ValueError("PUBLIC_ADMIT")
 
     def _select_cpus(self):
         before = Path("/proc/stat").read_text()
-        started = time.monotonic()
-        time.sleep(WINDOW_SECONDS)
-        require(time.monotonic() - started >= WINDOW_SECONDS)
-        after = Path("/proc/stat").read_text()
-        eligible = eligible_cpus(before, after, tuple(self.previous))
-        require(len(eligible) >= 4)
-        return eligible[:4]
+        for _ in range(MAX_QUIET_ATTEMPTS):
+            started = time.monotonic()
+            time.sleep(WINDOW_SECONDS)
+            require(time.monotonic() - started >= WINDOW_SECONDS)
+            after = Path("/proc/stat").read_text()
+            eligible = eligible_cpus(before, after, tuple(self.previous))
+            if len(eligible) >= 4:
+                return eligible[:4]
+            before = after
+        raise ValueError("PUBLIC_ADMIT")
 
     def _record(self, kind, used, idle, *, rows=None, trial=None, arm=None):
         value = {"schema": LEDGER_SCHEMA,

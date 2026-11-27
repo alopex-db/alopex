@@ -136,6 +136,38 @@ class AdmissionTests(unittest.TestCase):
             self.assertEqual(len((log_dir / "admission.jsonl").read_text().splitlines()),
                              4)
 
+    def test_quiet_window_waits_for_strict_idle_within_bound_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = {"schema": admission.SCHEMA,
+                       "runner_kind": "selected_linux",
+                       "cpu_count": 4, "additional_bytes": 1_000}
+            gate = admission.Admission(profile, roots=(Path(tmp),),
+                                       log_dir=Path(tmp))
+            gate.selected = (0, 1, 2, 3)
+            # First 3s window has a transient 2% tick on cpu3; second window is 100% idle.
+            samples = [
+                stat({0: (0, 100), 1: (0, 100), 2: (0, 100), 3: (0, 100)}),
+                stat({0: (0, 400), 1: (0, 400), 2: (0, 400), 3: (6, 394)}),
+                stat({0: (0, 700), 1: (0, 700), 2: (0, 700), 3: (6, 694)}),
+            ]
+            clock = iter(range(0, 100, admission.WINDOW_SECONDS))
+            with mock.patch.object(admission.Path, "read_text", side_effect=samples), \
+                 mock.patch.object(admission.time, "sleep"), \
+                 mock.patch.object(admission.time, "monotonic", side_effect=clock):
+                self.assertEqual(gate._quiet_window(), 10_000)
+
+            # Sustained busy CPU across all bounded attempts must still fail closed.
+            busy_samples = [
+                stat({0: (0, 100 * i), 1: (0, 100 * i), 2: (0, 100 * i), 3: (10 * i, 90 * i)})
+                for i in range(1, admission.MAX_QUIET_ATTEMPTS + 2)
+            ]
+            clock = iter(range(0, 200, admission.WINDOW_SECONDS))
+            with mock.patch.object(admission.Path, "read_text", side_effect=busy_samples), \
+                 mock.patch.object(admission.time, "sleep"), \
+                 mock.patch.object(admission.time, "monotonic", side_effect=clock):
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_ADMIT$"):
+                    gate._quiet_window()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,20 @@ on:
         required: false
         type: boolean
         default: false
+      hnsw_release_measure_mode:
+        description: Selected #681 hosted paired measurement job (precondition fixture once per scale, SUT commit/rollback)
+        required: false
+        type: boolean
+        default: false
+      hnsw_finish:
+        description: Completion finish scope for #681 hosted measurement (both reuses each prebuilt fixture for commit and rollback)
+        required: false
+        type: choice
+        default: both
+        options:
+          - both
+          - commit
+          - rollback
       sql_four_case_mode:
         description: Continue same-job #804 qualification into the pinned #712 SQL matrix
         required: false
@@ -108,7 +122,7 @@ concurrency:
 
 jobs:
   hnsw_release_admission:
-    if: ${{ inputs.hnsw_release_admission_mode && inputs.issue_number == '681' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.sql_final_mode && !inputs.public_native_build_mode }}
+    if: ${{ inputs.hnsw_release_admission_mode && !inputs.hnsw_release_measure_mode && inputs.issue_number == '681' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.sql_final_mode && !inputs.public_native_build_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -706,8 +720,618 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           GH_ACTIONS_READ_TOKEN: ${{ github.token }}
         run: python3 -B scripts/performance/issue681_hosted_identity.py
+  # stage-budget / early-stop: 120m soft budget + precondition fixture once per scale + HostStorageGuard 40 GB stop
+  hnsw_release_measure:
+    if: ${{ inputs.hnsw_release_measure_mode && !inputs.hnsw_release_admission_mode && inputs.issue_number == '681' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.sql_final_mode && !inputs.public_native_build_mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - name: Gate selected source and storage before checkout
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          EXPECTED_HNSW_SOURCE_TREE: ${{ inputs.expected_hnsw_source_tree }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, platform, re, stat, sys, time
+          check_keys = (
+              'source', 'workspace', 'fs_stats', 'root_links',
+              'root_identity_pre', 'mount_pre',
+              'tree_workspace', 'tree_temp', 'tree_cargo', 'tree_cache',
+              'tree_rustup', 'tree_installs', 'tree_scratch', 'tree_scratch_lock',
+              'bounds', 'root_identity_post', 'mount_post',
+              'budget', 'free_space', 'env_write',
+          )
+          checks = {key: 'skipped_prereq' for key in check_keys}
+          root_link_failures = []
+          tree_findings = {}
+          first_error = None
+          code = 'SOURCE'
+          def record_failure(err_code):
+              global first_error
+              if first_error is None:
+                  first_error = err_code
+          def add_finding(label, token):
+              tree_findings.setdefault(label, set()).add(token)
+          def set_tree_status(key, status_code):
+              if checks[key] in ('skipped_prereq', 'passed'):
+                  checks[key] = status_code
+              record_failure(status_code)
+          def emit_failure(fallback_code):
+              if checks['env_write'] == 'skipped_prereq':
+                  checks['env_write'] = 'skipped_failed'
+              payload = {
+                  'case': 'HNSW_HOSTED_PRECHECK',
+                  'outcome': 'failed',
+                  'error_code': first_error or fallback_code,
+                  'checks': checks,
+              }
+              if root_link_failures:
+                  payload['root_link_failures'] = root_link_failures
+              if tree_findings:
+                  payload['tree_findings'] = {
+                      label: sorted(tokens)
+                      for label, tokens in sorted(tree_findings.items())
+                  }
+              print(json.dumps(payload, sort_keys=True))
+              sys.exit(1)
+          try:
+              e = os.environ
+              assert e.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+              assert e.get('GITHUB_JOB') == 'hnsw_release_measure'
+              assert e.get('ISSUE_NUMBER') == '681'
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_CONTROLLER_SHA', ''))
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_HNSW_SOURCE_TREE', ''))
+              assert e['EXPECTED_CONTROLLER_SHA'] == e.get('GITHUB_SHA')
+              assert e.get('GITHUB_REF', '').startswith('refs/heads/')
+              assert e.get('RUNNER_ENVIRONMENT') == 'github-hosted'
+              assert platform.system() == 'Linux' and platform.machine() == 'x86_64'
+              checks['source'] = 'passed'
+              code = 'STORAGE_WORKSPACE'
+              workspace = pathlib.Path(e['GITHUB_WORKSPACE'])
+              temporary = pathlib.Path(e['RUNNER_TEMP'])
+              home = pathlib.Path.home()
+              scratch = pathlib.Path('/tmp/alopex-nim-parser-v0.8.17-contract-0.28.0-x86_64-unknown-linux-gnu')
+              scratch_lock = pathlib.Path(str(scratch) + '.lock')
+              def root_identity(path, scratch_parent=False):
+                  assert (path.is_absolute() and path.is_dir() and
+                          not path.is_symlink() and path.resolve(strict=True) == path)
+                  info = path.lstat()
+                  assert stat.S_ISDIR(info.st_mode)
+                  if scratch_parent:
+                      mode = stat.S_IMODE(info.st_mode)
+                      assert ((info.st_uid == 0 and mode == 0o1777) or
+                              (info.st_uid == os.geteuid() and mode == 0o700))
+                  else:
+                      assert info.st_uid == os.geteuid()
+                  return info.st_dev, info.st_ino, info.st_uid, info.st_mode
+              for path in (workspace, workspace.parent, temporary, home):
+                  root_identity(path)
+              root_identity(scratch.parent, scratch_parent=True)
+              assert not any(path.exists() or path.is_symlink() for path in
+                             (scratch, scratch_lock))
+              assert not any(workspace.iterdir())
+              workspace.chmod(0o700)
+              checks['workspace'] = 'passed'
+              code = 'STORAGE_FS_STATS'
+              free_by_device = {}
+              for path in (workspace.parent, temporary, home, scratch.parent):
+                  fs = os.statvfs(path)
+                  assert fs.f_frsize > 0 and 0 <= fs.f_bavail <= fs.f_bfree <= fs.f_blocks
+                  device = path.stat().st_dev
+                  free = fs.f_bavail * fs.f_frsize
+                  free_by_device[device] = min(free_by_device.get(device, free), free)
+              local = home / '.local'
+              if local.is_symlink():
+                  installs = ()
+              elif local.exists():
+                  assert local.is_dir() and local.stat().st_uid == os.geteuid()
+                  installs = tuple(sorted(path for path in local.iterdir()
+                                          if path.name.startswith('alopex-')))
+              else:
+                  installs = ()
+              checks['fs_stats'] = 'passed'
+              roots = (workspace.parent, temporary, home / '.cargo', home / '.cache',
+                       home / '.rustup', *installs, scratch, scratch_lock)
+              optional = {home / '.cargo', home / '.cache', home / '.rustup', scratch,
+                          scratch_lock}
+              code = 'STORAGE_ROOTS'
+              def mount_text():
+                  with open('/proc/self/mountinfo', encoding='utf-8') as source:
+                      value = source.read(4_000_001)
+                  assert len(value.encode('utf-8')) <= 4_000_000
+                  return value
+              def mount_path(value):
+                  assert isinstance(value, str) and not re.search(r'\\(?![0-7]{3})', value)
+                  decoded = re.sub(r'\\([0-7]{3})',
+                                   lambda found: chr(int(found.group(1), 8)), value)
+                  assert (decoded.startswith('/') and '\x00' not in decoded and
+                          (decoded == '/' or (not decoded.endswith('/') and
+                           all(part not in ('', '.', '..')
+                               for part in decoded.split('/')[1:]))))
+                  return pathlib.Path(decoded)
+              def mount_topology(anchors, roots, value):
+                  assert isinstance(value, str) and len(value.encode('utf-8')) <= 4_000_000
+                  lines = value.splitlines()
+                  assert 1 <= len(lines) <= 4096
+                  rows, ids, points = [], set(), set()
+                  for line in lines:
+                      assert len(line) <= 8192 and line.count(' - ') == 1
+                      before, after = line.split(' - ', 1)
+                      fields, tail = before.split(), after.split()
+                      assert (len(fields) >= 6 and len(tail) >= 3 and
+                              fields[0].isdecimal() and fields[1].isdecimal() and
+                              re.fullmatch(r'[0-9]+:[0-9]+', fields[2]))
+                      mount_id, parent_id = int(fields[0]), int(fields[1])
+                      root, point = mount_path(fields[3]), mount_path(fields[4])
+                      assert mount_id > 0 and parent_id > 0 and mount_id not in ids
+                      ids.add(mount_id)
+                      points.add(point)
+                      major, minor = (int(part) for part in fields[2].split(':'))
+                      rows.append((mount_id, parent_id, major, minor, str(root),
+                                   str(point), tuple(fields[5:]), tuple(tail)))
+                  assert pathlib.Path('/') in points
+                  grouped = {}
+                  for row in rows:
+                      grouped.setdefault(pathlib.Path(row[5]), []).append(row)
+                  def visible(point):
+                      stack = grouped[point]
+                      by_id = {row[0]: row for row in stack}
+                      bases = [row for row in stack if row[1] not in by_id or
+                               row[1] == row[0]]
+                      assert len(bases) == 1
+                      ordered = [bases[0]]
+                      while len(ordered) < len(stack):
+                          children = [row for row in stack if
+                                      row[1] == ordered[-1][0] and row[0] != ordered[-1][0]]
+                          assert len(children) == 1 and children[0] not in ordered
+                          ordered.append(children[0])
+                      return ordered[-1]
+                  admitted = {path for path, _ in anchors} | set(roots)
+                  relevant = set()
+                  for path, _ in anchors:
+                      covering = [point for point in grouped if path == point or
+                                  path.is_relative_to(point)]
+                      assert covering
+                      point = max(covering, key=lambda item: len(item.parts))
+                      selected = visible(point)
+                      device = path.stat().st_dev
+                      assert (selected[2], selected[3]) == (os.major(device), os.minor(device))
+                      relevant.update(grouped[point])
+                  for root in roots:
+                      if not root.exists() and not root.is_symlink():
+                          continue
+                      if root.is_symlink():
+                          continue
+                      covering = [point for point in grouped if root == point or
+                                  root.is_relative_to(point)]
+                      assert covering
+                      point = max(covering, key=lambda item: len(item.parts))
+                      visible(point)
+                      relevant.update(grouped[point])
+                      for point, stack in grouped.items():
+                          if point != root and point.is_relative_to(root):
+                              assert point in admitted
+                              visible(point)
+                              relevant.update(stack)
+                  return tuple(sorted(relevant))
+              fixed = (workspace, workspace.parent, temporary, home, scratch.parent)
+              if local.exists() or local.is_symlink():
+                  fixed += (local,)
+              fixed += tuple(path for path in (home / '.cargo', home / '.cache',
+                                               home / '.rustup', *installs)
+                              if path.exists() or path.is_symlink())
+              root_link_codes = {
+                  workspace.parent: 'STORAGE_LINK_ROOT_WORKSPACE',
+                  temporary: 'STORAGE_LINK_ROOT_TEMP',
+                  home: 'STORAGE_LINK_ROOT_HOME',
+                  scratch.parent: 'STORAGE_LINK_ROOT_SCRATCH_PARENT',
+                  local: 'STORAGE_LINK_ROOT_LOCAL',
+                  home / '.cargo': 'STORAGE_LINK_ROOT_CARGO',
+                  home / '.cache': 'STORAGE_LINK_ROOT_CACHE',
+                  home / '.rustup': 'STORAGE_LINK_ROOT_RUSTUP',
+              }
+              for path in fixed:
+                  if path.is_symlink():
+                      link_code = (root_link_codes[path] if path in root_link_codes else
+                                   'STORAGE_LINK_ROOT_INSTALL' if path in installs else
+                                   'STORAGE_LINK_ROOT_OTHER')
+                      if link_code not in root_link_failures:
+                          root_link_failures.append(link_code)
+                      record_failure(link_code)
+              checks['root_links'] = 'failed' if root_link_failures else 'passed'
+              non_link_fixed = tuple(p for p in dict.fromkeys(fixed) if not p.is_symlink())
+              anchors = ()
+              mounts = ()
+              def check_anchors():
+                  assert all(root_identity(path, scratch_parent=path == scratch.parent) == identity
+                             for path, identity in anchors)
+              def check_mounts():
+                  assert mount_topology(anchors, roots, mount_text()) == mounts
+              code = 'STORAGE_ROOT_IDENTITY'
+              try:
+                  anchors = tuple((path, root_identity(path, scratch_parent=path == scratch.parent))
+                                  for path in non_link_fixed)
+                  check_anchors()
+                  checks['root_identity_pre'] = 'passed'
+              except BaseException:
+                  checks['root_identity_pre'] = 'failed'
+                  record_failure('STORAGE_ROOT_IDENTITY')
+              code = 'STORAGE_MOUNT'
+              if checks['root_identity_pre'] == 'passed':
+                  try:
+                      mounts = mount_topology(anchors, roots, mount_text())
+                      check_mounts()
+                      checks['mount_pre'] = 'passed'
+                  except BaseException:
+                      checks['mount_pre'] = 'failed'
+                      record_failure('STORAGE_MOUNT')
+              toolchain_system_prefixes = (
+                  pathlib.Path('/usr/share/rust'),
+                  pathlib.Path('/usr/local/bin'),
+                  pathlib.Path('/usr/bin'),
+              )
+              cargo_root = home / '.cargo'
+              cargo_bin = cargo_root / 'bin'
+              user_toolchain_prefixes = (cargo_root, home / '.rustup')
+              def admitted_cargo_bin_symlink(root, path, info):
+                  if root != cargo_root or path.parent != cargo_bin:
+                      return None
+                  if info.st_uid not in (0, os.geteuid()) or info.st_dev not in free_by_device or info.st_blocks < 0:
+                      return None
+                  try:
+                      bin_info = cargo_bin.lstat()
+                  except OSError:
+                      return None
+                  if (not stat.S_ISDIR(bin_info.st_mode) or stat.S_ISLNK(bin_info.st_mode) or
+                          bin_info.st_uid != os.geteuid()):
+                      return None
+                  try:
+                      target = path.resolve(strict=True)
+                      tinfo = target.lstat()
+                  except (OSError, RuntimeError):
+                      return None
+                  if (not stat.S_ISREG(tinfo.st_mode) or tinfo.st_blocks < 0 or
+                          tinfo.st_uid not in (0, os.geteuid()) or (tinfo.st_mode & 0o022)):
+                      return None
+                  in_user = any(target != prefix and target.is_relative_to(prefix)
+                                for prefix in user_toolchain_prefixes)
+                  in_system = any(target != prefix and target.is_relative_to(prefix)
+                                  for prefix in toolchain_system_prefixes)
+                  if in_user and tinfo.st_dev in free_by_device:
+                      return target, tinfo
+                  if in_system and (tinfo.st_dev in free_by_device or tinfo.st_uid == 0):
+                      return target, tinfo
+                  return None
+              def classify_symlink(root, path, info):
+                  all_prefixes = user_toolchain_prefixes + toolchain_system_prefixes
+                  if root == cargo_root and path == cargo_bin:
+                      try:
+                          target = path.resolve(strict=True)
+                          tinfo = target.lstat()
+                      except (OSError, RuntimeError):
+                          return 'CARGO_BIN_LINK_DANGLING'
+                      if stat.S_ISDIR(tinfo.st_mode):
+                          if any(target == p or target.is_relative_to(p) for p in all_prefixes):
+                              return 'CARGO_BIN_DIR_LINK_TOOLCHAIN_PREFIX'
+                          return 'CARGO_BIN_DIR_LINK_OTHER'
+                  if info.st_uid not in (0, os.geteuid()):
+                      return 'LINK_OWNERSHIP_MISMATCH'
+                  try:
+                      target = path.resolve(strict=True)
+                      tinfo = target.lstat()
+                  except (OSError, RuntimeError):
+                      return 'LINK_DANGLING_OR_LOOP'
+                  if stat.S_ISDIR(tinfo.st_mode):
+                      if any(target == p or target.is_relative_to(p) for p in all_prefixes):
+                          return 'LINK_DIR_TARGET_TOOLCHAIN_PREFIX'
+                      return 'LINK_DIR_TARGET_OTHER'
+                  if stat.S_ISREG(tinfo.st_mode):
+                      if tinfo.st_uid not in (0, os.geteuid()) or (tinfo.st_mode & 0o022):
+                          return 'LINK_TARGET_WRITABLE_OR_FOREIGN'
+                      if target == root or target.is_relative_to(root):
+                          return 'LINK_FILE_TARGET_SAME_ROOT'
+                      if any(target != p and target.is_relative_to(p) for p in all_prefixes):
+                          return 'LINK_FILE_TARGET_TOOLCHAIN_PREFIX'
+                      return 'LINK_FILE_TARGET_OTHER_PREFIX'
+                  return 'LINK_SPECIAL_TARGET'
+              code = 'STORAGE_TREE'
+              seen = set()
+              baseline = entries = 0
+              deadline = time.monotonic() + 90
+              checks['bounds'] = 'passed'
+              tree_link_codes = {
+                  workspace.parent: 'STORAGE_LINK_TREE_WORKSPACE',
+                  temporary: 'STORAGE_LINK_TREE_TEMP',
+                  cargo_root: 'STORAGE_LINK_TREE_CARGO',
+                  home / '.cache': 'STORAGE_LINK_TREE_CACHE',
+                  home / '.rustup': 'STORAGE_LINK_TREE_RUSTUP',
+                  scratch: 'STORAGE_LINK_TREE_SCRATCH',
+                  scratch_lock: 'STORAGE_LINK_TREE_SCRATCH_LOCK',
+              }
+              root_specs = [
+                  ('tree_workspace', 'workspace', workspace.parent),
+                  ('tree_temp', 'temp', temporary),
+                  ('tree_cargo', 'cargo', cargo_root),
+                  ('tree_cache', 'cache', home / '.cache'),
+                  ('tree_rustup', 'rustup', home / '.rustup'),
+              ]
+              if installs:
+                  for inst in installs:
+                      root_specs.append(('tree_installs', 'installs', inst))
+              else:
+                  checks['tree_installs'] = 'skipped_missing'
+              root_specs.extend([
+                  ('tree_scratch', 'scratch', scratch),
+                  ('tree_scratch_lock', 'scratch_lock', scratch_lock),
+              ])
+              global_bound_exceeded = False
+              for key, label, root in root_specs:
+                  if global_bound_exceeded:
+                      continue
+                  link_code = tree_link_codes.get(root, 'STORAGE_LINK_TREE_INSTALL' if root in installs else 'STORAGE_LINK_TREE_OTHER')
+                  if root.is_symlink():
+                      root_code = (tree_link_codes[root] if root in (scratch, scratch_lock) else
+                                   root_link_codes.get(root, 'STORAGE_LINK_ROOT_INSTALL' if root in installs else 'STORAGE_LINK_ROOT_OTHER'))
+                      set_tree_status(key, root_code)
+                      add_finding(label, 'ROOT_SYMLINK')
+                      continue
+                  if not root.exists():
+                      if root in optional:
+                          if checks[key] == 'skipped_prereq':
+                              checks[key] = 'skipped_missing'
+                      else:
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_MISSING_REQUIRED_ROOT')
+                      continue
+                  if checks[key] == 'skipped_prereq':
+                      checks[key] = 'passed'
+                  pending = [(root, 0)]
+                  while pending:
+                      if time.monotonic() > deadline:
+                          checks['bounds'] = 'failed'
+                          set_tree_status(key, 'STORAGE_BOUNDS')
+                          add_finding(label, 'TREE_TIME_LIMIT')
+                          global_bound_exceeded = True
+                          break
+                      if entries >= 200000:
+                          checks['bounds'] = 'failed'
+                          set_tree_status(key, 'STORAGE_BOUNDS')
+                          add_finding(label, 'TREE_ENTRY_LIMIT')
+                          global_bound_exceeded = True
+                          break
+                      path, depth = pending.pop()
+                      if depth > 64:
+                          checks['bounds'] = 'failed'
+                          set_tree_status(key, 'STORAGE_BOUNDS')
+                          add_finding(label, 'TREE_DEPTH_LIMIT')
+                          continue
+                      try:
+                          info = path.lstat()
+                      except OSError:
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_SCANDIR_ERROR')
+                          continue
+                      if stat.S_ISLNK(info.st_mode):
+                          admitted = admitted_cargo_bin_symlink(root, path, info)
+                          if admitted is not None:
+                              link_id = (info.st_dev, info.st_ino)
+                              if link_id not in seen:
+                                  seen.add(link_id)
+                                  entries += 1
+                                  baseline += info.st_blocks * 512
+                                  if baseline >= 50_000_000_000:
+                                      checks['bounds'] = 'failed'
+                                      set_tree_status(key, 'STORAGE_BOUNDS')
+                                      add_finding(label, 'TREE_CEILING_LIMIT')
+                                      global_bound_exceeded = True
+                                      break
+                              _, tinfo = admitted
+                              if tinfo.st_dev in free_by_device:
+                                  target_id = (tinfo.st_dev, tinfo.st_ino)
+                                  if target_id not in seen:
+                                      if entries >= 200000:
+                                          checks['bounds'] = 'failed'
+                                          set_tree_status(key, 'STORAGE_BOUNDS')
+                                          add_finding(label, 'TREE_ENTRY_LIMIT')
+                                          global_bound_exceeded = True
+                                          break
+                                      seen.add(target_id)
+                                      entries += 1
+                                      baseline += tinfo.st_blocks * 512
+                                      if baseline >= 50_000_000_000:
+                                          checks['bounds'] = 'failed'
+                                          set_tree_status(key, 'STORAGE_BOUNDS')
+                                          add_finding(label, 'TREE_CEILING_LIMIT')
+                                          global_bound_exceeded = True
+                                          break
+                              continue
+                          set_tree_status(key, link_code)
+                          add_finding(label, classify_symlink(root, path, info))
+                          continue
+                      if info.st_uid != os.geteuid():
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_FOREIGN_UID')
+                          continue
+                      if info.st_dev not in free_by_device:
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_UNKNOWN_DEV')
+                          continue
+                      if info.st_blocks < 0:
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_INVALID_BLOCKS')
+                          continue
+                      if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_SPECIAL_MODE')
+                          continue
+                      if path in (scratch, scratch_lock) and not (
+                              stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700):
+                          set_tree_status(key, 'STORAGE_TREE')
+                          add_finding(label, 'TREE_SCRATCH_MODE')
+                          continue
+                      identity = (info.st_dev, info.st_ino)
+                      if identity in seen:
+                          continue
+                      seen.add(identity)
+                      entries += 1
+                      baseline += info.st_blocks * 512
+                      if baseline >= 50_000_000_000:
+                          checks['bounds'] = 'failed'
+                          set_tree_status(key, 'STORAGE_BOUNDS')
+                          add_finding(label, 'TREE_CEILING_LIMIT')
+                          global_bound_exceeded = True
+                          break
+                      if stat.S_ISDIR(info.st_mode):
+                          try:
+                              with os.scandir(path) as children:
+                                  pending.extend((pathlib.Path(child.path), depth + 1)
+                                                 for child in children)
+                          except OSError:
+                              set_tree_status(key, 'STORAGE_TREE')
+                              add_finding(label, 'TREE_SCANDIR_ERROR')
+              code = 'STORAGE_ROOT_IDENTITY'
+              if checks['root_identity_pre'] == 'passed':
+                  try:
+                      check_anchors()
+                      checks['root_identity_post'] = 'passed'
+                  except BaseException:
+                      checks['root_identity_post'] = 'failed'
+                      record_failure('STORAGE_ROOT_IDENTITY')
+              code = 'STORAGE_MOUNT'
+              if checks['mount_pre'] == 'passed':
+                  try:
+                      check_mounts()
+                      checks['mount_post'] = 'passed'
+                  except BaseException:
+                      checks['mount_post'] = 'failed'
+                      record_failure('STORAGE_MOUNT')
+              code = 'STORAGE_BUDGET'
+              if baseline + 10_000_000_000 < 40_000_000_000:
+                  checks['budget'] = 'passed'
+              else:
+                  checks['budget'] = 'failed'
+                  record_failure('STORAGE_BUDGET')
+              code = 'STORAGE_FREE'
+              if all(free > 10_000_000_000 for free in free_by_device.values()):
+                  checks['free_space'] = 'passed'
+              else:
+                  checks['free_space'] = 'failed'
+                  record_failure('STORAGE_FREE')
+              all_ok = (first_error is None and
+                        all(val in ('passed', 'skipped_missing')
+                            for key, val in checks.items() if key != 'env_write'))
+              if not all_ok:
+                  emit_failure(code)
+              code = 'STORAGE_ENV'
+              with open(e['GITHUB_ENV'], 'a', encoding='ascii') as output:
+                  output.write('HNSW_ADMISSION_BASELINE=' + str(baseline) + '\n')
+                  values = (tuple((str(path), identity) for path, identity in anchors), mounts)
+                  output.write('HNSW_ADMISSION_ROOT_SEAL=' +
+                               hashlib.sha256(repr(values).encode('utf-8')).hexdigest() + '\n')
+              checks['env_write'] = 'passed'
+              print(json.dumps({'case': 'HNSW_HOSTED_PRECHECK', 'outcome': 'passed',
+                                'checks': checks}, sort_keys=True))
+          except SystemExit:
+              raise
+          except BaseException:
+              if code == 'SOURCE':
+                  checks['source'] = 'failed'
+              elif code == 'STORAGE_WORKSPACE':
+                  checks['workspace'] = 'failed'
+              elif code == 'STORAGE_FS_STATS':
+                  checks['fs_stats'] = 'failed'
+              elif code == 'STORAGE_ENV':
+                  checks['env_write'] = 'failed'
+              emit_failure(code)
+          PY
+      - name: Fetch exact selected source without path output
+        timeout-minutes: 2
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          EXPECTED_HNSW_SOURCE_TREE: ${{ inputs.expected_hnsw_source_tree }}
+          GH_CHECKOUT_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, pathlib, re, stat, subprocess, sys, tempfile
+          try:
+              e = os.environ
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_CONTROLLER_SHA', ''))
+              assert re.fullmatch(r'[0-9a-f]{40}', e.get('EXPECTED_HNSW_SOURCE_TREE', ''))
+              ref = e.get('GITHUB_REF', '')
+              assert re.fullmatch(r'refs/heads/[A-Za-z0-9._/-]+', ref)
+              assert '..' not in ref and '//' not in ref and not ref.endswith('/')
+              workspace = pathlib.Path(e['GITHUB_WORKSPACE'])
+              assert (workspace.is_absolute() and workspace.is_dir() and
+                      not workspace.is_symlink() and workspace.resolve(strict=True) == workspace and
+                      workspace.stat().st_uid == os.geteuid() and not any(workspace.iterdir()))
+              workspace.chmod(0o700)
+              git_binary = pathlib.Path('/usr/bin/git')
+              git_info = git_binary.stat()
+              assert (stat.S_ISREG(git_info.st_mode) and git_info.st_uid == 0 and
+                      not git_info.st_mode & 0o022)
+              temporary = pathlib.Path(e['RUNNER_TEMP'])
+              assert (temporary.is_absolute() and temporary.is_dir() and
+                      not temporary.is_symlink() and temporary.resolve(strict=True) == temporary and
+                      temporary.stat().st_uid == os.geteuid())
+              credentials = base64.b64encode(('x-access-token:' + e['GH_CHECKOUT_TOKEN']).encode()).decode()
+              with tempfile.TemporaryDirectory(dir=temporary) as template:
+                  git_env = {'HOME': str(pathlib.Path.home()), 'PATH': '/usr/bin:/bin',
+                             'LANG': 'C', 'GIT_CONFIG_COUNT': '1',
+                             'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
+                             'GIT_TEMPLATE_DIR': template,
+                             'GIT_CONFIG_KEY_0': 'http.https://github.com/.extraheader',
+                             'GIT_CONFIG_VALUE_0': 'AUTHORIZATION: basic ' + credentials,
+                             'GIT_TERMINAL_PROMPT': '0', 'GIT_LFS_SKIP_SMUDGE': '1'}
+                  def git(*args, read=False):
+                      result = subprocess.run([str(git_binary), '-C', str(workspace), *args],
+                                              env=git_env, stdin=subprocess.DEVNULL,
+                                              stdout=subprocess.PIPE if read else subprocess.DEVNULL,
+                                              stderr=subprocess.DEVNULL, timeout=105)
+                      assert result.returncode == 0
+                      if read:
+                          assert len(result.stdout) <= 4096
+                          return result.stdout.decode('ascii').strip()
+                  git('init', '-q')
+                  git('fetch', '--no-tags', '--depth=1',
+                      'https://github.com/alopex-db/alopex.git', ref)
+                  assert git('rev-parse', 'FETCH_HEAD', read=True) == e['EXPECTED_CONTROLLER_SHA']
+                  git('checkout', '--detach', '-q', 'FETCH_HEAD')
+                  assert git('rev-parse', 'HEAD', read=True) == e['EXPECTED_CONTROLLER_SHA']
+                  assert git('rev-parse', 'HEAD^{tree}', read=True) == e['EXPECTED_HNSW_SOURCE_TREE']
+                  assert git('status', '--porcelain', '--untracked-files=all', read=True) == ''
+              print(json.dumps({'case': 'HNSW_HOSTED_CHECKOUT', 'outcome': 'passed'}))
+          except BaseException:
+              print(json.dumps({'case': 'HNSW_HOSTED_CHECKOUT', 'outcome': 'failed',
+                                'error_code': 'SOURCE'}))
+              sys.exit(1)
+          PY
+      - name: Authenticate, build, measure, and audit public finish
+        timeout-minutes: 135
+        env:
+          EXPECTED_CONTROLLER_SHA: ${{ inputs.expected_controller_sha }}
+          EXPECTED_HNSW_SOURCE_TREE: ${{ inputs.expected_hnsw_source_tree }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          HNSW_FINISH: ${{ inputs.hnsw_finish }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_KIND: github_hosted_ubuntu2404
+          GH_ACTIONS_READ_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/performance/issue681_hosted_fixture_measure.py
+      - name: Upload audited public JSON artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue681-public-${{ inputs.hnsw_finish }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue681-public-export/
+          if-no-files-found: error
+          retention-days: 14
   s04_socket_inventory:
-    if: ${{ !inputs.hnsw_release_admission_mode && inputs.s04_socket_inventory_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode && !inputs.public_native_build_mode }}
+    if: ${{ !inputs.hnsw_release_admission_mode && !inputs.hnsw_release_measure_mode && inputs.s04_socket_inventory_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_capture_mode && !inputs.public_native_build_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -885,7 +1509,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   inventory:
-    if: ${{ !inputs.hnsw_release_admission_mode && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.public_native_build_mode }}
+    if: ${{ !inputs.hnsw_release_admission_mode && !inputs.hnsw_release_measure_mode && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.public_native_build_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -908,7 +1532,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   qualification:
-    if: ${{ !inputs.hnsw_release_admission_mode && inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_final_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode)) && !inputs.public_native_build_mode }}
+    if: ${{ !inputs.hnsw_release_admission_mode && !inputs.hnsw_release_measure_mode && inputs.qualification_mode && !inputs.wal_cost_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && ((inputs.issue_number == '804' && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode && !inputs.s04_capture_mode) || (inputs.issue_number == '712' && !inputs.s04_capture_mode && ((inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_final_mode && !inputs.sql_four_case_mode && !inputs.sql_diagnostic_mode) || (inputs.sql_diagnostic_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode))) || (inputs.issue_number == '684' && inputs.s04_capture_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode)) && !inputs.public_native_build_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -1287,7 +1911,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   wal_cost_682:
-    if: ${{ !inputs.hnsw_release_admission_mode && inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.public_native_build_mode }}
+    if: ${{ !inputs.hnsw_release_admission_mode && !inputs.hnsw_release_measure_mode && inputs.wal_cost_mode && inputs.issue_number == '682' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.public_native_build_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
@@ -1497,7 +2121,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   s04_inspect:
-    if: ${{ !inputs.hnsw_release_admission_mode && inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.public_native_build_mode }}
+    if: ${{ !inputs.hnsw_release_admission_mode && !inputs.hnsw_release_measure_mode && inputs.s04_inspect_mode && inputs.issue_number == '684' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.public_native_build_mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -1626,7 +2250,7 @@ jobs:
           compression-level: 0
           retention-days: 7
   public_native_build:
-    if: ${{ inputs.public_native_build_mode && inputs.issue_number == '712' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.sql_final_mode && !inputs.hnsw_release_admission_mode }}
+    if: ${{ inputs.public_native_build_mode && inputs.issue_number == '712' && !inputs.qualification_mode && !inputs.sql_four_case_mode && !inputs.wal_cost_mode && !inputs.sql_diagnostic_mode && !inputs.s04_inspect_mode && !inputs.s04_socket_inventory_mode && !inputs.s04_capture_mode && !inputs.sql_final_mode && !inputs.hnsw_release_admission_mode && !inputs.hnsw_release_measure_mode }}
     runs-on: ${{ inputs.public_native_runner_label }}
     timeout-minutes: 210
     steps:

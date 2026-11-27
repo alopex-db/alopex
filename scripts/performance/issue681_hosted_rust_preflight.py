@@ -7,8 +7,10 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import stat
 import subprocess
+import time
 
 
 CASE = "HNSW_TOOLCHAIN"
@@ -93,6 +95,64 @@ def check_admission():
     package = _run(cargo, environment, "-V").strip()
     require(re.fullmatch(r"cargo [0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)? \([^)]+\)",
                          package))
+
+
+def _stop_process(process):
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=20)
+    else:
+        process.wait()
+
+
+def install_pinned_minimal(guard, log_path: Path, *, timeout: int = 300):
+    """Install pinned Rust VERSION --profile minimal under storage guard, then verify check()."""
+    require(callable(guard) and isinstance(log_path, Path) and
+            log_path.is_absolute() and not log_path.exists() and
+            not log_path.is_symlink() and type(timeout) is int and 1 <= timeout <= 600)
+    check_admission()
+    home = Path.home()
+    search = str(home / ".cargo/bin") + ":/usr/local/bin:/usr/bin:/bin"
+    rustup = _binary("rustup", search)
+    environment = {"HOME": str(home), "PATH": search, "LANG": "C",
+                   "RUSTUP_AUTO_INSTALL": "0"}
+    guard()
+    fd = os.open(log_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY |
+                 getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        info = os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
+                stat.S_IMODE(info.st_mode) == 0o600)
+        process = subprocess.Popen(
+            [str(rustup), "toolchain", "install", VERSION,
+             "--profile", "minimal", "--no-self-update"],
+            env=environment, stdin=subprocess.DEVNULL,
+            stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+        deadline = time.monotonic() + timeout
+        try:
+            while process.poll() is None:
+                require(time.monotonic() < deadline)
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+                guard()
+            require(process.returncode == 0)
+            guard()
+        except BaseException:
+            _stop_process(process)
+            raise
+    check()
 
 
 def run():

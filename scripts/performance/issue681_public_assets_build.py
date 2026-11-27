@@ -28,10 +28,11 @@ def require(value):
         raise ValueError("PUBLIC_BUILD")
 
 
-def _write(path, content):
+def _write(path, content, *, mode=0o600):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                 getattr(os, "O_NOFOLLOW", 0), 0o600)
+                 getattr(os, "O_NOFOLLOW", 0), mode)
     with os.fdopen(fd, "wb") as stream:
+        os.fchmod(stream.fileno(), mode)
         stream.write(content)
         stream.flush()
         os.fsync(stream.fileno())
@@ -129,7 +130,7 @@ def smoke(binary, mode, *, timeout=30):
 
 def _package(output, binary, library, example, *, source_commit, source_tree,
              parser_record_sha256, cargo_lock_sha256, rust_version,
-             private_roots, smoke_runner):
+             private_roots, smoke_runner, diag=None):
     require(isinstance(output, Path) and output.is_absolute() and
             not output.exists() and output.parent.is_dir() and
             output.parent.stat().st_uid == os.geteuid() and
@@ -142,12 +143,17 @@ def _package(output, binary, library, example, *, source_commit, source_tree,
                 path.stat().st_uid == os.geteuid())
     require(callable(smoke_runner))
     try:
-        results = {mode: smoke_runner(binary, mode)
-                   for mode in ("commit", "rollback")}
-        for mode, result in results.items():
+        results = {}
+        for mode in ("commit", "rollback"):
+            if isinstance(diag, dict):
+                diag["code"] = f"BUILD_SMOKE_{mode.upper()}"
+            result = smoke_runner(binary, mode)
             assets._smoke(result, mode)
+            results[mode] = result
     except Exception:
         raise ValueError("PUBLIC_BUILD") from None
+    if isinstance(diag, dict):
+        diag["code"] = "BUILD_PACKAGE_STAGE"
     source = {"commit": source_commit, "tree": source_tree,
               "profile": "release"}
     staged = Path(tempfile.mkdtemp(prefix=".hnsw-public-", dir=output.parent))
@@ -160,8 +166,9 @@ def _package(output, binary, library, example, *, source_commit, source_tree,
                                ("example", example)):
             target = destination / assets.FILES[role]
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            content = assets._read_file(original, 268_435_456)
-            _write(target, content)
+            content = assets._read_file(original, 268_435_456,
+                                        allow_hardlinks=(role == "binary"))
+            _write(target, content, mode=0o700 if role == "binary" else 0o600)
             copied[role] = _sha(content)
         receipt = {"schema": assets.RECEIPT_SCHEMA, "source": source,
                    "version": "0.8.17", "binary_sha256": copied["binary"],
@@ -205,10 +212,15 @@ def _package(output, binary, library, example, *, source_commit, source_tree,
             "schema": assets.RESULT_SCHEMA, "status": "passed",
             "source": source, "assets_digest": pin["assets_digest"],
             "performance_qualification": False}))
-        assets.verify(staged, pin, private_roots=private_roots)
+        verify_kwargs = {"private_roots": private_roots}
+        if diag is not None:
+            if isinstance(diag, dict):
+                diag["code"] = "BUILD_ASSETS_VERIFY"
+            verify_kwargs["diag"] = diag
+        assets.verify(staged, pin, **verify_kwargs)
         staged.rename(output)
         promoted = True
-        assets.verify(output, pin, private_roots=private_roots)
+        assets.verify(output, pin, **verify_kwargs)
         return pin
     except Exception:
         if promoted:

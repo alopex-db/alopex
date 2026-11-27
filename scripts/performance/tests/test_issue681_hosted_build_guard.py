@@ -63,6 +63,26 @@ class HostStorageGuardTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "^PUBLIC_CAPACITY$"):
                 check()
 
+    def test_min_interval_throttles_frequent_scans_and_force_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            device = root.stat().st_dev
+            calls = 0
+
+            def scanner():
+                nonlocal calls
+                calls += 1
+                return 20_000_000_000, {device: 20_000_000_000}
+
+            check = guard.HostStorageGuard(
+                root, scanner=scanner, min_interval_seconds=60.0)
+            self.assertEqual(calls, 1)
+            for _ in range(50):
+                check()
+            self.assertEqual(calls, 1)
+            check(force=True)
+            self.assertEqual(calls, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

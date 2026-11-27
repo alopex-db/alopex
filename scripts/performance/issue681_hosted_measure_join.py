@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 import stat
 import tempfile
+import time
 
 import issue681_hosted_acquire_all as acquire_all
 import issue681_hosted_build_join as build_join
@@ -16,6 +17,32 @@ import issue681_public_run as run
 import issue681_public_stage_audit as stage_audit
 
 ERROR = "PUBLIC_STAGE"
+MEASURE_DIAG_CODES = frozenset({
+    "MEASURE_ADMIT",
+    "MEASURE_ADMISSION_GATE",
+    "MEASURE_RUN_CASES",
+    "MEASURE_ASSETS",
+    "MEASURE_STAGE_ADMIT",
+    "MEASURE_CASE_ADMIT",
+    "MEASURE_CASE_RUN",
+    "MEASURE_CASE_COMPLETE",
+    "MEASURE_CASE_AUDIT",
+    "MEASURE_CASE_PUBLIC_INPUT",
+    "MEASURE_CASE_PUBLIC_CAPACITY",
+    "MEASURE_CASE_PUBLIC_PROTOCOL",
+    "MEASURE_CASE_PUBLIC_COUNTER",
+    "MEASURE_CASE_PUBLIC_TIMEOUT",
+    "MEASURE_CASE_PUBLIC_CHILD",
+    "MEASURE_TIME_BUDGET",
+    "MEASURE_TIME_BUDGET_PROJECTED",
+    "MEASURE_PAIR_WRITE",
+    "MEASURE_VERIFY_EXPORT",
+})
+
+
+def _set_diag(diag, code):
+    if isinstance(diag, dict) and code in MEASURE_DIAG_CODES:
+        diag["code"] = code
 
 
 def require(value):
@@ -80,11 +107,22 @@ def _guarded(guard, callback):
 
 
 def measure(acquired, built, workspace: Path, measure_parent: Path,
-            profile: dict, finish: str):
+            profile: dict, finish: str, *, on_substage=None, on_case=None,
+            budget_check=None, diag=None):
     """Return one audited public file, retaining private receipts separately."""
     owned = None
     identity = None
+    substage = "admit"
+    substage_started = time.monotonic()
+    measure_diag = diag if isinstance(diag, dict) else ({} if on_substage is not None else None)
+
+    def emit(name, status, detail=None):
+        if on_substage is not None:
+            elapsed_s = max(0, int(time.monotonic() - substage_started))
+            on_substage(name, status, detail, elapsed_s)
+
     try:
+        _set_diag(measure_diag, "MEASURE_ADMIT")
         _admit(acquired, built, workspace, measure_parent, finish)
         guard = acquired["guard"]
         guard()
@@ -102,9 +140,16 @@ def measure(acquired, built, workspace: Path, measure_parent: Path,
                  built["build_task"], owned)
         protected = tuple(str(path) for path in roots)
         guard()
+        substage = "admission_gate"
+        substage_started = time.monotonic()
+        _set_diag(measure_diag, "MEASURE_ADMISSION_GATE")
         with admission.Admission(profile, roots=roots, log_dir=admitted) as gate:
+            emit("admission_gate", "passed")
             guard()
-            result = run._run_mode_fixed(
+            substage = "cases"
+            substage_started = time.monotonic()
+            _set_diag(measure_diag, "MEASURE_RUN_CASES")
+            run_kwargs = dict(
                 pins=built["pair"]["pins"], asset_locations=assets,
                 work=work, export=export, finish=finish,
                 private_roots=protected, admission_dir=admitted,
@@ -113,7 +158,18 @@ def measure(acquired, built, workspace: Path, measure_parent: Path,
                 admit_case=_guarded(guard, gate.admit_case),
                 complete_case=_guarded(guard, gate.complete_case),
                 inventory_roots=roots, host_guard=guard)
+            if measure_diag is not None:
+                run_kwargs["diag"] = measure_diag
+            if on_case is not None:
+                run_kwargs["on_case"] = on_case
+            if budget_check is not None:
+                run_kwargs["budget_check"] = budget_check
+            result = run._run_mode_fixed(**run_kwargs)
+            emit("cases", "passed")
             guard()
+            substage = "verify_export"
+            substage_started = time.monotonic()
+            _set_diag(measure_diag, "MEASURE_VERIFY_EXPORT")
             locations = [
                 {"arm": arm, "rows": rows, "trial": trial,
                  "public": work / f"case-{position:02d}" / "public",
@@ -129,11 +185,20 @@ def measure(acquired, built, workspace: Path, measure_parent: Path,
 
             require(pair.verify(export, pins=built["pair"]["pins"],
                                 independent_audit=independent_audit) == result)
+            emit("verify_export", "passed")
             guard()
         guard()
+        if isinstance(measure_diag, dict):
+            measure_diag.pop("code", None)
         return {"public": export / "public.json", "measure_task": owned,
                 "finish": finish, "guard": guard}
     except BaseException:
+        detail = None
+        if isinstance(measure_diag, dict):
+            code = measure_diag.get("code")
+            if isinstance(code, str) and code in MEASURE_DIAG_CODES:
+                detail = code
+        emit(substage, "failed", detail or ERROR)
         if owned is not None:
             try:
                 if identity is None:

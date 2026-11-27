@@ -116,6 +116,46 @@ class HostedBuildJoinTest(unittest.TestCase):
                         join.build(acquired, workspace, build_parent)
                 pair.assert_not_called()
 
+    def test_locked_cargo_vendor_mode_passes_vendor_tree_sha256_to_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, build_parent, acquired = self.layout(Path(tmp))
+            tree_sha = "d" * 64
+            acquired["vendor"] = {
+                "cargo_home": acquired["cargo_home"],
+                "vendor_root": acquired["cargo_home"] / "vendor",
+                "vendor_tree_sha256": tree_sha,
+                "vendor_mode_sha256": "c" * 64,
+                "acquisition_mode": "cargo_vendor_locked",
+            }
+            seen = []
+
+            def pair(arms, output_parent, guard):
+                seen.append(arms)
+                for name in ("before", "candidate"):
+                    self.assertEqual(arms[name]["vendor_tree_sha256"], tree_sha)
+                return {"pins": {"before": {}, "candidate": {}},
+                        "staging": output_parent / "pair"}
+
+            with mock.patch.object(join.capacity, "HostStorageGuard", Guard), \
+                 mock.patch.object(join.build_pair, "build_pair", side_effect=pair):
+                join.build(acquired, workspace, build_parent)
+            self.assertEqual(len(seen), 1)
+
+    def test_build_substage_callback_reports_admit_failure_and_forwards_to_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace, build_parent, acquired = self.layout(Path(tmp))
+            events = []
+
+            def on_substage(name, status, detail, elapsed):
+                events.append((name, status, detail))
+
+            acquired["vendor"]["vendor_mode_sha256"] = "bad"
+            with mock.patch.object(join.capacity, "HostStorageGuard", Guard):
+                with self.assertRaisesRegex(ValueError, "^PUBLIC_BUILD$"):
+                    join.build(acquired, workspace, build_parent,
+                               on_substage=on_substage)
+            self.assertEqual(events, [("admit", "failed", "BUILD_ADMIT")])
+
 
 if __name__ == "__main__":
     unittest.main()

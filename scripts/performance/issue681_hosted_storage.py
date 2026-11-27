@@ -292,11 +292,17 @@ def snapshot(manifest: Manifest) -> tuple[int, dict[int, int]]:
                              Path(str(manifest.scratch) + ".lock")))
             continue
         pending = [(root, 0)]
+        optional_ephemeral = (manifest.scratch, Path(str(manifest.scratch) + ".lock"))
         while pending:
             require(time.monotonic() <= deadline and entries < MAX_ENTRIES)
             path, depth = pending.pop()
             require(depth <= 64)
-            info = path.lstat()
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                if depth == 0 and path not in optional_ephemeral:
+                    require(False)
+                continue
             if stat.S_ISLNK(info.st_mode):
                 admitted = admitted_cargo_bin_symlink(
                     root, path, info, manifest.home, pools)
@@ -319,7 +325,7 @@ def snapshot(manifest: Manifest) -> tuple[int, dict[int, int]]:
                 continue
             require(info.st_uid == os.geteuid() and
                     info.st_dev in pools and info.st_blocks >= 0)
-            if path in (manifest.scratch, Path(str(manifest.scratch) + ".lock")):
+            if path in optional_ephemeral:
                 require(stat.S_ISDIR(info.st_mode) and
                         stat.S_IMODE(info.st_mode) == 0o700)
             identity = (info.st_dev, info.st_ino)
@@ -331,9 +337,14 @@ def snapshot(manifest: Manifest) -> tuple[int, dict[int, int]]:
             total += info.st_blocks * 512
             require(total < CEILING_BYTES)
             if stat.S_ISDIR(info.st_mode):
-                with os.scandir(path) as children:
-                    pending.extend((Path(child.path), depth + 1)
-                                   for child in children)
+                try:
+                    with os.scandir(path) as children:
+                        pending.extend((Path(child.path), depth + 1)
+                                       for child in children)
+                except FileNotFoundError:
+                    if depth == 0 and path not in optional_ephemeral:
+                        require(False)
+                    continue
     _check_anchors(manifest)
     _check_mounts(manifest)
     return total, pools

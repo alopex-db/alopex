@@ -173,6 +173,60 @@ class RustPreflightTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     rust.check_admission()
 
+    def test_install_pinned_minimal_enforces_guard_and_strict_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            home = root / "home"
+            home.mkdir(mode=0o700)
+            binary = root / "bin"
+            binary.mkdir(mode=0o700)
+            rustup = binary / "rustup"
+            rustup.write_bytes(b"tool")
+            rustup.chmod(0o700)
+            events = []
+
+            def guard():
+                events.append("guard")
+
+            proc = mock.Mock(pid=4321, returncode=0)
+            proc.poll.side_effect = [None, 0]
+            proc.wait.return_value = 0
+            log_path = root / "rustup.private.log"
+            with mock.patch.object(rust, "check_admission",
+                                   side_effect=lambda: events.append("admit")), \
+                 mock.patch.object(rust, "check",
+                                   side_effect=lambda: events.append("strict")), \
+                 mock.patch.object(rust.Path, "home", return_value=home), \
+                 mock.patch.object(rust, "_binary", return_value=rustup), \
+                 mock.patch.object(rust.subprocess, "Popen", return_value=proc) as popen:
+                rust.install_pinned_minimal(guard, log_path)
+            self.assertEqual(popen.call_args.args[0],
+                             [str(rustup), "toolchain", "install", "1.90.0",
+                              "--profile", "minimal", "--no-self-update"])
+            self.assertEqual(events[0], "admit")
+            self.assertEqual(events[-1], "strict")
+            self.assertGreaterEqual(events.count("guard"), 3)
+            # Storage guard failure during install must reap the process group.
+            abort_proc = mock.Mock(pid=5678, returncode=None)
+            abort_proc.poll.return_value = None
+            abort_proc.wait.side_effect = [subprocess.TimeoutExpired("rustup", 1), None]
+            calls = 0
+
+            def failing_guard():
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise ValueError("STORAGE")
+
+            with mock.patch.object(rust, "check_admission"), \
+                 mock.patch.object(rust.Path, "home", return_value=home), \
+                 mock.patch.object(rust, "_binary", return_value=rustup), \
+                 mock.patch.object(rust.subprocess, "Popen", return_value=abort_proc), \
+                 mock.patch.object(rust.os, "killpg") as killpg:
+                with self.assertRaisesRegex(ValueError, "^STORAGE$"):
+                    rust.install_pinned_minimal(failing_guard, root / "abort.private.log")
+            killpg.assert_called_once_with(5678, rust.signal.SIGTERM)
+
 
 if __name__ == "__main__":
     unittest.main()
