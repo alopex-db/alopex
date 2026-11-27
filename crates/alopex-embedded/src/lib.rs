@@ -1105,7 +1105,7 @@ impl Database {
     /// Creates a fully in-memory clone of the current database.
     pub fn clone_to_memory(&self) -> Result<Self> {
         let snapshot = self.snapshot_pairs()?;
-        let cloned = Database::open_in_memory()?;
+        let mut cloned = Database::open_in_memory()?;
         if snapshot.is_empty() {
             return Ok(cloned);
         }
@@ -1115,6 +1115,7 @@ impl Database {
             txn.put(&key, &value)?;
         }
         txn.commit()?;
+        cloned.load_sql_catalog()?;
         Ok(cloned)
     }
 
