@@ -74,7 +74,6 @@ class CertificateTests(unittest.TestCase):
         for name, work in (('s04_socket_inventory', 'Collect selected socket metadata without connection'),
                            ('inventory', 'Collect encrypted read-only host inventory'),
                            ('qualification', 'Admit this runner before candidate acquisition'),
-                           ('wal_cost_682', 'Qualify, capture signed indexes, measure WAL, and check candidate closure'),
                            ('s04_inspect', 'Inspect selected Docker context read-only')):
             import re
             match = re.search(r'^  '+name+r':\n(.*?)(?=^  [a-z0-9_]+:|\Z)', source, re.M | re.S)
@@ -88,10 +87,11 @@ class CertificateTests(unittest.TestCase):
         recipient_step = qualification.split('      - name: Check evidence recipient validity before work\n', 1)[1].split('      - name:', 1)[0]
         self.assertIn('if: ${{ !inputs.sql_four_case_mode && !inputs.sql_final_mode }}', recipient_step)
         self.assertIn('run: python3 -B scripts/ops/check_evidence_certificate.py --minimum-seconds 86400', recipient_step)
-        self.assertIn('--certificate frozen-wal-controller/.github/ops/native-evidence-cert.pem', source)
-        self.assertIn('ref: fd34ca342617c247a9c711bcf597da8bbef3118f', source)
+        wal_cost = source.split('  wal_cost_682:\n', 1)[1].split('  s04_inspect:\n', 1)[0]
+        self.assertNotIn('native-evidence-cert.pem', wal_cost)
+        self.assertNotIn('private-evidence.cms', wal_cost)
+        self.assertNotIn('frozen-wal-controller', wal_cost)
         current_pin = reviewed_pin(OPS/'s04_inspect_seal.py')
-        self.assertEqual(source.count('--expected-sha256 '+current_pin), 1)
         self.assertNotEqual(current_pin, self.pin)
 
     def test_synthetic_rotation_and_archived_decryption(self):

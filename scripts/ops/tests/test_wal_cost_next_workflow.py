@@ -31,8 +31,7 @@ class WorkflowContract(unittest.TestCase):
         end = '          PY\n'
         blocks = [start + section.split(end, 1)[0] + end
                   for section in workflow.split(start)[1:]]
-        self.assertEqual(len(blocks), 2)
-        self.assertEqual(blocks[0], blocks[1])
+        self.assertEqual(len(blocks), 1)
         self.assertEqual(hashlib.sha256(blocks[0].encode()).hexdigest(),
                          '0e63e4211e117c2c87abfcbc6ad9b6597796b527adff7e7a4a84610515bfdc03')
         qualification = workflow.split('  qualification:\n', 1)[1].split('  wal_cost_682:\n', 1)[0]
@@ -40,29 +39,33 @@ class WorkflowContract(unittest.TestCase):
         self.assertIn("inputs.issue_number == '712'", qualification)
         self.assertIn('scripts/ops/four_case_job.py run', qualification)
         self.assertIn('wal_cost_mode:', workflow)
+        self.assertIn('expected_wal_cost_source_tree:', workflow)
         self.assertIn("inputs.issue_number == '682'", workflow)
         self.assertIn('!inputs.sql_four_case_mode && !inputs.sql_final_mode && !inputs.wal_cost_mode', workflow)
-        order = ['Bound checkout before source acquisition',
-                 'Stage current #804 controller in measured workspace',
-                 'Stage frozen #682 comparator in measured workspace',
-                 'Qualify, capture signed indexes, measure WAL, and check candidate closure',
-                 'Seal signed Ubuntu indexes', 'Seal wrapper evidence',
-                 'Preserve encrypted and allowlisted evidence']
-        cost_job = workflow.split('  wal_cost_682:\n', 1)[1]
+        cost_job = workflow.split('  wal_cost_682:\n', 1)[1].split('  s04_inspect:\n', 1)[0]
+        order = ['Gate selected source and storage before checkout',
+                 'Fetch exact selected source without path output',
+                 'Acquire, build, measure, and audit public WAL cost (stage-budget and early-stop)',
+                 'Upload audited public WAL cost JSON artifact']
         self.assertEqual([cost_job.index(value) for value in order],
                          sorted(cost_job.index(value) for value in order))
-        self.assertIn('timeout-minutes: 300', workflow)
-        self.assertIn('ref: fd34ca342617c247a9c711bcf597da8bbef3118f', workflow)
-        self.assertIn('--config-sha256 2d9222eaec0ea9bbc22874f8dcea17f8b09525fa6c8ba54b7d990ac9436f5c55', workflow)
-        self.assertIn('--expected-sha256 e8a39adb8f76185a87f805f6d083bdbe2bd7ea5d3bc05607f1a7a2e0deb8b775', workflow)
-        self.assertIn('path: qualification-controller', workflow)
-        self.assertIn('path: frozen-wal-controller', workflow)
-        self.assertIn('if-no-files-found: error', workflow)
-        self.assertNotIn('*.log\n', workflow.split('path: |')[-1])
-        upload = cost_job.split('name: Preserve encrypted and allowlisted evidence', 1)[1]
-        self.assertIn('wal-cost-wrapper-export/private-evidence.cms', upload)
-        self.assertNotIn('candidate.private.json', upload)
-        self.assertNotIn('closure-phase.private.json', upload)
+        self.assertIn('timeout-minutes: 90', cost_job)
+        self.assertIn('timeout-minutes: 75', cost_job)
+        self.assertIn('python3 -B scripts/performance/issue682_hosted_wal_cost.py', cost_job)
+        self.assertIn('path: ${{ runner.temp }}/issue682-public-export/', cost_job)
+        self.assertIn('if-no-files-found: error', cost_job)
+        for forbidden in ('private-evidence.cms', 'native-evidence-cert.pem',
+                          'docker', 'fd34ca342617c247a9c711bcf597da8bbef3118f',
+                          'exact-a415-wal-cost-input.private.json'):
+            self.assertNotIn(forbidden, cost_job)
+
+        # Also exercise the #682 hosted WAL cost unit/contract test suite in CI.
+        perf_tests = WORKFLOW.parents[2] / 'scripts/performance/tests/test_issue682_hosted_wal_cost.py'
+        res = subprocess.run(
+            [sys.executable, '-B', '-m', 'unittest', str(perf_tests)],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
 
     def test_sealer_exports_only_allowlisted_fields_and_encrypts_private(self):
         with tempfile.TemporaryDirectory() as directory:

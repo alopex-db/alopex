@@ -28,21 +28,26 @@ jobs:
           import os, pathlib, re
           text = pathlib.Path('candidate/.github/workflows/alopex-performance.yml').read_text()
           stage = text.split('      - name: Stage frozen #682 comparator in measured workspace\n')
-          assert len(stage) == 2
-          refs = re.findall(r'^          ref: ([0-9a-f]{40})$', stage[1].split('      - name:', 1)[0], re.M)
-          pins = re.findall(r'--certificate frozen-wal-controller/\.github/ops/native-evidence-cert.pem --expected-sha256 ([0-9a-f]{64})', text)
-          assert len(refs) == len(pins) == 1
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write(f'ref={refs[0]}\npin={pins[0]}\n')
+              if len(stage) == 1:
+                  pins = re.findall(r'--certificate frozen-wal-controller/\.github/ops/native-evidence-cert\.pem --expected-sha256 ([0-9a-f]{64})', text)
+                  assert not pins
+                  output.write('has_frozen=false\n')
+              else:
+                  assert len(stage) == 2
+                  refs = re.findall(r'^          ref: ([0-9a-f]{40})$', stage[1].split('      - name:', 1)[0], re.M)
+                  pins = re.findall(r'--certificate frozen-wal-controller/\.github/ops/native-evidence-cert\.pem --expected-sha256 ([0-9a-f]{64})', text)
+                  assert len(refs) == len(pins) == 1
+                  output.write(f'has_frozen=true\nref={refs[0]}\npin={pins[0]}\n')
           PY
       - uses: actions/checkout@v4
-        if: always() && steps.frozen.outcome == 'success'
+        if: always() && steps.frozen.outcome == 'success' && steps.frozen.outputs.has_frozen == 'true'
         with:
           ref: ${{ steps.frozen.outputs.ref }}
           path: frozen
           persist-credentials: false
       - name: Check frozen recipient renewal deadline
-        if: always() && steps.frozen.outcome == 'success'
+        if: always() && steps.frozen.outcome == 'success' && steps.frozen.outputs.has_frozen == 'true'
         env:
           RECIPIENT_PIN: ${{ steps.frozen.outputs.pin }}
         run: >-

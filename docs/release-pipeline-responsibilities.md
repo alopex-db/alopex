@@ -46,7 +46,7 @@ job's owner.
 | `alopex-performance.yml:hnsw_release_admission` | Extended Verification | #681 exact-source and storage admission before checkout, with a fixed result and no build or measurement |
 | `alopex-performance.yml:hnsw_release_measure` | Extended Verification | #681 precondition-vs-SUT separated hosted paired measurement (1k/10k/100k commit/rollback) with OIDC authentication and independently audited public JSON export |
 | `alopex-performance.yml:qualification` | Extended Verification | exact-SHA same-runner native acceptance; for #712, the pinned four-case server/client SQL matrix or paired stage diagnostic; for #684, selected Docker CLI offline wire capture after acceptance, each with separate encrypted evidence |
-| `alopex-performance.yml:wal_cost_682` | Extended Verification | exact-SHA same-runner native acceptance followed by frozen four-cell WAL cost comparison and encrypted evidence |
+| `alopex-performance.yml:wal_cost_682` | Extended Verification | #682 hosted release-profile four-cell Python KV/SQL WAL overflow cost comparison with stage budgets, early-stop, and independently audited public JSON export (no CMS or Docker) |
 | `alopex-performance.yml:s04_inspect` | Extended Verification | read-only selected-host Docker endpoint and CLI inspection for #684; encrypted private receipt, no container creation or performance qualification |
 | `alopex-performance.yml:s04_socket_inventory` | Extended Verification | read-only selected Unix socket path, ACL, context and daemon metadata for #684; encrypted private receipt before any S04 connection, without performance qualification |
 | `alopex-performance.yml:public_native_build` | Extended Verification | #712 exact-source native server and wheel build with verified public asset export |

@@ -143,9 +143,30 @@ class RotationTests(unittest.TestCase):
             result = subprocess.run([sys.executable, '-c', textwrap.dedent(code)], cwd=root,
                                     env=dict(os.environ, GITHUB_OUTPUT=str(output)), capture_output=True)
             self.assertEqual(result.returncode, 0, 'monitor selector failed')
-            self.assertEqual(len(output.read_text().splitlines()), 2)
-            self.assertIn('if: always() && steps.frozen.outcome', source)
+            self.assertEqual(output.read_text().splitlines(), ['has_frozen=false'])
+            self.assertIn("if: always() && steps.frozen.outcome == 'success' && steps.frozen.outputs.has_frozen == 'true'", source)
             self.assertEqual(source.count('--minimum-seconds 1209600'), 2)
+
+            # Synthetic fixture with frozen comparator still extracts ref & pin cleanly.
+            synth = root / 'synth'
+            wf = synth / 'candidate/.github/workflows/alopex-performance.yml'
+            wf.parent.mkdir(parents=True)
+            wf.write_text(
+                "      - name: Stage frozen #682 comparator in measured workspace\n"
+                "        with:\n"
+                "          ref: " + "a" * 40 + "\n"
+                "      - name: Check\n"
+                "        run: --certificate frozen-wal-controller/.github/ops/native-evidence-cert.pem --expected-sha256 " + "b" * 64 + "\n",
+                encoding='utf-8',
+            )
+            synth_out = synth / 'output'
+            res2 = subprocess.run([sys.executable, '-c', textwrap.dedent(code)], cwd=synth,
+                                  env=dict(os.environ, GITHUB_OUTPUT=str(synth_out)), capture_output=True)
+            self.assertEqual(res2.returncode, 0, 'synthetic frozen selector failed')
+            self.assertEqual(
+                synth_out.read_text().splitlines(),
+                ['has_frozen=true', 'ref=' + 'a' * 40, 'pin=' + 'b' * 64],
+            )
 
 
 if __name__ == '__main__':

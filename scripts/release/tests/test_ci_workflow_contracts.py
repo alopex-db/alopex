@@ -111,6 +111,42 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertEqual(steps[3]["uses"], "actions/upload-artifact@v4")
         self.assertEqual(steps[3]["with"]["path"], "${{ runner.temp }}/issue681-public-export/")
 
+    def test_issue682_wal_cost_is_public_allowlist_and_bounded(self) -> None:
+        workflow = self.workflow("alopex-performance.yml")
+        parsed = subprocess.run(
+            ["ruby", "-rjson", "-ryaml", "-e",
+             "puts JSON.generate(YAML.load_file(ARGV.fetch(0)))",
+             str(WORKFLOW_DIR / "alopex-performance.yml")],
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+        document = json.loads(parsed.stdout)
+        jobs = document["jobs"]
+        wal_job = jobs["wal_cost_682"]
+        self.assertIn("expected_wal_cost_source_tree", workflow)
+        self.assertEqual(wal_job["runs-on"], "ubuntu-24.04")
+        self.assertEqual(wal_job["timeout-minutes"], 90)
+        self.assertNotIn("id-token", wal_job.get("permissions", {}))
+        self.assertIn("inputs.wal_cost_mode", wal_job["if"])
+        self.assertIn("inputs.issue_number == '682'", wal_job["if"])
+        for name, job in jobs.items():
+            if name != "wal_cost_682":
+                self.assertIn("!inputs.wal_cost_mode", job["if"], name)
+        steps = wal_job["steps"]
+        self.assertEqual(len(steps), 4)
+        self.assertEqual(steps[0]["name"], "Gate selected source and storage before checkout")
+        self.assertIn("Fetch exact selected source", steps[1]["name"])
+        self.assertIn("GIT_CONFIG_NOSYSTEM", steps[1]["run"])
+        self.assertIn("HEAD^{tree}", steps[1]["run"])
+        self.assertEqual(steps[2]["timeout-minutes"], 75)
+        self.assertEqual(steps[2]["run"],
+                         "python3 -B scripts/performance/issue682_hosted_wal_cost.py")
+        self.assertEqual(steps[3]["if"], "success()")
+        self.assertEqual(steps[3]["uses"], "actions/upload-artifact@v4")
+        self.assertEqual(steps[3]["with"]["path"], "${{ runner.temp }}/issue682-public-export/")
+        serialized = json.dumps(wal_job)
+        for forbidden in ("private-evidence.cms", "native-evidence-cert.pem", "docker"):
+            self.assertNotIn(forbidden, serialized)
+
     def test_toolchain_identity_checks_drain_output_and_preserve_failures(self) -> None:
         composite = (WORKFLOW_DIR.parent / "actions/setup-nim-parser-toolchain/action.yml").read_text(
             encoding="utf-8"
