@@ -355,6 +355,27 @@ class Issue682HostedWalCostTests(unittest.TestCase):
             )
             self.assertNotEqual(bad.returncode, 0)
 
+    def test_all_imported_helper_attributes_exist(self):
+        """Prevent missing-attribute bugs on reused #681 hosted helper modules."""
+        import ast
+
+        source_path = PERF_DIR / "issue682_hosted_wal_cost.py"
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        imported = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    name = alias.asname or alias.name
+                    if name != "os":
+                        imported[name] = getattr(mod, name)
+        missing = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                alias = node.value.id
+                if alias in imported and not hasattr(imported[alias], node.attr):
+                    missing.append(f"{alias}.{node.attr}")
+        self.assertEqual(missing, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -194,6 +194,12 @@ DIAG_CODES = frozenset({
     "AUDIT_PUBLIC",
     "TIME_BUDGET",
     "STORAGE_CAPACITY",
+    "STORAGE",
+    "PUBLIC_CAPACITY",
+    "TOOLCHAIN",
+    "PUBLIC_PARSER_INPUT",
+    "PUBLIC_VENDOR",
+    "PUBLIC_ACQUIRE",
     ERROR,
 })
 
@@ -1199,9 +1205,11 @@ def run_hosted_job() -> int:
         "export": "pending",
     }
     current_stage = "preflight"
+    current_substage = "env"
     task_parent = home_parent = None
     try:
         # Stage 1: preflight
+        current_substage = "env"
         require(
             env.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
             and env.get("GITHUB_REPOSITORY") == REPOSITORY_SLUG
@@ -1217,15 +1225,20 @@ def run_hosted_job() -> int:
         home = Path.home().resolve(strict=True)
         task_parent = Path(tempfile.mkdtemp(prefix="issue682-task-", dir=runner_temp))
         os.chmod(task_parent, 0o700)
-        home_parent = Path(tempfile.mkdtemp(prefix="issue682-home-", dir=home))
+        home_parent = Path(tempfile.mkdtemp(prefix=".alopex-682-home-", dir=home))
         os.chmod(home_parent, 0o700)
 
+        current_substage = "manifest"
         manifest = scoped_storage.make_manifest(
             workspace, runner_temp, task_parent=task_parent, home_parent=home_parent
         )
+        current_substage = "storage_guard"
         guard = capacity.HostStorageGuard(workspace, manifest=manifest)
         guard(force=True)
-        rust_preflight.preflight()
+        current_substage = "rust_install"
+        rust_preflight.install_pinned_minimal(
+            guard, task_parent / "rustup-install.private.log"
+        )
         stages["preflight"] = "passed"
         _emit({"case": CASE, "stage": "preflight", "status": "passed"})
 
@@ -1249,17 +1262,25 @@ def run_hosted_job() -> int:
         cargo_home = home_parent / "cargo"
         cargo_home.mkdir(mode=0o700)
 
+        current_substage = "sources"
         sources, git_env = _acquire_pair_sources(dirs["sources"], guard)
         _emit({"case": CASE, "stage": "acquire", "substage": "sources", "status": "passed"})
 
+        current_substage = "nim_fetch"
         nim_archive.fetch_archive(dirs["nim"], guard)
+        current_substage = "nim_extract"
         extracted = nim_archive.extract_archive(dirs["nim"], guard)
+        current_substage = "parser_tools"
         try:
             tools = parser_tools.verify_tools(extracted, guard)
         except ValueError:
+            current_substage = "nimble_install"
             parser_tools.install_pinned_nimble(extracted, guard)
+            current_substage = "parser_tools"
             tools = parser_tools.verify_tools(extracted, guard)
+        current_substage = "parser_seed"
         seed = parser_seed.acquire_seed(dirs["seed"], guard, git_env)
+        current_substage = "parser_build"
         parser = _build_parser_for_candidate(
             sources["candidate"],
             tools["nim"],
@@ -1272,6 +1293,7 @@ def run_hosted_job() -> int:
         )
         _emit({"case": CASE, "stage": "acquire", "substage": "parser", "status": "passed"})
 
+        current_substage = "cargo_vendor"
         remaining_acquire = max(
             60, int(ACQUIRE_BUDGET_SECONDS - (time.monotonic() - acquire_started))
         )
@@ -1281,6 +1303,7 @@ def run_hosted_job() -> int:
         for reclaim in ("nim", "seed", "parser-build"):
             shutil.rmtree(dirs[reclaim], ignore_errors=True)
         guard(force=True)
+        current_substage = "checkpoint"
         check_checkpoint_budget(
             time.monotonic() - job_started, 10 * 60
         )
@@ -1298,6 +1321,7 @@ def run_hosted_job() -> int:
         packages: dict[str, Path] = {}
         pins: dict[str, dict[str, object]] = {}
         for arm in ARMS:
+            current_substage = f"build_{arm}"
             arm_started = time.monotonic()
             check_checkpoint_budget(time.monotonic() - job_started, 5 * 60)
             pkg_root, pin_entry = _build_and_stage_arm(
@@ -1326,6 +1350,7 @@ def run_hosted_job() -> int:
             shutil.rmtree(dirs[reclaim], ignore_errors=True)
         shutil.rmtree(cargo_home, ignore_errors=True)
         guard(force=True)
+        current_substage = "checkpoint"
         check_checkpoint_budget(time.monotonic() - job_started, 3 * 60)
         stages["build"] = "passed"
         _emit({
@@ -1337,6 +1362,7 @@ def run_hosted_job() -> int:
 
         # Stage 4: measure (48 writers + 96 readers with per-round checkpoint)
         current_stage = "measure"
+        current_substage = "matrix"
         measure_started = time.monotonic()
         hashes = {arm: str(pins[arm]["native_sha256"]) for arm in ARMS}
         rows = _run_measurement_matrix(
@@ -1356,6 +1382,7 @@ def run_hosted_job() -> int:
                 "job_elapsed_s": int(j_s),
             }),
         )
+        current_substage = "summarize"
         summary = summarize(rows)
         stages["measure"] = "passed"
         _emit({
@@ -1367,6 +1394,7 @@ def run_hosted_job() -> int:
 
         # Stage 5: independent public audit
         current_stage = "audit"
+        current_substage = "audit_public"
         report = {
             "schema": SCHEMA,
             "status": "measured",
@@ -1386,6 +1414,7 @@ def run_hosted_job() -> int:
 
         # Stage 6: export allowlisted public JSON only
         current_stage = "export"
+        current_substage = "write_export"
         export_dir = runner_temp / "issue682-public-export"
         if export_dir.exists():
             shutil.rmtree(export_dir)
@@ -1412,16 +1441,19 @@ def run_hosted_job() -> int:
             "outcome": "failed",
             "error_code": code,
             "failed_stage": current_stage,
+            "failed_substage": current_substage,
             "stages": stages,
         })
         return 1
-    except BaseException:
+    except BaseException as exc:
         stages[current_stage] = "failed"
         _emit({
             "case": CASE,
             "outcome": "failed",
             "error_code": ERROR,
+            "error_type": type(exc).__name__,
             "failed_stage": current_stage,
+            "failed_substage": current_substage,
             "stages": stages,
         })
         return 1
