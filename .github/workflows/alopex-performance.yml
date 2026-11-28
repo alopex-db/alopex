@@ -46,6 +46,9 @@ on:
         required: false
         type: boolean
         default: false
+      wal_quick:
+        description: Optional WAL diagnostic as shape:ratio or shape:ratio:compare
+        type: string
       sql_diagnostic_mode:
         description: Run separate paired #712 SQL stage diagnostic after same-job 1951 qualification
         required: false
@@ -2061,9 +2064,21 @@ jobs:
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           RUNNER_KIND: github_hosted_ubuntu2404
-        run: python3 -B scripts/performance/issue682_hosted_wal_cost.py
+          WAL_QUICK: ${{ inputs.wal_quick }}
+        run: |
+          args=()
+          if [[ -n "$WAL_QUICK" ]]; then
+            if [[ ! "$WAL_QUICK" =~ ^((kv|sql)-(16|2048)):([0-9]+([.][0-9]+)?)(:compare)?$ ]]; then
+              exit 2
+            fi
+            args+=(--quick "${BASH_REMATCH[1]}" --regression-ratio "${BASH_REMATCH[4]}")
+            if [[ "${BASH_REMATCH[6]}" == ":compare" ]]; then
+              args+=(--compare-full)
+            fi
+          fi
+          python3 -B scripts/performance/issue682_hosted_wal_cost.py "${args[@]}"
       - name: Upload audited public WAL cost JSON artifact
-        if: success()
+        if: ${{ success() && inputs.wal_quick == '' }}
         uses: actions/upload-artifact@v4
         with:
           name: issue682-wal-cost-public-${{ github.run_id }}

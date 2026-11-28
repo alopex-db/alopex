@@ -1116,16 +1116,19 @@ def _run_measurement_matrix(
     guard: capacity.HostStorageGuard,
     job_started: float,
     on_round=None,
+    *,
+    shapes=SHAPES,
+    rounds=ROUNDS,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     script_path = str(Path(__file__).resolve())
     round_durations: list[float] = []
 
-    for round_id in range(ROUNDS):
+    for round_id in range(rounds):
         round_started = time.monotonic()
         order = ("before", "candidate") if round_id % 2 == 0 else ("candidate", "before")
         for engine in order:
-            for surface, size in SHAPES:
+            for surface, size in shapes:
                 fixture = Path(
                     tempfile.mkdtemp(
                         prefix=f"r{round_id}-{engine}-{surface}-{size}-",
@@ -1206,9 +1209,9 @@ def _run_measurement_matrix(
         round_elapsed = time.monotonic() - round_started
         round_durations.append(round_elapsed)
         job_elapsed = time.monotonic() - job_started
-        remaining_rounds = ROUNDS - 1 - round_id
+        remaining_rounds = rounds - 1 - round_id
         if on_round is not None:
-            on_round(round_id, ROUNDS, round_elapsed, job_elapsed)
+            on_round(round_id, rounds, round_elapsed, job_elapsed)
         if remaining_rounds > 0:
             projected = max(round_durations) * remaining_rounds
             check_checkpoint_budget(job_elapsed, projected)
@@ -1220,7 +1223,24 @@ def _emit(payload: dict[str, object]) -> None:
     print(json.dumps(payload, sort_keys=True), flush=True)
 
 
-def run_hosted_job() -> int:
+def _quick_outcome(rows: list[dict[str, object]], limit: float) -> str:
+    commits = {(row["engine"], row["round"]): row["commit_ns"] for row in rows}
+    slower = 0
+    for round_id in range(1, 4):
+        before = commits["before", round_id]
+        candidate = commits["candidate", round_id]
+        require(before > 0 and candidate > 0, "MEASURE_VERIFY")
+        slower += candidate / before >= limit
+    if slower == 3:
+        return "regression"
+    return "inconclusive" if slower else "passed"
+
+
+def run_hosted_job(
+    quick_shape: tuple[str, int] | None = None,
+    regression_ratio: float | None = None,
+    compare_full: bool = False,
+) -> int:
     env = os.environ
     job_started = time.monotonic()
     stages = {
@@ -1392,6 +1412,33 @@ def run_hosted_job() -> int:
         current_substage = "matrix"
         measure_started = time.monotonic()
         hashes = {arm: str(pins[arm]["native_sha256"]) for arm in ARMS}
+        if quick_shape is not None:
+            quick_rows = _run_measurement_matrix(
+                packages, hashes, dirs["work"], guard, job_started,
+                shapes=(quick_shape,), rounds=4,
+            )
+            require(regression_ratio is not None, "MEASURE_VERIFY")
+            outcome = _quick_outcome(quick_rows, regression_ratio)
+            _emit({
+                "case": CASE,
+                "stage": "quick",
+                "outcome": outcome,
+                "setup_seconds": round(measure_started - job_started, 3),
+                "measure_seconds": round(time.monotonic() - measure_started, 3),
+            })
+            if compare_full:
+                full_started = time.monotonic()
+                full_rows = _run_measurement_matrix(
+                    packages, hashes, dirs["work"], guard, job_started,
+                )
+                summarize(full_rows)
+                _emit({
+                    "case": CASE,
+                    "stage": "compare_full",
+                    "measure_seconds": round(time.monotonic() - full_started, 3),
+                })
+            return {"passed": 0, "regression": 1, "inconclusive": 2}[outcome]
+
         rows = _run_measurement_matrix(
             packages,
             hashes,
@@ -1497,7 +1544,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--surface", choices=("kv", "sql"))
     parser.add_argument("--size", type=int, choices=(16, 2048))
     parser.add_argument("--native-sha")
+    parser.add_argument("--quick", choices=tuple(f"{s}-{n}" for s, n in SHAPES))
+    parser.add_argument("--regression-ratio", type=float)
+    parser.add_argument("--compare-full", action="store_true")
     args = parser.parse_args(argv)
+    if args.quick:
+        if args.child or not (args.regression_ratio is not None and
+                              1 < args.regression_ratio < float("inf")):
+            parser.error("--quick requires a finite --regression-ratio above 1")
+        surface, size = args.quick.split("-")
+        return run_hosted_job((surface, int(size)), args.regression_ratio, args.compare_full)
+    if args.regression_ratio is not None or args.compare_full:
+        parser.error("--regression-ratio and --compare-full require --quick")
     if args.child:
         require(
             args.fixture is not None

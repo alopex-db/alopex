@@ -138,9 +138,15 @@ class CiWorkflowContractTests(unittest.TestCase):
         self.assertIn("GIT_CONFIG_NOSYSTEM", steps[1]["run"])
         self.assertIn("HEAD^{tree}", steps[1]["run"])
         self.assertEqual(steps[2]["timeout-minutes"], 75)
-        self.assertEqual(steps[2]["run"],
-                         "python3 -B scripts/performance/issue682_hosted_wal_cost.py")
-        self.assertEqual(steps[3]["if"], "success()")
+        self.assertIn(
+            'python3 -B scripts/performance/issue682_hosted_wal_cost.py "${args[@]}"',
+            steps[2]["run"],
+        )
+        self.assertIn(
+            'args+=(--quick "${BASH_REMATCH[1]}" --regression-ratio "${BASH_REMATCH[4]}")',
+            steps[2]["run"],
+        )
+        self.assertEqual(steps[3]["if"], "${{ success() && inputs.wal_quick == '' }}")
         self.assertEqual(steps[3]["uses"], "actions/upload-artifact@v4")
         self.assertEqual(steps[3]["with"]["path"], "${{ runner.temp }}/issue682-public-export/")
         serialized = json.dumps(wal_job)

@@ -399,5 +399,22 @@ class Issue682HostedWalCostTests(unittest.TestCase):
             self.assertIn(flag, help_run.stdout)
 
 
+
+
+
+class QuickOutcomeTests(unittest.TestCase):
+    def test_threshold_and_mixed_pairs(self):
+        rows = [
+            row for row in _sample_rows(after_commit_ns=125)
+            if (row["surface"], row["value_bytes"]) == mod.SHAPES[0]
+            and row["round"] < 4
+        ]
+        self.assertEqual(mod._quick_outcome(rows, 1.25), "regression")
+        self.assertEqual(mod._quick_outcome(rows, 1.26), "passed")
+        next(row for row in rows if row["engine"] == "candidate"
+             and row["round"] == 1)["commit_ns"] = 100
+        self.assertEqual(mod._quick_outcome(rows, 1.25), "inconclusive")
+
+
 if __name__ == "__main__":
     unittest.main()
