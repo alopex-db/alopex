@@ -122,7 +122,7 @@ CHILD_TIMEOUT_SECONDS = 30
 SOFT_BUDGET_SECONDS = 65 * 60
 CLEANUP_MARGIN_SECONDS = 5 * 60
 ACQUIRE_BUDGET_SECONDS = 20 * 60
-BUILD_ARM_TIMEOUT_SECONDS = 20 * 60
+BUILD_ARM_TIMEOUT_SECONDS = 25 * 60
 MAX_PUBLIC_BYTES = 262_144
 
 REPORT_KEYS = frozenset({
@@ -185,6 +185,9 @@ DIAG_CODES = frozenset({
     "ACQUIRE_PARSER_STAGE",
     "ACQUIRE_CARGO_VENDOR",
     "BUILD_CARGO",
+    "BUILD_CARGO_EXIT",
+    "BUILD_CARGO_TIMEOUT",
+    "BUILD_CARGO_CAPACITY",
     "BUILD_ELF",
     "BUILD_STAGE",
     "BUILD_SMOKE",
@@ -717,6 +720,23 @@ def _acquire_pair_sources(
     return sources, git_env
 
 
+def _parser_build_argv(
+    candidate_source: Path, archive_dir: Path, output_lib: Path
+) -> list[str]:
+    return [
+        str(BASH),
+        str(candidate_source / "scripts/build-nim-parser.sh"),
+        "--backend",
+        "host",
+        "--target",
+        TARGET,
+        "--archive-dir",
+        str(archive_dir),
+        "--output",
+        str(output_lib),
+    ]
+
+
 def _build_parser_for_candidate(
     candidate_source: Path,
     nim: Path,
@@ -728,8 +748,11 @@ def _build_parser_for_candidate(
     git_env: dict[str, str],
 ) -> dict[str, object]:
     require(not PARSER_SCRATCH.exists(), "ACQUIRE_PARSER_BUILD")
+    output_dir = build_parent / "lib"
+    output_dir.mkdir(mode=0o700)
     archive_dir = build_parent / "archive"
     archive_dir.mkdir(mode=0o700)
+    output_lib = output_dir / "libalopex_sql_parser.so"
     env = {
         "PATH": f"{nim.parent}:{nimble.parent}:/usr/bin:/bin",
         "HOME": str(build_parent),
@@ -748,16 +771,7 @@ def _build_parser_for_candidate(
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
     }
-    argv = [
-        str(BASH),
-        "scripts/build-nim-parser.sh",
-        "--backend",
-        "native",
-        "--target",
-        TARGET,
-        "--archive-dir",
-        str(archive_dir),
-    ]
+    argv = _parser_build_argv(candidate_source, archive_dir, output_lib)
     log_path = build_parent / "parser-build.private.log"
     fd = os.open(
         log_path,
@@ -827,6 +841,8 @@ def _stage_cargo_vendor(
             "RUSTUP_TOOLCHAIN": RUST_VERSION,
             "RUSTUP_AUTO_INSTALL": "0",
         }
+        if "RUSTUP_HOME" in os.environ:
+            env["RUSTUP_HOME"] = os.environ["RUSTUP_HOME"]
         argv = [
             str(cargo_bin),
             "vendor",
@@ -952,6 +968,8 @@ def _build_and_stage_arm(
             f"-ffile-prefix-map={cargo_home}=/alopex-cargo"
         ),
     }
+    if "RUSTUP_HOME" in os.environ:
+        env["RUSTUP_HOME"] = os.environ["RUSTUP_HOME"]
     argv = [
         str(cargo_bin),
         "build",
@@ -970,7 +988,10 @@ def _build_and_stage_arm(
     )
     deadline = time.monotonic() + timeout_s
     with os.fdopen(fd, "wb") as log:
-        guard(force=True)
+        try:
+            guard(force=True)
+        except BaseException:
+            raise ValueError("BUILD_CARGO_CAPACITY") from None
         process = subprocess.Popen(
             argv,
             cwd=arm_source,
@@ -982,13 +1003,16 @@ def _build_and_stage_arm(
         )
         try:
             while process.poll() is None:
-                require(time.monotonic() < deadline, "TIME_BUDGET")
+                require(time.monotonic() < deadline, "BUILD_CARGO_TIMEOUT")
                 try:
                     process.wait(timeout=1)
                 except subprocess.TimeoutExpired:
                     pass
-                guard()
-            require(process.returncode == 0, "BUILD_CARGO")
+                try:
+                    guard()
+                except BaseException:
+                    raise ValueError("BUILD_CARGO_CAPACITY") from None
+            require(process.returncode == 0, "BUILD_CARGO_EXIT")
         except BaseException:
             _stop_group(process)
             raise
@@ -1043,6 +1067,9 @@ def _build_and_stage_arm(
             "opts = WalOverflowOptions(**json.loads(sys.argv[3])); "
             "db = Database.open(sys.argv[2], wal_overflow=opts); "
             "tx = db.begin(TxnMode.READ_WRITE); tx.put(b'k', b'v'); tx.commit(); "
+            "db.execute_sql('CREATE TABLE t (id INT PRIMARY KEY, v TEXT)'); "
+            "db.execute_sql(\"INSERT INTO t VALUES (1, 'ok')\"); "
+            "assert db.execute_sql('SELECT id, v FROM t') == [{'id': 1, 'v': 'ok'}]; "
             "stats = db.wal_overflow_stats(); db.close(); "
             "assert isinstance(stats, dict) and stats.get('gc_failures') == 0; "
             "print('ok')"

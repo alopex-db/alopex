@@ -376,6 +376,28 @@ class Issue682HostedWalCostTests(unittest.TestCase):
                     missing.append(f"{alias}.{node.attr}")
         self.assertEqual(missing, [])
 
+    def test_parser_build_argv_matches_real_build_nim_parser_cli(self):
+        """Verify parser build flags against the real build-nim-parser.sh script."""
+        repo_root = PERF_DIR.parents[1]
+        script = repo_root / "scripts/build-nim-parser.sh"
+        help_run = subprocess.run(
+            ["bash", str(script), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        argv = mod._parser_build_argv(
+            repo_root, Path("/tmp/archive"), Path("/tmp/lib/libalopex_sql_parser.so")
+        )
+        self.assertIn("--backend", argv)
+        backend_val = argv[argv.index("--backend") + 1]
+        self.assertEqual(backend_val, "host")
+        self.assertIn("--backend auto|host|docker", help_run.stdout)
+        for flag in ("--target", "--archive-dir", "--output"):
+            self.assertIn(flag, argv)
+            self.assertIn(flag, help_run.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
